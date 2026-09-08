@@ -1,0 +1,4 @@
+.pio/
+include/generated/
+*.bak.*
+.vscode/
