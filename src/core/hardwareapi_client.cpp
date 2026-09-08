@@ -10,6 +10,7 @@
 #include "http_tls.h"
 #include "miner_key.h"
 #include "ota_client.h"
+#include "provisioning_transport.h"
 #include "trigger_hooks.h"
 #include "wifi_station.h"
 
@@ -29,7 +30,12 @@ namespace fry_hwapi {
 
 namespace {
 
-unsigned long s_lastHeartbeatMs = 0;
+// Updated unconditionally BEFORE every registration attempt (success or failure) so a rejected
+// or failed call backs off to INSTALL_HEARTBEAT_MS just like a successful heartbeat does — the
+// old design only updated this on success, which meant a persistent failure (e.g. the server
+// rejecting our miner code with a 4xx) retried on literally every tick() call instead of backing
+// off, since `!s_registered` alone was enough to trigger another attempt.
+unsigned long s_lastRegisterAttemptMs = 0;
 unsigned long s_lastPocMs = 0;
 bool s_registered = false;
 bool s_ntpSynced = false;
@@ -111,15 +117,28 @@ bool registerInstallation() {
       Serial.printf("api: registered install=%s token=%s\n", installId,
                     strlen(token) > 0 ? "present" : "none");
       fry_ota::confirmGood();  // registration succeeding is this firmware's "proved itself good"
+      fry_provisioning::notifyApiOk();
       return true;
     }
     http.end();
 
-    if (code >= 400 && code < 500) return false;  // never retry on 4xx
-    if (attempt < 3) delay(backoffMs[attempt]);    // transport error or 5xx — retry
+    if (code >= 400 && code < 500) {
+      // Terminal — never retry a 4xx (e.g. the server's miner_code enum rejecting FRY_MINER_CODE,
+      // or a 401 because our bootstrap token is only valid for FEM- keys). This does NOT touch
+      // fry_config's device token: there is no per-device token to recover here, only the
+      // bootstrap token, and a 4xx on that is a server-policy rejection, not an expired
+      // credential — nothing to "recover" by clearing anything.
+      Serial.printf(
+          "api: register rejected http=%d - server does not accept this miner code yet\n", code);
+      fry_provisioning::notifyApiFail();
+      return false;
+    }
+    if (attempt < 3) delay(backoffMs[attempt]);  // transport error or 5xx — retry
   }
 
-  Serial.printf("api: registration failed install=%s\n", installId);
+  Serial.printf("api: registration failed install=%s (transport error or 5xx, retries exhausted)\n",
+                installId);
+  fry_provisioning::notifyApiFail();
   return false;
 }
 
@@ -182,7 +201,14 @@ bool getVersions(String& outJson) {
   addAuthHeader(http);
   int code = http.GET();
   bool ok = code > 0 && code < 300;
-  if (ok) outJson = http.getString();
+  if (ok) {
+    outJson = http.getString();
+  } else if (code >= 400 && code < 500) {
+    // Terminal, same as registration — e.g. a 422 because FRY_MINER_CODE isn't in the server's
+    // accepted enum yet. Not retried here; the caller's own cadence decides when to try again.
+    Serial.printf("api: version check rejected http=%d - server does not accept this miner code yet\n",
+                  code);
+  }
   http.end();
   return ok;
 }
@@ -194,10 +220,19 @@ void tick() {
   fry_ota::tick();  // drives OTA_CHECK_MS cadence; composed here since only one strong
                      // definition of fry_trigger_report_loop_tick can exist (see trigger_hooks.h)
 
-  if (!s_registered || (now - s_lastHeartbeatMs) >= INSTALL_HEARTBEAT_MS) {
+  // Gated purely by elapsed time since the LAST ATTEMPT (success or failure) — never by
+  // `!s_registered` alone. Registration is one optional subsystem, not a boot gate: WiFi, the
+  // VPN/relay endpoint, the health loop and OTA all keep running whether or not this succeeds.
+  // A rejected (4xx) or failed (5xx/transport, retries exhausted) attempt backs off to the same
+  // INSTALL_HEARTBEAT_MS interval as a normal heartbeat and is retried indefinitely — so if the
+  // server later starts accepting this miner code, the device recovers on its own without a
+  // reflash — but it never tight-loops.
+  bool dueForAttempt =
+      (s_lastRegisterAttemptMs == 0) || (now - s_lastRegisterAttemptMs) >= INSTALL_HEARTBEAT_MS;
+  if (dueForAttempt) {
+    s_lastRegisterAttemptMs = now;
     if (registerInstallation()) {
       s_registered = true;
-      s_lastHeartbeatMs = now;
     }
   }
 

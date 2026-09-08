@@ -65,8 +65,12 @@ void attemptWifiConnect() {
   fry::ProvErr err = fry::ProvErr::None;
   if (fry_wifi::connect(ssid, pass, WIFI_CONNECT_TIMEOUT_MS, &err)) {
     fry_provisioning::notifyWifiUp();
+    // registerInstallation() (T5's strong override) reports its own real outcome via
+    // notifyApiOk()/notifyApiFail() — it must NOT be assumed to succeed here. Registration is
+    // one optional subsystem, not a boot gate: VPN and the Ready-phase report loop start
+    // unconditionally below regardless of whether it succeeds, so a hardwareapi outage or a
+    // rejected miner code never stops WiFi, the relay endpoint, health logging, or OTA.
     fry_trigger_register_now();  // T5 overrides; weak default just logs and returns
-    fry_provisioning::notifyApiOk();
     fry_trigger_start_vpn();  // T6 overrides
     s_phase = BootPhase::Ready;
   } else {
