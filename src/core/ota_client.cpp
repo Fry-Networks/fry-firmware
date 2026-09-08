@@ -35,6 +35,11 @@ namespace fry_ota {
 namespace {
 
 unsigned long s_lastCheckMs = 0;
+// PROTOCOL.md section 6 wants a check "on boot and every 6 h". tick() is only reached
+// once WiFi is up, but with s_lastCheckMs seeded at 0 the elapsed-time gate is false at
+// boot (millis() is still tiny), so the first check silently slipped to OTA_CHECK_MS
+// after boot. This flag forces exactly one check on the first tick after WiFi comes up.
+bool s_firstCheckDone = false;
 
 // Manual rollback: boot into whichever OTA slot is NOT currently running. This does not depend
 // on esp_ota_mark_app_valid_cancel_rollback()/Update.rollBack() at all, since those rely on the
@@ -253,6 +258,12 @@ bool checkNow() {
 
 void tick() {
   unsigned long now = millis();
+  if (!s_firstCheckDone) {
+    s_firstCheckDone = true;
+    s_lastCheckMs = now;
+    checkNow();
+    return;
+  }
   if (now - s_lastCheckMs < OTA_CHECK_MS) return;
   s_lastCheckMs = now;
   checkNow();
