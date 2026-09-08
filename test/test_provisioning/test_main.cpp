@@ -8,11 +8,21 @@
 #endif
 #include <unity.h>
 
+#include <cstring>
+
+#include "miner_identity.h"
 #include "ota_boot_counter.h"
 #include "provisioning_fsm.h"
+#include "sha256.h"
 #include "socks5_parse.h"
 
+using fry::bytesToHexUpper;
+using fry::computeMinerKey;
+using fry::formatDeviceName;
+using fry::isValidDeviceName;
+using fry::isValidMinerKey;
 using fry::OtaBootCounter;
+using fry::Sha256;
 using fry::ProvErr;
 using fry::ProvEvent;
 using fry::ProvInputs;
@@ -204,6 +214,47 @@ void test_socks5_truncated_request(void) {
   TEST_ASSERT_EQUAL(static_cast<int>(Socks5Result::NeedMoreData), static_cast<int>(r));
 }
 
+// ── sha256 / miner_identity (4 cases) ────────────────────────────────────────
+
+void test_sha256_known_vector_abc(void) {
+  // NIST test vector: SHA256("abc") = ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad
+  const uint8_t msg[] = {'a', 'b', 'c'};
+  uint8_t digest[32];
+  Sha256::hash(msg, sizeof(msg), digest);
+  char hex[65];
+  bytesToHexUpper(digest, 32, hex, sizeof(hex));
+  TEST_ASSERT_EQUAL_STRING("BA7816BF8F01CFEA414140DE5DAE2223B00361A396177A9CB410FF61F20015AD", hex);
+}
+
+void test_miner_key_valid_format_and_deterministic(void) {
+  const uint8_t mac6[3] = {0xAA, 0xBB, 0xCC};
+  const uint8_t salt[16] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16};
+  char key1[40];
+  char key2[40];
+  computeMinerKey(mac6, salt, key1, sizeof(key1));
+  computeMinerKey(mac6, salt, key2, sizeof(key2));
+  TEST_ASSERT_EQUAL_STRING(key1, key2);  // deterministic for the same mac6+salt
+  TEST_ASSERT_TRUE(isValidMinerKey(key1));
+  TEST_ASSERT_EQUAL(36, static_cast<int>(strlen(key1)));
+}
+
+void test_miner_key_invalid_rejected(void) {
+  TEST_ASSERT_FALSE(isValidMinerKey("IOT-tooshort"));
+  TEST_ASSERT_FALSE(isValidMinerKey("BAD-0123456789ABCDEF0123456789ABCDEF"));
+  TEST_ASSERT_FALSE(isValidMinerKey("IOT-0123456789abcdef0123456789abcdef"));  // lowercase hex
+  TEST_ASSERT_FALSE(isValidMinerKey(nullptr));
+}
+
+void test_device_name_format_and_validate(void) {
+  const uint8_t mac6[3] = {0x0A, 0x1B, 0x2C};
+  char name[32];
+  formatDeviceName("ESP32-S3", mac6, name, sizeof(name));
+  TEST_ASSERT_EQUAL_STRING("FRY-ESP32-S3-0A1B2C", name);
+  TEST_ASSERT_TRUE(isValidDeviceName(name));
+  TEST_ASSERT_FALSE(isValidDeviceName("FRY-ESP99-0A1B2C"));
+  TEST_ASSERT_FALSE(isValidDeviceName("FRY-ESP32-0a1b2c"));  // lowercase hex
+}
+
 int main(int argc = 0, char** argv = nullptr) {
   (void)argc;
   (void)argv;
@@ -224,6 +275,10 @@ int main(int argc = 0, char** argv = nullptr) {
   RUN_TEST(test_socks5_ipv4_connect);
   RUN_TEST(test_socks5_domain_connect);
   RUN_TEST(test_socks5_truncated_request);
+  RUN_TEST(test_sha256_known_vector_abc);
+  RUN_TEST(test_miner_key_valid_format_and_deterministic);
+  RUN_TEST(test_miner_key_invalid_rejected);
+  RUN_TEST(test_device_name_format_and_validate);
   return UNITY_END();
 }
 
