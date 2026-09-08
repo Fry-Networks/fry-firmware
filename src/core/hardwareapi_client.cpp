@@ -9,6 +9,7 @@
 #include "fry_config.h"
 #include "http_tls.h"
 #include "miner_key.h"
+#include "ota_client.h"
 #include "trigger_hooks.h"
 #include "wifi_station.h"
 
@@ -109,6 +110,7 @@ bool registerInstallation() {
       http.end();
       Serial.printf("api: registered install=%s token=%s\n", installId,
                     strlen(token) > 0 ? "present" : "none");
+      fry_ota::confirmGood();  // registration succeeding is this firmware's "proved itself good"
       return true;
     }
     http.end();
@@ -188,6 +190,9 @@ bool getVersions(String& outJson) {
 void tick() {
   if (!fry_wifi::isConnected()) return;
   unsigned long now = millis();
+
+  fry_ota::tick();  // drives OTA_CHECK_MS cadence; composed here since only one strong
+                     // definition of fry_trigger_report_loop_tick can exist (see trigger_hooks.h)
 
   if (!s_registered || (now - s_lastHeartbeatMs) >= INSTALL_HEARTBEAT_MS) {
     if (registerInstallation()) {

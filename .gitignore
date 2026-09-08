@@ -2,3 +2,6 @@
 include/generated/
 *.bak.*
 .vscode/
+# Generated per-release by tools/make_manifest.py (CI regenerates it with the real version tag
+# and real release asset URLs) - a dev-run placeholder committed here would be misleading.
+ota/manifest.json

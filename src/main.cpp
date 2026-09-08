@@ -10,6 +10,7 @@
 #include "config.h"
 #include "core/fry_config.h"
 #include "core/miner_key.h"
+#include "core/ota_client.h"
 #include "core/provisioning_transport.h"
 #include "core/serial_commands.h"
 #include "core/trigger_hooks.h"
@@ -93,6 +94,8 @@ void setup() {
 
   Serial.printf("FRY boot v%s chip=%s mac=%s minerkey=%s\n", FRY_FIRMWARE_VERSION, FRY_CHIP, mac,
                 s_minerKey);
+
+  fry_ota::init();  // may restart the device (manual rollback) — call before anything stateful
 
 #ifdef FRY_SERIAL_PROVISION
   fry_serial_init();
