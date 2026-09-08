@@ -13,6 +13,7 @@
 #include "core/provisioning_transport.h"
 #include "core/serial_commands.h"
 #include "core/trigger_hooks.h"
+#include "core/vpn_relay.h"
 #include "core/wifi_station.h"
 
 #ifndef FRY_FIRMWARE_VERSION
@@ -39,19 +40,20 @@ void print_mac(char* out, size_t outLen) {
 }
 
 // PROTOCOL.md section 9: `[health] up=<s> heap=<free> blk=<maxblock> rssi=<dbm> vpn=<up|down>
-// relayed=<bytes> temp=<c|na>`. vpn/relayed are placeholders until T6 lands.
+// relayed=<bytes> temp=<c|na>`. No temperature sensor in scope, so temp is always "na".
 void emitHealthLogIfDue() {
   unsigned long now = millis();
   if (now - s_lastHealthLogMs < HEALTH_LOG_MS) return;
   s_lastHealthLogMs = now;
-  Serial.printf("[health] up=%lus heap=%u blk=%u rssi=%d vpn=down relayed=0 temp=na\n",
+  Serial.printf("[health] up=%lus heap=%u blk=%u rssi=%d vpn=%s relayed=%u temp=na\n",
                 now / 1000, static_cast<unsigned>(ESP.getFreeHeap()),
 #if defined(ARDUINO_ARCH_ESP8266)
                 static_cast<unsigned>(ESP.getMaxFreeBlockSize()),
 #else
                 static_cast<unsigned>(ESP.getFreeHeap()),
 #endif
-                fry_wifi::isConnected() ? fry_wifi::rssi() : 0);
+                fry_wifi::isConnected() ? fry_wifi::rssi() : 0, fry_vpn::isUp() ? "up" : "down",
+                static_cast<unsigned>(fry_vpn::relayedBytes()));
 }
 
 void attemptWifiConnect() {
@@ -128,6 +130,7 @@ void loop() {
       fry_wifi::maintain();
       fry_provisioning::loop();  // keep serving /status (ESP8266) until AP teardown fires
       fry_provisioning::tick();
+      fry_vpn::tick();  // ESP8266: pumps the SOCKS5 relay; ESP32: polls the WG handshake state
       fry_trigger_report_loop_tick();  // T5 overrides; weak default is a no-op
       emitHealthLogIfDue();
       break;
