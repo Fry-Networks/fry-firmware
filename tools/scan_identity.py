@@ -4,6 +4,7 @@
 # public release binary.
 #   py -3 tools/scan_identity.py <path> [<path> ...]
 # Exit 0 = clean, 1 = hit(s) found. Never loosen the patterns to pass.
+import os
 import sys
 import re
 import argparse
@@ -11,7 +12,14 @@ import argparse
 # Drive-letter + BACKSLASH only (a real absolute Windows path shape), with a lookbehind so
 # "https:" (letter-colon, then a forward slash) never matches as a false "s:" drive reference.
 WINPATH_RE = re.compile(rb"(?<![A-Za-z0-9])[A-Za-z]:\\[^\x00-\x1f]{0,200}")
-NEEDLES = (b"saf70", b"Users\\")
+# Literal needles come from the environment so this public file never has to contain the
+# very username it is meant to detect. Set FRY_SCAN_NEEDLES to a comma-separated list,
+# e.g. FRY_SCAN_NEEDLES=alice,bob. "Users\\" is always checked because it is generic.
+NEEDLES = tuple(
+    n.encode("utf-8")
+    for n in os.environ.get("FRY_SCAN_NEEDLES", "").split(",")
+    if n.strip()
+) + (b"Users\\",)
 
 
 def scan_file(path):
