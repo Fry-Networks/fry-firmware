@@ -1,7 +1,10 @@
 #include "miner_key.h"
 
+#include <cstring>
+
 #include "fry_config.h"
 #include "miner_identity.h"
+#include "sha256.h"
 
 #if defined(ARDUINO_ARCH_ESP8266)
 #include <ESP8266WiFi.h>
@@ -74,6 +77,29 @@ void getDeviceName(char* outName, size_t outNameLen) {
   uint8_t mac6[3];
   getMac6(mac6);
   fry::formatDeviceName(chipTag(), mac6, outName, outNameLen);
+}
+
+void ensureInstallId(char* outId, size_t outIdLen) {
+  String existing = fry_config::getInstallId();
+  if (existing.length() == 32) {
+    strncpy(outId, existing.c_str(), outIdLen - 1);
+    outId[outIdLen - 1] = 0;
+    return;
+  }
+
+  uint8_t raw[16];
+  for (int i = 0; i < 4; i++) {
+    uint32_t r = hwRandom32();
+    raw[i * 4 + 0] = static_cast<uint8_t>(r >> 24);
+    raw[i * 4 + 1] = static_cast<uint8_t>(r >> 16);
+    raw[i * 4 + 2] = static_cast<uint8_t>(r >> 8);
+    raw[i * 4 + 3] = static_cast<uint8_t>(r);
+  }
+  fry::bytesToHexUpper(raw, 16, outId, outIdLen);
+  for (size_t i = 0; outId[i]; i++) {
+    if (outId[i] >= 'A' && outId[i] <= 'F') outId[i] += 32;  // lowercase, cosmetic only
+  }
+  fry_config::setInstallId(outId);
 }
 
 }  // namespace fry_identity

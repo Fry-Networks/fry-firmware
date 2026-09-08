@@ -17,4 +17,9 @@ void ensureMinerKey(char* outKey, size_t outKeyLen);
 // "FRY-<CHIP>-<MAC6>" per PROTOCOL.md section 4. outName must be at least 32 bytes.
 void getDeviceName(char* outName, size_t outNameLen);
 
+// Returns the persisted hardwareapi install_id (fry.installId), generating a random 32-hex-char
+// identifier and persisting it on first call. Never regenerates once persisted — a new install_id
+// would orphan the installation record on hardwareapi. outId must be at least 33 bytes.
+void ensureInstallId(char* outId, size_t outIdLen);
+
 }  // namespace fry_identity
