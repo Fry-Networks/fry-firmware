@@ -9,6 +9,7 @@
 #include "config.h"
 #include "fry_config.h"
 #include "miner_key.h"
+#include "trigger_hooks.h"
 
 #ifndef FRY_FIRMWARE_VERSION
 #define FRY_FIRMWARE_VERSION "0.0.0-dev"
@@ -16,16 +17,6 @@
 #ifndef FRY_CHIP
 #define FRY_CHIP "UNKNOWN"
 #endif
-
-// Implemented by the hardwareapi client (T5) and the OTA module (T7) respectively. Weakly
-// defined here so this file — and any *_lab build that predates those modules — still links;
-// a later TU providing a strong (non-weak) definition overrides these at link time.
-extern "C" __attribute__((weak)) void fry_trigger_poc_now() {
-  Serial.println("[serial] poc_now: hardwareapi client not built yet");
-}
-extern "C" __attribute__((weak)) void fry_trigger_ota_now() {
-  Serial.println("[serial] ota_now: OTA module not built yet");
-}
 
 namespace {
 
