@@ -1,0 +1,103 @@
+name: build
+
+on:
+  push:
+    branches: [main, firmware-dev]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        env: [esp8266, esp32, esp32s3, esp32c3]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install PlatformIO
+        run: pip install platformio
+
+      - name: Build ${{ matrix.env }}
+        env:
+          FRY_API_TOKEN: ${{ secrets.FRY_API_TOKEN }}
+        run: pio run -e ${{ matrix.env }}
+
+      - name: Name the artifact
+        run: cp ".pio/build/${{ matrix.env }}/firmware.bin" "firmware-${{ matrix.env }}.bin"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: firmware-${{ matrix.env }}
+          path: firmware-${{ matrix.env }}.bin
+          if-no-files-found: error
+
+  test-native:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install PlatformIO
+        run: pip install platformio
+
+      - name: Run Unity suite (native)
+        run: pio test -e native
+
+  release:
+    needs: [build, test-native]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install PlatformIO
+        run: pip install platformio
+
+      - name: Download all firmware artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Assemble release binaries and the manifest input layout
+        run: |
+          set -eu
+          mkdir -p release
+          for env in esp8266 esp32 esp32s3 esp32c3; do
+            mkdir -p "manifest_input/$env"
+            cp "artifacts/firmware-$env/firmware-$env.bin" "release/firmware-$env.bin"
+            cp "artifacts/firmware-$env/firmware-$env.bin" "manifest_input/$env/firmware.bin"
+          done
+
+      - name: Generate ota/manifest.json
+        run: |
+          set -eu
+          VERSION="${GITHUB_REF_NAME#v}"
+          python3 tools/make_manifest.py --version "$VERSION" \
+            --release-base "https://github.com/${{ github.repository }}/releases/download/${GITHUB_REF_NAME}" \
+            --build-dir manifest_input --out ota/manifest.json
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            release/firmware-esp8266.bin
+            release/firmware-esp32.bin
+            release/firmware-esp32s3.bin
+            release/firmware-esp32c3.bin
+            ota/manifest.json
