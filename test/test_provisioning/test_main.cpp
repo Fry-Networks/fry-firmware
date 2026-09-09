@@ -15,6 +15,8 @@
 #include "provisioning_fsm.h"
 #include "sha256.h"
 #include "socks5_parse.h"
+#include "semver.h"
+#include "wg_endpoint.h"
 
 using fry::bytesToHexUpper;
 using fry::computeMinerKey;
@@ -34,6 +36,10 @@ using fry::Socks5Greeting;
 using fry::Socks5Result;
 using fry::parseConnectRequest;
 using fry::parseGreeting;
+using fry::compareSemver;
+using fry::isNewerVersion;
+using fry::parseWgEndpoint;
+using fry::WgEndpoint;
 
 void setUp(void) {}
 void tearDown(void) {}
@@ -255,10 +261,93 @@ void test_device_name_format_and_validate(void) {
   TEST_ASSERT_FALSE(isValidDeviceName("FRY-ESP32-0a1b2c"));  // lowercase hex
 }
 
+// --- WireGuard endpoint splitting -------------------------------------------------------
+// PROTOCOL.md sends "host:port"; esp_wireguard passes the endpoint to dns_gethostbyname(),
+// which cannot parse a trailing ":port". Storing the composite string is what produced the
+// permanent ESP_ERR_RETRY (err=513) seen on the bench.
+void test_wg_endpoint_splits_ipv4_host_and_port(void) {
+  WgEndpoint e = parseWgEndpoint("192.168.1.127:51820");
+  TEST_ASSERT_TRUE(e.ok);
+  TEST_ASSERT_TRUE(e.hasPort);
+  TEST_ASSERT_EQUAL_STRING("192.168.1.127", e.host);
+  TEST_ASSERT_EQUAL_UINT16(51820, e.port);
+}
+
+void test_wg_endpoint_host_without_port(void) {
+  WgEndpoint e = parseWgEndpoint("vpn.example.org");
+  TEST_ASSERT_TRUE(e.ok);
+  TEST_ASSERT_FALSE(e.hasPort);
+  TEST_ASSERT_EQUAL_STRING("vpn.example.org", e.host);
+}
+
+void test_wg_endpoint_bracketed_ipv6_with_port(void) {
+  WgEndpoint e = parseWgEndpoint("[fd00::1]:51820");
+  TEST_ASSERT_TRUE(e.ok);
+  TEST_ASSERT_TRUE(e.hasPort);
+  TEST_ASSERT_EQUAL_STRING("fd00::1", e.host);
+  TEST_ASSERT_EQUAL_UINT16(51820, e.port);
+}
+
+void test_wg_endpoint_bare_ipv6_is_not_guessed(void) {
+  // Every separator is a colon, so a port cannot be inferred. Keep the literal whole.
+  WgEndpoint e = parseWgEndpoint("fd00::1");
+  TEST_ASSERT_TRUE(e.ok);
+  TEST_ASSERT_FALSE(e.hasPort);
+  TEST_ASSERT_EQUAL_STRING("fd00::1", e.host);
+}
+
+void test_wg_endpoint_rejects_bad_input(void) {
+  TEST_ASSERT_FALSE(parseWgEndpoint("").ok);
+  TEST_ASSERT_FALSE(parseWgEndpoint(nullptr).ok);
+  TEST_ASSERT_FALSE(parseWgEndpoint("host:0").ok);
+  TEST_ASSERT_FALSE(parseWgEndpoint("host:70000").ok);
+  TEST_ASSERT_FALSE(parseWgEndpoint("host:abc").ok);
+}
+
+// --- OTA manifest version comparison ----------------------------------------------------
+// The manifest check was strcmp(latest, current) != 0, which updates in EITHER direction: a
+// device on a newer build than the manifest downgraded itself. Deliberate rollback is
+// slot-based, so the manifest must only move a device forward.
+void test_semver_orders_by_number_not_text(void) {
+  // The case a lexical compare gets wrong: "0.9.0" sorts above "0.10.0" as text.
+  TEST_ASSERT_EQUAL_INT(-1, compareSemver("0.9.0", "0.10.0"));
+  TEST_ASSERT_EQUAL_INT(1, compareSemver("0.10.0", "0.9.0"));
+}
+
+void test_semver_basic_ordering(void) {
+  TEST_ASSERT_EQUAL_INT(1, compareSemver("0.1.1", "0.1.0"));
+  TEST_ASSERT_EQUAL_INT(-1, compareSemver("0.1.0", "0.1.1"));
+  TEST_ASSERT_EQUAL_INT(0, compareSemver("0.1.0", "0.1.0"));
+  TEST_ASSERT_EQUAL_INT(1, compareSemver("1.0.0", "0.9.9"));
+}
+
+void test_semver_missing_components_and_suffixes(void) {
+  TEST_ASSERT_EQUAL_INT(0, compareSemver("0.1", "0.1.0"));
+  TEST_ASSERT_EQUAL_INT(0, compareSemver("0.1.1-rc1", "0.1.1"));
+  TEST_ASSERT_EQUAL_INT(0, compareSemver(nullptr, "0.0.0"));
+  TEST_ASSERT_EQUAL_INT(-1, compareSemver("", "0.0.1"));
+}
+
+void test_ota_never_downgrades(void) {
+  // The exact bench situation: board on 0.1.1, manifest still advertising 0.1.0.
+  TEST_ASSERT_FALSE(isNewerVersion("0.1.0", "0.1.1"));
+  TEST_ASSERT_FALSE(isNewerVersion("0.1.1", "0.1.1"));
+  TEST_ASSERT_TRUE(isNewerVersion("0.1.2", "0.1.1"));
+}
+
 int main(int argc = 0, char** argv = nullptr) {
   (void)argc;
   (void)argv;
   UNITY_BEGIN();
+  RUN_TEST(test_semver_orders_by_number_not_text);
+  RUN_TEST(test_semver_basic_ordering);
+  RUN_TEST(test_semver_missing_components_and_suffixes);
+  RUN_TEST(test_ota_never_downgrades);
+  RUN_TEST(test_wg_endpoint_splits_ipv4_host_and_port);
+  RUN_TEST(test_wg_endpoint_host_without_port);
+  RUN_TEST(test_wg_endpoint_bracketed_ipv6_with_port);
+  RUN_TEST(test_wg_endpoint_bare_ipv6_is_not_guessed);
+  RUN_TEST(test_wg_endpoint_rejects_bad_input);
   RUN_TEST(test_fsm_idle_to_provisioning_on_valid_ssid);
   RUN_TEST(test_fsm_wallet_write_commits_to_connecting);
   RUN_TEST(test_fsm_invalid_wallet_error_badwallet);
@@ -283,6 +372,7 @@ int main(int argc = 0, char** argv = nullptr) {
 }
 
 #ifdef ARDUINO
+
 void setup() {
   delay(2000);
   main();
