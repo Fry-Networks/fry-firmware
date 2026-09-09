@@ -3,11 +3,11 @@
 
 Bug 2 (v0.2.0): src/esp32/http_tls.cpp used sec.setInsecure() — no certificate verification at
 all. The framework's own bundle generator (ESP-IDF's components/mbedtls/esp_crt_bundle/
-gen_crt_bundle.py) does NOT ship inside the installed
-framework-arduinoespressif32 PlatformIO package (verified: `find <package dir> -iname
-"gen_crt_bundle*"` returns nothing — only the compiled esp_crt_bundle.c/.h runtime are vendored,
-not the IDF build-time tooling). This script reimplements just enough of it, reading the exact
-binary format from the vendored runtime parser instead of guessing:
+gen_crt_bundle.py) does NOT ship inside the installed framework-arduinoespressif32 PlatformIO
+package (verified: `find <package dir> -iname "gen_crt_bundle*"` returns nothing — only the
+compiled esp_crt_bundle.c/.h runtime is vendored, not the IDF build-time tooling). This script
+reimplements just enough of it, reading the exact binary format from the vendored runtime parser
+instead of guessing:
     framework-arduinoespressif32/libraries/WiFiClientSecure/src/esp_crt_bundle.c
 
 Binary format (esp_crt_bundle_init() / esp_crt_verify_callback(), big-endian lengths):
@@ -19,53 +19,78 @@ Binary format (esp_crt_bundle_init() / esp_crt_verify_callback(), big-endian len
         [2B name_len][2B key_len][name_len bytes: DER Subject Name][key_len bytes: DER
          SubjectPublicKeyInfo, i.e. what mbedtls_pk_parse_public_key() expects]
 
-Root selection — verified live against both hostnames this firmware's HTTPS client touches
-(openssl s_client -connect <host>:443, run 2026-09-08; see PROTOCOL.md T5/T7 for why these two
-are the only HTTPS destinations: hardwareapi for registration/leases, GitHub for OTA):
-    hardwareapi.frynetworks.com -> leaf -> Let's Encrypt YE1 -> ISRG Root YE -> ISRG Root X2
-                                    -> ISRG Root X1 (self-signed, sent by the server itself)
-    github.com                  -> leaf -> Sectigo Public Server Authentication CA DV E36
-                                    -> Sectigo Public Server Authentication Root E46
-                                    -> USERTrust ECC Certification Authority
-    objects.githubusercontent.com (OTA asset download) -> leaf -> Let's Encrypt YR1
-                                    -> ISRG Root YR -> ISRG Root X1
-Every path terminates at one of exactly three roots, so the bundle embeds precisely those three:
-    "ISRG Root X1"                       (covers hardwareapi + both github hosts)
-    "ISRG Root X2"                       (Let's Encrypt's short-lived intermediate roots chain
-                                           through X2 before reaching X1 on some paths; embedding
-                                           it directly means a chain that stops at X2 still
-                                           verifies even if a future server omits the X1 cross-
-                                           cert)
-    "USERTrust ECC Certification Authority"  (github.com's Sectigo chain's actual trust anchor —
-                                           "Sectigo Public Server Authentication Root E46" is
-                                           NOT self-signed, it is cross-signed BY this root)
+REVISION HISTORY / WHY THIS ISN'T A HAND-PICKED THREE-ROOT SET ANYMORE
+-----------------------------------------------------------------------
+The first version of this script hand-picked exactly three roots (ISRG Root X1, ISRG Root X2,
+USERTrust ECC Certification Authority) based on which live chains happened to resolve to them.
+That was WRONG and would have bricked ESP32 OTA fleet-wide:
+  - github.com's chain terminates at "Sectigo Public Server Authentication Root E46", which is
+    NOT self-signed and does NOT send a cross-signature up to USERTrust ECC in the wire chain —
+    so USERTrust ECC never gets consulted. E46 itself must be a directly trusted bundle entry.
+  - release-assets.githubusercontent.com (the actual OTA-binary redirect target as of 2026-09 —
+    NOT objects.githubusercontent.com, which this script's first draft incorrectly assumed) and
+    objects.githubusercontent.com both terminate at "ISRG Root YR", cross-signed by X1 but
+    without X1's own self-signed certificate present in the wire chain.
+  - These CAs are visibly mid-rotation (ISRG Root YE/YR and Sectigo E46 are all new). Any
+    hand-picked set is one CA rotation away from bricking OTA fleet-wide with no remote recovery
+    path (OTA is the mechanism you'd otherwise use to ship the fix).
 
-Source of the three root certificates: the local `certifi` package (certifi.where()), which is
-byte-for-byte Mozilla's CA bundle — the same root program every major TLS client (including
-ESP-IDF's own default bundle) draws from. No network fetch needed; if certifi is not installed,
-pass --bundle pointing at any PEM file containing these three certs (e.g. curl's
-curl-ca-bundle.crt or /etc/ssl/certs/ca-certificates.crt).
+Fix: embed the FULL Mozilla root store instead of guessing which roots matter. Cost is small —
+esp_crt_bundle stores only DER Subject name + SubjectPublicKeyInfo per root, not whole
+certificates — see this script's own output for the final on-flash size.
+
+Sources (both vendored into data/cert/ alongside this script, not fetched at build time):
+  1. data/cert/mozilla_cacert_2026-08-13.pem — the full curl.se Mozilla CA extract, fetched
+     2026-09-09 from https://curl.se/ca/cacert.pem.
+       Mozilla data date (per the file's own header comment): Thu Aug 13 03:12:01 2026 GMT
+       File size: 188,900 bytes
+       SHA-256 (whole file, as fetched):
+         f66dff1bdf8f96060b8177976f8b7d9254bc89bc4db933d769f7384d28480bc9
+       (curl.se also embeds its own SHA-256 of just the certificate data in the file's header
+       comment — 81b7f2576333a2e360e673f912d7b0b7a765d836c731003e348a46cac5d37198 — recorded
+       here for cross-reference; the whole-file hash above is what to check the vendored copy
+       against.)
+     This resolves github.com (Sectigo Public Server Authentication Root E46 IS present in
+     Mozilla's set directly — verified: `grep -c "Sectigo Public Server Authentication Root
+     E46" mozilla_cacert_2026-08-13.pem` = 1) and hardwareapi.frynetworks.com (ISRG Root X1/X2
+     both present).
+  2. data/cert/supplemental_isrg_root_ye.pem, supplemental_isrg_root_yr.pem — "ISRG Root YE" and
+     "ISRG Root YR" are Let's Encrypt's newest transitional roots and are NOT yet in Mozilla's
+     root program (verified: both `grep -c "Root YE"` and `grep -c "Root YR"` against the
+     cacert.pem above return 0), so the full Mozilla bundle alone does not carry them. Extracted
+     directly from live TLS handshakes on 2026-09-09 via `openssl s_client -showcerts`:
+       ISRG Root YE <- hardwareapi.frynetworks.com:443 chain, cert index 2
+       ISRG Root YR <- release-assets.githubusercontent.com:443 chain, cert index 2
+     Embedding these directly (rather than relying solely on their X1/X2 cross-signatures, which
+     some servers' chains omit — exactly the objects/release-assets.githubusercontent.com case
+     above) means a chain that stops at "ISRG Root YE"/"ISRG Root YR" verifies without needing
+     mbedTLS to walk any further.
 
 Usage:
-    py -3 data/cert/gen_crt_bundle.py [--bundle PATH_TO_PEM] [--out data/cert/x509_crt_bundle.bin]
+    py -3 data/cert/gen_crt_bundle.py [--out data/cert/x509_crt_bundle.bin]
 
-The script re-parses its own output afterward and prints a verification summary (count, per-CA
-subject CN + byte sizes, and a check that entries are strictly ascending by name bytes — the
-precondition esp_crt_bundle.c's binary search depends on).
+The script re-parses its own output afterward and prints a verification summary: total cert
+count, total byte size, a check that entries are strictly ascending by name bytes (the
+precondition esp_crt_bundle.c's binary search depends on), and an explicit assertion that the
+five CAs this bug report named are present: ISRG Root X1, ISRG Root X2, ISRG Root YE, ISRG Root
+YR, Sectigo Public Server Authentication Root E46.
 """
 import argparse
+import glob
 import struct
 import sys
 
 from cryptography import x509
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
-# Exactly the roots identified above. Matched by subject CN via cryptography's NameOID so a stray
-# "Subject Alternative CN" or reordered RDN in the PEM comment can't cause a silent mismatch.
-REQUIRED_ROOT_CNS = [
-    "ISRG Root X1",
-    "ISRG Root X2",
-    "USERTrust ECC Certification Authority",
+# Asserted present in the final bundle after the build — see verify_bundle(). Matched by
+# (Organization, CommonName) so a same-CN-different-O collision can't cause a false positive.
+REQUIRED_ROOTS = [
+    ("Internet Security Research Group", "ISRG Root X1"),
+    ("Internet Security Research Group", "ISRG Root X2"),
+    ("ISRG", "Root YE"),
+    ("ISRG", "Root YR"),
+    ("Sectigo Limited", "Sectigo Public Server Authentication Root E46"),
 ]
 
 
@@ -84,7 +109,12 @@ def _cn(cert: x509.Certificate) -> str:
     return attrs[0].value if attrs else "<no CN>"
 
 
-def load_candidates(pem_path: str) -> list[x509.Certificate]:
+def _org(cert: x509.Certificate) -> str:
+    attrs = cert.subject.get_attributes_for_oid(x509.oid.NameOID.ORGANIZATION_NAME)
+    return attrs[0].value if attrs else "<no O>"
+
+
+def load_all_pem_certs(pem_path: str) -> list[x509.Certificate]:
     data = open(pem_path, "rb").read()
     try:
         return x509.load_pem_x509_certificates(data)  # cryptography >= 39
@@ -105,79 +135,95 @@ def load_candidates(pem_path: str) -> list[x509.Certificate]:
         return certs
 
 
-def build_bundle(certs: list[x509.Certificate]) -> bytes:
-    entries = []
+def build_bundle(certs: list[x509.Certificate]) -> tuple[bytes, list[tuple[bytes, bytes, str]]]:
+    by_name = {}
+    dupes = 0
     for cert in certs:
         name = _name_der(cert)
+        if name in by_name:
+            dupes += 1
+            continue  # keep the first occurrence (Mozilla set takes precedence over supplemental)
         key = cert.public_key().public_bytes(Encoding.DER, PublicFormat.SubjectPublicKeyInfo)
-        entries.append((name, key, _cn(cert)))
+        by_name[name] = (key, f"{_org(cert)} / {_cn(cert)}")
+    if dupes:
+        print(f"note: {dupes} duplicate-subject cert(s) skipped (kept first occurrence)")
+
+    entries = [(name, key, label) for name, (key, label) in by_name.items()]
     entries.sort(key=lambda e: e[0])  # ascending by raw Subject-name DER bytes (binary search)
 
     out = struct.pack(">H", len(entries))
-    for name, key, _cn_ in entries:
+    for name, key, _label in entries:
         out += struct.pack(">HH", len(name), len(key)) + name + key
     return out, entries
 
 
-def verify_bundle(blob: bytes, expected_cns: list[str]) -> None:
+def verify_bundle(blob: bytes, entries: list[tuple[bytes, bytes, str]]) -> None:
     (num_certs,) = struct.unpack_from(">H", blob, 0)
-    assert num_certs == len(expected_cns), f"count mismatch: {num_certs} vs {len(expected_cns)}"
+    assert num_certs == len(entries), f"count mismatch: {num_certs} vs {len(entries)}"
     off = 2
     prev_name = b""
-    seen_cns = []
-    for _ in range(num_certs):
+    from cryptography.hazmat.primitives.serialization import load_der_public_key
+
+    for name, key, _label in entries:
         name_len, key_len = struct.unpack_from(">HH", blob, off)
         off += 4
-        name = blob[off : off + name_len]
+        blob_name = blob[off : off + name_len]
         off += name_len
-        key = blob[off : off + key_len]
+        blob_key = blob[off : off + key_len]
         off += key_len
-        assert name > prev_name, "entries are not strictly ascending by name bytes"
-        prev_name = name
-        # Re-parse the embedded key so a truncation/mis-length bug is caught here, not on-device.
-        from cryptography.hazmat.primitives.serialization import load_der_public_key
-
-        load_der_public_key(key)
-        seen_cns.append((name_len, key_len))
+        assert blob_name == name and blob_key == key, "round-trip mismatch"
+        assert blob_name > prev_name, "entries are not strictly ascending by name bytes"
+        prev_name = blob_name
+        load_der_public_key(blob_key)  # catches truncation/mis-length bugs here, not on-device
     assert off == len(blob), f"trailing bytes after last entry: {len(blob) - off}"
     print(f"verify: {num_certs} certs, {len(blob)} bytes total, strictly ascending by name: OK")
-    for i, (nl, kl) in enumerate(seen_cns):
-        print(f"  [{i}] name={nl}B key={kl}B")
+
+
+def assert_required_roots_present(certs: list[x509.Certificate]) -> None:
+    present = {(_org(c), _cn(c)) for c in certs}
+    missing = [r for r in REQUIRED_ROOTS if r not in present]
+    if missing:
+        print(f"ERROR: required root(s) missing from the built bundle: {missing}", file=sys.stderr)
+        sys.exit(1)
+    print("verify: all required roots present:")
+    for org, cn in REQUIRED_ROOTS:
+        print(f"  OK  O={org!r} CN={cn!r}")
 
 
 def main() -> int:
+    here = __import__("os").path.dirname(__file__)
     ap = argparse.ArgumentParser()
-    ap.add_argument("--bundle", default=None, help="PEM file to source roots from (default: certifi.where())")
-    ap.add_argument("--out", default="data/cert/x509_crt_bundle.bin")
+    ap.add_argument(
+        "--mozilla-bundle",
+        default=__import__("os").path.join(here, "mozilla_cacert_2026-08-13.pem"),
+        help="Full Mozilla CA PEM (default: the vendored copy next to this script)",
+    )
+    ap.add_argument(
+        "--supplemental-glob",
+        default=__import__("os").path.join(here, "supplemental_*.pem"),
+        help="Extra root/anchor PEMs not yet in Mozilla's set (default: data/cert/supplemental_*.pem)",
+    )
+    ap.add_argument("--out", default=__import__("os").path.join(here, "x509_crt_bundle.bin"))
     args = ap.parse_args()
 
-    bundle_path = args.bundle
-    if not bundle_path:
-        import certifi
+    print(f"reading full Mozilla bundle from: {args.mozilla_bundle}")
+    certs = load_all_pem_certs(args.mozilla_bundle)
+    print(f"  {len(certs)} certs")
 
-        bundle_path = certifi.where()
-    print(f"reading candidate roots from: {bundle_path}")
+    supplemental_files = sorted(glob.glob(args.supplemental_glob))
+    for f in supplemental_files:
+        extra = load_all_pem_certs(f)
+        print(f"reading supplemental root from: {f} ({len(extra)} cert(s))")
+        certs.extend(extra)
 
-    candidates = load_candidates(bundle_path)
-    by_cn = {}
-    for c in candidates:
-        by_cn.setdefault(_cn(c), c)
+    assert_required_roots_present(certs)
 
-    missing = [cn for cn in REQUIRED_ROOT_CNS if cn not in by_cn]
-    if missing:
-        print(f"ERROR: required root(s) not found in {bundle_path}: {missing}", file=sys.stderr)
-        return 1
-
-    selected = [by_cn[cn] for cn in REQUIRED_ROOT_CNS]
-    blob, entries = build_bundle(selected)
-
+    blob, entries = build_bundle(certs)
     with open(args.out, "wb") as f:
         f.write(blob)
-    print(f"wrote {args.out}: {len(blob)} bytes, {len(entries)} certs")
-    for name, key, cn in sorted(entries, key=lambda e: e[0]):
-        print(f"  CN={cn!r} name={len(name)}B key={len(key)}B")
+    print(f"wrote {args.out}: {len(blob)} bytes, {len(entries)} certs (deduped)")
 
-    verify_bundle(blob, [e[2] for e in entries])
+    verify_bundle(blob, entries)
     return 0
 
 
