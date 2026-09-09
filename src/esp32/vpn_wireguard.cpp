@@ -34,10 +34,20 @@ volatile uint32_t s_relayedBytes = 0;
 String s_priv, s_pub, s_psk, s_addr, s_netmask, s_endpoint;
 
 #if !IP_NAPT
-// Fallback when this build's lwIP has no NAPT compiled in (verified: this exact framework
-// version's lwipopts.h defines IP_NAPT as CONFIG_LWIP_IPV4_NAPT, which is never #defined by its
-// baked sdkconfig, i.e. NAPT is unavailable here). Since transparent IP-level NAT isn't
-// possible, this runs a "simple in-tunnel TCP forwarder": a SOCKS5 CONNECT relay (the same
+// Fallback when this build's lwIP has no NAPT compiled in. This is not a build-flag choice we
+// could flip — it is structurally impossible on this framework, confirmed two independent ways
+// (v0.2.0):
+//   1. `CONFIG_LWIP_IP_FORWARD is not set` in the baked sdkconfig for every ESP32-family chip
+//      this project targets (esp32, esp32c3, esp32s2, esp32s3 — framework-arduinoespressif32's
+//      tools/sdk/<chip>/sdkconfig), which is what lwipopts.h's IP_NAPT macro (CONFIG_LWIP_IPV4_NAPT)
+//      ultimately gates.
+//   2. A byte scan of the prebuilt tools/sdk/esp32/lib/liblwip.a shows the NAPT symbols
+//      themselves — ip_napt_enable, ip_napt_init, ip4_napt_forward — are ALL ABSENT (zero
+//      matches). lwip_napt.h ships as a header, but the corresponding .c was never compiled into
+//      this static library, so no #define or build_flag on our side can turn NAPT on; it would
+//      need a rebuilt liblwip.a, which is outside this firmware repo.
+// Since transparent IP-level NAT isn't possible, this runs a "simple in-tunnel TCP forwarder": a
+// SOCKS5 CONNECT relay (the same
 // tested parser as the ESP8266 endpoint) on its own FreeRTOS task so it can block on socket I/O
 // without stalling the main loop(). A tunnel peer that knows the device's WG address can reach
 // this relay and ask it to CONNECT out via the STA uplink — a reduced-scope substitute for full
@@ -216,7 +226,8 @@ void init() {
   ip_napt_enable(staIp, 1);
   Serial.println("wg: NAPT enabled");
 #else
-  Serial.println("wg: napt unavailable - tunnel-only mode");
+  Serial.println("wg: NAPT not compiled into this framework's liblwip.a (CONFIG_LWIP_IP_FORWARD "
+                  "unset) - falling back to the SOCKS5 tunnel-only relay");
   xTaskCreate(relayTaskFn, "fry_relay", 4096, nullptr, 1, nullptr);
 #endif
 }

@@ -11,6 +11,7 @@
 
 #include "config.h"
 #include "fry_config.h"
+#include "heap_gate_wait.h"
 #include "semver.h"
 #include "http_tls.h"
 #include "ota_boot_counter.h"
@@ -96,8 +97,11 @@ bool downloadAndApply(const String& url, const String& shaExpect, const String& 
     http.end();
     return false;
   }
-  if (ESP.getFreeHeap() < HEAP_GATE_OTA) {
-    Serial.println("ota: heap gate failed");
+  // Dual gate (total free AND largest contiguous block) with a bounded wait so a transient
+  // fragmentation dip degrades into a short retry instead of an immediate failure — see
+  // HEAP_GATE_OTA_BLOCK in config.h for the field evidence that made total-free alone wrong.
+  if (!fry::waitForHeapGate(HEAP_GATE_OTA, HEAP_GATE_OTA_BLOCK)) {
+    Serial.println("ota: heap gate failed (total free or largest contiguous block)");
     http.end();
     return false;
   }

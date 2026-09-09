@@ -56,3 +56,18 @@
 #ifndef HEAP_GATE_OTA
 #define HEAP_GATE_OTA 20000
 #endif
+
+// Minimum LARGEST-CONTIGUOUS-BLOCK gate before attempting an OTA download over the non-MFLN
+// BearSSL path (src/esp8266/http_tls.cpp), which allocates one 16384-byte rx + 512-byte tx
+// buffer as a single iobuf. HEAP_GATE_OTA (total free heap) is not sufficient on its own: a
+// board can show plenty of *total* free heap while it is fragmented into blocks too small for
+// that allocation. Field evidence: a board with 42,712 B free and a 34,152-byte largest block
+// passed the 20,000 B total-free gate, allocated the 16 KB buffer, and still died — the 34 KB
+// block wasn't enough once BearSSL's session/certificate scratch space and lwIP's receive pbufs
+// were also carved out of it during the handshake. ~2x the 16384-byte buffer (34-37 KB) matches
+// the same "double the raw TLS buffer" rule of thumb already used for this exact BearSSL
+// configuration in the sibling sensmos-firmware project (see its MONITORS_HTTP_MIN_HEAP / "TLS
+// wymaga ~34KB CIAGLEGO bloku" comment), rounded up past the 34,152 B block that still crashed.
+#ifndef HEAP_GATE_OTA_BLOCK
+#define HEAP_GATE_OTA_BLOCK 36864
+#endif
