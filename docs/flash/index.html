@@ -1,0 +1,702 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Fry Firmware Flasher</title>
+<meta name="description" content="Flash Fry Networks firmware to an ESP8266/ESP32 board directly from Chrome or Edge — no installs required." />
+<style>
+  :root {
+    --bg: #09090B;
+    --surface: #1A1A1E;
+    --card: #242428;
+    --primary: #E5271C;
+    --primary-hover: #ff3324;
+    --accent: #00C49A;
+    --text: #EFECEA;
+    --muted: #9B9793;
+    --border: #323236;
+
+    /* Three-tier type scale (ratio ~1.33-1.5) — heading / body / meta.
+       Monospace code panels (.error-panel, #logPanel) intentionally sit
+       outside this prose scale; code blocks are conventionally sized for
+       density/legibility rather than editorial hierarchy. */
+    --fs-heading: 1.5rem;
+    --fs-body: 1rem;
+    --fs-meta: 0.75rem;
+  }
+
+  * { box-sizing: border-box; }
+
+  html, body {
+    margin: 0;
+    padding: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+
+  body {
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 24px 16px;
+  }
+
+  main.card {
+    width: 100%;
+    max-width: 480px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    padding: 28px 24px 20px;
+  }
+
+  header { text-align: center; margin-bottom: 20px; }
+
+  h1 {
+    font-size: var(--fs-heading);
+    margin: 0 0 6px;
+    letter-spacing: -0.01em;
+  }
+
+  h1 .fry { color: var(--primary); }
+
+  .subtitle {
+    margin: 0;
+    color: var(--muted);
+    font-size: var(--fs-meta);
+    line-height: 1.4;
+  }
+
+  .info-row {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 10px 14px;
+    font-size: var(--fs-meta);
+    color: var(--muted);
+    margin-bottom: 18px;
+    text-align: center;
+  }
+
+  .latest-release-note {
+    margin: 6px 0 0;
+    color: var(--accent);
+  }
+
+  label {
+    display: block;
+    font-size: var(--fs-meta);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--muted);
+    margin-bottom: 6px;
+  }
+
+  select {
+    width: 100%;
+    background: var(--card);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 11px 12px;
+    font-size: var(--fs-body);
+    margin-bottom: 16px;
+    appearance: none;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='9' viewBox='0 0 14 9'%3E%3Cpath fill='%239B9793' d='M1 1l6 6 6-6'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 14px center;
+  }
+
+  select:focus, button:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+
+  .primary-btn {
+    width: 100%;
+    padding: 13px 16px;
+    font-size: var(--fs-body);
+    font-weight: 600;
+    color: #fff;
+    background: var(--primary);
+    border: none;
+    border-radius: 10px;
+    cursor: pointer;
+    transition: background 0.15s ease, transform 0.05s ease;
+  }
+
+  .primary-btn:hover:not(:disabled) { background: var(--primary-hover); }
+  .primary-btn:active:not(:disabled) { transform: scale(0.99); }
+
+  .primary-btn:disabled {
+    background: #3a2422;
+    color: var(--muted);
+    cursor: not-allowed;
+  }
+
+  .unsupported-msg {
+    width: 100%;
+    padding: 13px 16px;
+    text-align: center;
+    font-size: var(--fs-body);
+    color: var(--muted);
+    background: var(--card);
+    border: 1px dashed var(--border);
+    border-radius: 10px;
+  }
+
+  .confirm-panel {
+    margin-top: 16px;
+    padding: 14px;
+    border-radius: 10px;
+    background: #2a1f10;
+    border: 1px solid #6b4a12;
+  }
+
+  .confirm-panel p {
+    margin: 0 0 12px;
+    font-size: var(--fs-body);
+    line-height: 1.45;
+    color: #f0d9a8;
+  }
+
+  .confirm-actions { display: flex; gap: 10px; }
+
+  .confirm-actions button {
+    flex: 1;
+    padding: 9px 10px;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    background: var(--card);
+    color: var(--text);
+    cursor: pointer;
+    font-size: var(--fs-body);
+  }
+
+  #confirmYes { background: var(--primary); border-color: var(--primary); color: #fff; }
+
+  .stepper {
+    display: flex;
+    justify-content: space-between;
+    list-style: none;
+    margin: 20px 0 10px;
+    padding: 0;
+    font-size: var(--fs-meta);
+    color: var(--muted);
+  }
+
+  .stepper li {
+    flex: 1;
+    text-align: center;
+    position: relative;
+    padding-top: 18px;
+  }
+
+  .stepper li::before {
+    content: "";
+    position: absolute;
+    top: 0;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: var(--card);
+    border: 2px solid var(--border);
+  }
+
+  .stepper li.done::before { background: var(--accent); border-color: var(--accent); }
+  .stepper li.active::before { background: var(--primary); border-color: var(--primary); }
+  .stepper li.active { color: var(--text); font-weight: 600; }
+  .stepper li.done { color: var(--accent); }
+
+  .progress-wrap {
+    width: 100%;
+    height: 8px;
+    background: var(--card);
+    border-radius: 999px;
+    overflow: hidden;
+    margin-bottom: 10px;
+  }
+
+  .progress-bar {
+    height: 100%;
+    width: 100%;
+    transform: scaleX(0);
+    transform-origin: left;
+    background: linear-gradient(90deg, var(--primary), var(--accent));
+    transition: transform 0.2s ease;
+  }
+
+  .status-line {
+    min-height: 1.2em;
+    font-size: var(--fs-meta);
+    color: var(--muted);
+    text-align: center;
+    margin: 4px 0 6px;
+  }
+
+  .error-panel {
+    white-space: pre-wrap;
+    word-break: break-word;
+    background: #2a1414;
+    border: 1px solid #7a2a2a;
+    color: #ffb3b3;
+    border-radius: 10px;
+    padding: 12px 14px;
+    font-size: 0.8rem;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    margin-top: 12px;
+    max-height: 240px;
+    overflow: auto;
+  }
+
+  details.log-details {
+    margin-top: 14px;
+  }
+
+  details.log-details summary {
+    cursor: pointer;
+    font-size: var(--fs-meta);
+    color: var(--muted);
+  }
+
+  #logPanel {
+    margin-top: 8px;
+    background: #000;
+    color: #8adf9d;
+    border-radius: 8px;
+    padding: 10px;
+    font-size: 0.72rem;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    max-height: 160px;
+    overflow: auto;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+
+  footer {
+    margin-top: 22px;
+    padding-top: 14px;
+    border-top: 1px solid var(--border);
+    text-align: center;
+    font-size: var(--fs-meta);
+  }
+
+  footer a { color: var(--accent); text-decoration: none; }
+  footer a:hover { text-decoration: underline; }
+
+  .powered-by {
+    margin: 8px 0 0;
+    color: var(--muted);
+  }
+
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<main class="card">
+  <header>
+    <h1><span class="fry">Fry</span> Firmware Flasher</h1>
+    <p class="subtitle">Flash Fry firmware straight from your browser. No installers, no drivers.</p>
+  </header>
+
+  <div id="manifestInfo" class="info-row">
+    <span id="manifestStatus">Loading firmware release info&hellip;</span>
+    <p id="latestReleaseNote" class="latest-release-note" hidden></p>
+  </div>
+
+  <div>
+    <label for="boardSelect">Board</label>
+    <select id="boardSelect">
+      <option value="esp8266">ESP8266</option>
+      <option value="esp32" selected>ESP32</option>
+      <option value="esp32s3">ESP32-S3</option>
+      <option value="esp32c3">ESP32-C3</option>
+    </select>
+  </div>
+
+  <button id="flashBtn" class="primary-btn" disabled>Connect &amp; Flash</button>
+  <p id="unsupportedMsg" class="unsupported-msg" hidden>Web Serial requires Chrome or Edge on desktop</p>
+
+  <div id="confirmPanel" class="confirm-panel" hidden>
+    <p id="confirmMessage"></p>
+    <div class="confirm-actions">
+      <button id="confirmNo" type="button">Cancel</button>
+      <button id="confirmYes" type="button">Continue</button>
+    </div>
+  </div>
+
+  <ol id="stepper" class="stepper" hidden>
+    <li data-step="connecting">Connecting</li>
+    <li data-step="erasing">Erasing</li>
+    <li data-step="writing">Writing</li>
+    <li data-step="verifying">Verifying</li>
+    <li data-step="done">Done</li>
+  </ol>
+  <div id="progressWrap" class="progress-wrap" hidden>
+    <div id="progressBar" class="progress-bar"></div>
+  </div>
+  <p id="statusLine" class="status-line"></p>
+
+  <pre id="errorPanel" class="error-panel" hidden></pre>
+
+  <details class="log-details">
+    <summary>Device log</summary>
+    <div id="logPanel"></div>
+  </details>
+
+  <footer>
+    <a href="https://github.com/Fry-Networks/fry-firmware" target="_blank" rel="noopener noreferrer">Firmware source &amp; advanced flashing (esptool) &rarr;</a>
+    <p class="powered-by">Powered by Fry Networks</p>
+  </footer>
+</main>
+
+<script type="module">
+// esptool-js — Espressif official browser flashing library, Apache-2.0.
+// Pinned to an exact version via jsDelivr (immutable per npm release, CORS-enabled).
+import { ESPLoader, Transport } from "https://cdn.jsdelivr.net/npm/esptool-js@0.6.1/bundle.js";
+
+// Served same-origin from this page's own docs/flash/fw/ directory — the release
+// pipeline publishes manifest.json + the firmware binaries there at release time.
+// GitHub's release-asset host sends no Access-Control-Allow-Origin on any hop, so a
+// cross-origin fetch straight to github.com/.../releases/... can never succeed from
+// a browser; same-origin sidesteps CORS entirely instead of working around it.
+const MANIFEST_URL = new URL("fw/manifest.json", document.baseURI).toString();
+const LATEST_RELEASE_API = "https://api.github.com/repos/Fry-Networks/fry-firmware/releases/latest";
+
+const BOARD_LABELS = {
+  esp8266: "ESP8266",
+  esp32: "ESP32",
+  esp32s3: "ESP32-S3",
+  esp32c3: "ESP32-C3",
+};
+
+const STEP_ORDER = ["connecting", "erasing", "writing", "verifying", "done"];
+
+const els = {
+  unsupportedMsg: document.getElementById("unsupportedMsg"),
+  flashBtn: document.getElementById("flashBtn"),
+  boardSelect: document.getElementById("boardSelect"),
+  manifestStatus: document.getElementById("manifestStatus"),
+  stepper: document.getElementById("stepper"),
+  progressWrap: document.getElementById("progressWrap"),
+  progressBar: document.getElementById("progressBar"),
+  statusLine: document.getElementById("statusLine"),
+  errorPanel: document.getElementById("errorPanel"),
+  logPanel: document.getElementById("logPanel"),
+  confirmPanel: document.getElementById("confirmPanel"),
+  confirmMessage: document.getElementById("confirmMessage"),
+  confirmYes: document.getElementById("confirmYes"),
+  confirmNo: document.getElementById("confirmNo"),
+  latestReleaseNote: document.getElementById("latestReleaseNote"),
+};
+
+let manifest = null;
+
+// ---- small DOM helpers -----------------------------------------------
+
+function showError(message, rawError) {
+  els.errorPanel.hidden = false;
+  const rawText = rawError
+    ? (rawError instanceof Error ? (rawError.stack || rawError.message) : String(rawError))
+    : null;
+  els.errorPanel.textContent = rawText ? `${message}\n\n--- raw error ---\n${rawText}` : message;
+}
+
+function clearError() {
+  els.errorPanel.hidden = true;
+  els.errorPanel.textContent = "";
+}
+
+function appendLog(line) {
+  if (line === undefined || line === null || line === "") return;
+  els.logPanel.textContent += (typeof line === "string" ? line : String(line));
+  if (!els.logPanel.textContent.endsWith("\n")) els.logPanel.textContent += "\n";
+  els.logPanel.scrollTop = els.logPanel.scrollHeight;
+}
+
+function setStep(stepName) {
+  els.stepper.hidden = false;
+  const idx = STEP_ORDER.indexOf(stepName);
+  for (const li of els.stepper.children) {
+    const liIdx = STEP_ORDER.indexOf(li.dataset.step);
+    li.classList.toggle("active", liIdx === idx);
+    li.classList.toggle("done", liIdx < idx || (li.dataset.step === "done" && stepName === "done"));
+  }
+}
+
+function setProgress(pct) {
+  els.progressWrap.hidden = false;
+  els.progressBar.style.transform = `scaleX(${(Math.max(0, Math.min(100, pct)) / 100).toFixed(3)})`;
+}
+
+function askConfirm(message) {
+  return new Promise((resolve) => {
+    els.confirmMessage.textContent = message;
+    els.confirmPanel.hidden = false;
+    const cleanup = (result) => {
+      els.confirmPanel.hidden = true;
+      els.confirmYes.removeEventListener("click", onYes);
+      els.confirmNo.removeEventListener("click", onNo);
+      resolve(result);
+    };
+    const onYes = () => cleanup(true);
+    const onNo = () => cleanup(false);
+    els.confirmYes.addEventListener("click", onYes);
+    els.confirmNo.addEventListener("click", onNo);
+  });
+}
+
+// ---- crypto / manifest helpers ----------------------------------------
+
+function bytesToHex(buf) {
+  return [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+async function sha256Hex(bytes) {
+  const digest = await crypto.subtle.digest("SHA-256", bytes);
+  return bytesToHex(digest);
+}
+
+function normalizeChipName(name) {
+  // esptool-js main() resolves names like "ESP32", "ESP32-C3", "ESP32-S3", "ESP8266".
+  return String(name || "").replace(/[^a-z0-9]/gi, "").toLowerCase();
+}
+
+function isLikelyCorsFailure(err) {
+  // Chrome/Edge report a blocked cross-origin fetch as a bare TypeError("Failed to fetch")
+  // with no HTTP status to inspect — that shape is the CORS/network-failure signature.
+  return err instanceof TypeError;
+}
+
+async function loadManifest() {
+  try {
+    const res = await fetch(MANIFEST_URL, { cache: "no-store" });
+    if (!res.ok) throw new Error(`fw/manifest.json fetch returned HTTP ${res.status}`);
+    manifest = await res.json();
+    els.manifestStatus.textContent = `Fry firmware v${manifest.firmware_version} — select a board and press Connect & Flash.`;
+    if ("serial" in navigator) els.flashBtn.disabled = false;
+  } catch (err) {
+    manifest = null;
+    els.flashBtn.disabled = true;
+    els.manifestStatus.textContent = "Firmware release info unavailable — see error below.";
+    showError(
+      "Could not load fw/manifest.json. This page expects the release pipeline to publish " +
+      "manifest.json and the firmware binaries same-origin under docs/flash/fw/ (relative to " +
+      "this page) — if you're testing locally, confirm docs/flash/fw/manifest.json exists.",
+      err
+    );
+  }
+  // Best-effort only: shows a small informational note, never blocks flashing.
+  checkLatestRelease();
+}
+
+async function checkLatestRelease() {
+  try {
+    const res = await fetch(LATEST_RELEASE_API, { cache: "no-store" });
+    if (!res.ok || !els.latestReleaseNote) return;
+    const data = await res.json();
+    const latestTag = String(data.tag_name || "").replace(/^v/, "");
+    if (!latestTag) return;
+    if (manifest && manifest.firmware_version && latestTag !== manifest.firmware_version) {
+      els.latestReleaseNote.hidden = false;
+      els.latestReleaseNote.textContent =
+        `Note: the latest GitHub release is v${latestTag}, but this page is currently bundling v${manifest.firmware_version}.`;
+    } else if (!manifest) {
+      els.latestReleaseNote.hidden = false;
+      els.latestReleaseNote.textContent = `Latest GitHub release: v${latestTag}.`;
+    }
+  } catch {
+    // api.github.com is reachable cross-origin in practice, but this is purely
+    // informational — never let it error out or gate flashing either way.
+  }
+}
+
+function resolveAssetUrl(u) {
+  // Accepts either a relative path (e.g. "firmware-esp32-factory.bin", resolved
+  // against this page) or a full absolute URL, so the manifest can carry either.
+  return new URL(u, document.baseURI).toString();
+}
+
+function resolveBuildForBoard(board) {
+  const build = manifest && manifest.builds && manifest.builds[board];
+  if (!build) {
+    throw new Error(`The current manifest has no build entry for ${BOARD_LABELS[board] || board}.`);
+  }
+  if (board === "esp8266") {
+    // The ESP8266 image is a complete, self-contained 0x0 image.
+    if (!build.url || !build.sha256) {
+      throw new Error("The esp8266 build entry is missing a url/sha256.");
+    }
+    return { url: resolveAssetUrl(build.url), sha256: build.sha256, offset: 0x0 };
+  }
+  // ESP32 / ESP32-S3 / ESP32-C3: the plain "url" entry is an APP-ONLY image meant
+  // for offset 0x10000 (starts with magic byte 0xe9) — writing that at 0x0 produces
+  // a non-booting board. Only a merged bootloader+partitions+app "factory" image is
+  // safe to flash at 0x0. Refuse rather than silently falling back to the app image.
+  if (!build.factory || !build.factory.url || !build.factory.sha256) {
+    throw new Error("This release predates browser flashing — download v0.2.0 or newer.");
+  }
+  return { url: resolveAssetUrl(build.factory.url), sha256: build.factory.sha256, offset: 0x0 };
+}
+
+async function downloadAndVerify(build) {
+  els.statusLine.textContent = "Downloading firmware…";
+  let res;
+  try {
+    res = await fetch(build.url, { cache: "no-store" });
+  } catch (err) {
+    throw new Error(
+      (isLikelyCorsFailure(err)
+        ? `Could not download the firmware binary from ${build.url} — this looks like a CORS-blocked cross-origin fetch (e.g. a manifest entry still pointing at a GitHub release URL, which GitHub never serves with Access-Control-Allow-Origin). Firmware binaries need to be served same-origin under docs/flash/fw/. `
+        : `Could not download the firmware binary from ${build.url}. `) + String(err)
+    );
+  }
+  if (!res.ok) throw new Error(`Firmware download returned HTTP ${res.status}`);
+  const buf = await res.arrayBuffer();
+
+  els.statusLine.textContent = "Verifying firmware integrity (SHA-256)…";
+  const actualHex = await sha256Hex(buf);
+  if (actualHex.toLowerCase() !== String(build.sha256).toLowerCase()) {
+    throw new Error(
+      `SHA-256 mismatch — refusing to flash a corrupted/tampered image.\nexpected: ${build.sha256}\nactual:   ${actualHex}`
+    );
+  }
+  return new Uint8Array(buf);
+}
+
+// ---- main flash flow ----------------------------------------------------
+
+async function flash() {
+  clearError();
+  els.logPanel.textContent = "";
+  els.flashBtn.disabled = true;
+
+  const board = els.boardSelect.value;
+
+  let build;
+  try {
+    build = resolveBuildForBoard(board);
+  } catch (err) {
+    showError(err.message);
+    els.flashBtn.disabled = false;
+    return;
+  }
+
+  let firmwareBytes;
+  try {
+    firmwareBytes = await downloadAndVerify(build);
+  } catch (err) {
+    showError("Firmware download/verification failed.", err);
+    els.flashBtn.disabled = false;
+    return;
+  }
+
+  els.statusLine.textContent =
+    `Resolved Fry firmware v${manifest.firmware_version} for ${BOARD_LABELS[board]} ` +
+    `(offset 0x${build.offset.toString(16)}). Requesting serial port…`;
+
+  let transport = null;
+  try {
+    const port = await navigator.serial.requestPort();
+    transport = new Transport(port, true);
+    const esploader = new ESPLoader({
+      transport,
+      baudrate: 115200,
+      terminal: {
+        clean() { els.logPanel.textContent = ""; },
+        writeLine(line) { appendLog(line); },
+        write(chunk) { appendLog(chunk); },
+      },
+    });
+
+    setStep("connecting");
+    els.statusLine.textContent = "Connecting to device…";
+    const detectedRaw = await esploader.main();
+    const detected = normalizeChipName(detectedRaw);
+
+    if (detected && detected !== board) {
+      const detectedLabel = BOARD_LABELS[detected] || detectedRaw;
+      const proceed = await askConfirm(
+        `Detected chip is ${detectedLabel}, but you selected ${BOARD_LABELS[board]}. ` +
+        `Flashing the wrong image can brick the board. Continue flashing the ${BOARD_LABELS[board]} ` +
+        `image anyway, or cancel and re-select ${detectedLabel} above?`
+      );
+      if (!proceed) {
+        throw new Error("Flash cancelled after chip-detection mismatch.");
+      }
+    }
+
+    els.statusLine.textContent = `Connected to ${detectedRaw || BOARD_LABELS[board]}. Erasing flash…`;
+    setStep("erasing");
+    await esploader.eraseFlash();
+
+    setStep("writing");
+    els.statusLine.textContent = "Writing firmware…";
+    setProgress(0);
+    await esploader.writeFlash({
+      fileArray: [{ data: firmwareBytes, address: build.offset }],
+      // The factory/ESP8266 image already embeds its own flash mode/freq/size
+      // header — "keep" preserves that instead of guessing wrong values.
+      flashMode: "keep",
+      flashFreq: "keep",
+      flashSize: "keep",
+      eraseAll: false,
+      compress: true,
+      reportProgress: (_fileIndex, written, total) => {
+        setProgress((written / total) * 100);
+      },
+    });
+
+    setStep("verifying");
+    els.statusLine.textContent = "Verifying written firmware…";
+    setProgress(0);
+    const readBack = await esploader.readFlash(
+      build.offset,
+      firmwareBytes.length,
+      (_packet, progress, total) => {
+        if (total) setProgress((progress / total) * 100);
+      }
+    );
+    const readBackBytes = readBack instanceof Uint8Array ? readBack : new Uint8Array(readBack);
+    const readBackHex = await sha256Hex(readBackBytes);
+    if (readBackHex.toLowerCase() !== String(build.sha256).toLowerCase()) {
+      throw new Error(
+        `Post-write verification failed — flash contents do not match the expected image.\n` +
+        `expected:  ${build.sha256}\nread-back: ${readBackHex}`
+      );
+    }
+
+    setStep("done");
+    setProgress(100);
+    els.statusLine.textContent =
+      `Done — Fry firmware v${manifest.firmware_version} flashed and verified on ${BOARD_LABELS[board]}.`;
+
+    await esploader.after("hard_reset");
+  } catch (err) {
+    showError("Flashing failed.", err);
+  } finally {
+    if (transport) {
+      try { await transport.disconnect(); } catch { /* best-effort */ }
+    }
+    els.flashBtn.disabled = false;
+  }
+}
+
+// ---- wire-up --------------------------------------------------------
+
+if (!("serial" in navigator)) {
+  els.flashBtn.hidden = true;
+  els.unsupportedMsg.hidden = false;
+} else {
+  els.flashBtn.addEventListener("click", flash);
+}
+
+loadManifest();
+</script>
+</body>
+</html>
