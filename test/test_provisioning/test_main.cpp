@@ -15,6 +15,7 @@
 #include "provisioning_fsm.h"
 #include "sha256.h"
 #include "socks5_parse.h"
+#include "heap_gate.h"
 #include "semver.h"
 #include "wg_endpoint.h"
 
@@ -40,6 +41,7 @@ using fry::compareSemver;
 using fry::isNewerVersion;
 using fry::parseWgEndpoint;
 using fry::WgEndpoint;
+using fry::heapGatePass;
 
 void setUp(void) {}
 void tearDown(void) {}
@@ -335,6 +337,40 @@ void test_ota_never_downgrades(void) {
   TEST_ASSERT_TRUE(isNewerVersion("0.1.2", "0.1.1"));
 }
 
+// --- Dual OTA heap gate (total free heap AND largest contiguous block) ---------------------
+// Mirrors include/config.h's HEAP_GATE_OTA (20000) / HEAP_GATE_OTA_BLOCK (36864) as literal
+// numbers rather than including config.h, matching how the rest of this file already tests
+// fry_core in isolation (e.g. test_ota_counter_shouldrollback_at_limit hardcodes its limit).
+namespace {
+constexpr uint32_t kMinFreeTotal = 20000;
+constexpr uint32_t kMinBlock = 36864;
+}  // namespace
+
+void test_heap_gate_passes_when_both_thresholds_cleared(void) {
+  TEST_ASSERT_TRUE(heapGatePass(42712, 40000, kMinFreeTotal, kMinBlock));
+}
+
+void test_heap_gate_fails_when_total_free_too_low(void) {
+  // Plenty of contiguous block, but not enough free heap overall.
+  TEST_ASSERT_FALSE(heapGatePass(19999, 40000, kMinFreeTotal, kMinBlock));
+}
+
+void test_heap_gate_fails_on_fragmented_heap_even_with_high_total_free(void) {
+  // The exact field-crash evidence that motivated this gate: 42,712 B free (clears the old
+  // single total-free HEAP_GATE_OTA=20000 gate) but only a 34,152 B largest contiguous block —
+  // short of HEAP_GATE_OTA_BLOCK=36864 — is what let the board pass the old gate, allocate the
+  // 16 KB BearSSL buffer, and still die. The dual gate must reject this exact combination.
+  TEST_ASSERT_FALSE(heapGatePass(42712, 34152, kMinFreeTotal, kMinBlock));
+}
+
+void test_heap_gate_boundary_is_inclusive(void) {
+  // Exactly at both thresholds must pass (>=, not >).
+  TEST_ASSERT_TRUE(heapGatePass(kMinFreeTotal, kMinBlock, kMinFreeTotal, kMinBlock));
+  // One byte under either threshold must fail.
+  TEST_ASSERT_FALSE(heapGatePass(kMinFreeTotal - 1, kMinBlock, kMinFreeTotal, kMinBlock));
+  TEST_ASSERT_FALSE(heapGatePass(kMinFreeTotal, kMinBlock - 1, kMinFreeTotal, kMinBlock));
+}
+
 int main(int argc = 0, char** argv = nullptr) {
   (void)argc;
   (void)argv;
@@ -343,6 +379,10 @@ int main(int argc = 0, char** argv = nullptr) {
   RUN_TEST(test_semver_basic_ordering);
   RUN_TEST(test_semver_missing_components_and_suffixes);
   RUN_TEST(test_ota_never_downgrades);
+  RUN_TEST(test_heap_gate_passes_when_both_thresholds_cleared);
+  RUN_TEST(test_heap_gate_fails_when_total_free_too_low);
+  RUN_TEST(test_heap_gate_fails_on_fragmented_heap_even_with_high_total_free);
+  RUN_TEST(test_heap_gate_boundary_is_inclusive);
   RUN_TEST(test_wg_endpoint_splits_ipv4_host_and_port);
   RUN_TEST(test_wg_endpoint_host_without_port);
   RUN_TEST(test_wg_endpoint_bracketed_ipv6_with_port);
