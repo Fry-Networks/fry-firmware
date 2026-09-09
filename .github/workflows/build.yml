@@ -30,12 +30,25 @@ jobs:
         run: pio run -e ${{ matrix.env }}
 
       - name: Name the artifact
-        run: cp ".pio/build/${{ matrix.env }}/firmware.bin" "firmware-${{ matrix.env }}.bin"
+        run: |
+          set -eu
+          cp ".pio/build/${{ matrix.env }}/firmware.bin" "firmware-${{ matrix.env }}.bin"
+          # The ESP32 family needs its bootloader and partition table downstream:
+          # firmware.bin is an app-only image for offset 0x10000, so the release job
+          # merges a factory image a browser flasher can write from offset 0x0.
+          for extra in bootloader partitions; do
+            if [ -f ".pio/build/${{ matrix.env }}/$extra.bin" ]; then
+              cp ".pio/build/${{ matrix.env }}/$extra.bin" "$extra-${{ matrix.env }}.bin"
+            fi
+          done
 
       - uses: actions/upload-artifact@v4
         with:
           name: firmware-${{ matrix.env }}
-          path: firmware-${{ matrix.env }}.bin
+          path: |
+            firmware-${{ matrix.env }}.bin
+            bootloader-${{ matrix.env }}.bin
+            partitions-${{ matrix.env }}.bin
           if-no-files-found: error
 
   test-native:
@@ -82,6 +95,10 @@ jobs:
             mkdir -p "manifest_input/$env"
             cp "artifacts/firmware-$env/firmware-$env.bin" "release/firmware-$env.bin"
             cp "artifacts/firmware-$env/firmware-$env.bin" "manifest_input/$env/firmware.bin"
+            for extra in bootloader partitions; do
+              src="artifacts/firmware-$env/$extra-$env.bin"
+              if [ -f "$src" ]; then cp "$src" "manifest_input/$env/$extra.bin"; fi
+            done
           done
 
       - name: Generate ota/manifest.json
@@ -90,7 +107,7 @@ jobs:
           VERSION="${GITHUB_REF_NAME#v}"
           python3 tools/make_manifest.py --version "$VERSION" \
             --release-base "https://github.com/${{ github.repository }}/releases/download/${GITHUB_REF_NAME}" \
-            --build-dir manifest_input --out ota/manifest.json
+            --build-dir manifest_input --out ota/manifest.json --dist release
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
@@ -100,4 +117,7 @@ jobs:
             release/firmware-esp32.bin
             release/firmware-esp32s3.bin
             release/firmware-esp32c3.bin
+            release/firmware-esp32-factory.bin
+            release/firmware-esp32s3-factory.bin
+            release/firmware-esp32c3-factory.bin
             ota/manifest.json
