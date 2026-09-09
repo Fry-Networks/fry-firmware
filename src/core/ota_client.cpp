@@ -97,11 +97,17 @@ bool downloadAndApply(const String& url, const String& shaExpect, const String& 
     http.end();
     return false;
   }
-  // Dual gate (total free AND largest contiguous block) with a bounded wait so a transient
-  // fragmentation dip degrades into a short retry instead of an immediate failure — see
+  // Gate before streaming the image in. The large CONTIGUOUS requirement exists only for the
+  // https path, where BearSSL wants a 16 KB receive buffer in one block — see
   // HEAP_GATE_OTA_BLOCK in config.h for the field evidence that made total-free alone wrong.
-  if (!fry::waitForHeapGate(HEAP_GATE_OTA, HEAP_GATE_OTA_BLOCK)) {
-    Serial.println("ota: heap gate failed (total free or largest contiguous block)");
+  // A plain-http download has no such buffer, so demanding it there would refuse a perfectly
+  // safe update: measured on COM11 at blk=34176 the http lab OTA was rejected by the
+  // unconditional gate even though it needs none of that headroom. Bounded wait either way,
+  // so a transient fragmentation dip becomes a short retry rather than a failed update.
+  const bool needsTlsBuffer = url.startsWith("https://");
+  if (!fry::waitForHeapGate(HEAP_GATE_OTA, needsTlsBuffer ? HEAP_GATE_OTA_BLOCK : 0)) {
+    Serial.printf("ota: heap gate failed (%s)\n",
+                  needsTlsBuffer ? "total free or largest contiguous block" : "total free");
     http.end();
     return false;
   }
@@ -225,6 +231,20 @@ bool checkNow() {
   String manifestUrl = fry_config::getOtaUrl();
   if (manifestUrl.length() == 0) manifestUrl = OTA_MANIFEST_URL;
   if (manifestUrl.length() == 0) return false;
+
+#if defined(FRY_BOARD_ESP8266)
+  // Do not even open an HTTPS session for the manifest unless the big BearSSL path is
+  // affordable. The release manifest lives on GitHub, which does not honour MFLN, so on a
+  // fragmented heap the 512/512 fallback cannot carry its handshake and BearSSL fails hard
+  // rather than returning an error. Skipping the check costs one deferred update; not
+  // skipping it cost a crash-and-reboot on COM11. Plain-HTTP manifests (the lab server) are
+  // unaffected and still checked, which is how OTA is exercised on this chip.
+  if (manifestUrl.startsWith("https://") &&
+      !fry::waitForHeapGate(HEAP_GATE_OTA, HEAP_GATE_OTA_BLOCK, 1)) {
+    Serial.println("ota: skipped https manifest check - insufficient contiguous heap");
+    return false;
+  }
+#endif
 
   HTTPClient http;
   WiFiClientSecure sec;
