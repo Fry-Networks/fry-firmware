@@ -148,8 +148,20 @@ void relayTaskFn(void*) {
 
 }  // namespace
 
+// esp_wireguard_connect() returns ESP_ERR_RETRY (0x201) while the endpoint's asynchronous
+// DNS resolution is still in flight. It is an advisory to call again, not a failure - the
+// library starts a second resolution itself in case the first ran too early. Treating it as
+// fatal is why the tunnel never came up (seen as: wg: connect failed err=513).
+static constexpr int      WG_CONNECT_ATTEMPTS = 10;
+static constexpr uint32_t WG_CONNECT_RETRY_MS = 500;
+
 void init() {
-  fry_hwapi::ensureNtpSynced();  // NTP must be synced before the handshake (PROTOCOL.md / T6)
+  // A WireGuard handshake with an unset clock cannot succeed, so honour the result rather
+  // than discarding it - proceeding would spend the retry budget on a misleading error.
+  if (!fry_hwapi::ensureNtpSynced()) {  // PROTOCOL.md / T6
+    Serial.println("wg: NTP not synced - skipping handshake");
+    return;
+  }
 
   s_priv = fry_config::getWgPriv();
   s_pub = fry_config::getWgPeerPub();
@@ -183,7 +195,12 @@ void init() {
     Serial.printf("wg: init failed err=%d\n", static_cast<int>(err));
     return;
   }
-  err = esp_wireguard_connect(&s_wgCtx);
+  for (int attempt = 1; attempt <= WG_CONNECT_ATTEMPTS; ++attempt) {
+    err = esp_wireguard_connect(&s_wgCtx);
+    if (err != ESP_ERR_RETRY) break;  // success, or a real failure worth reporting
+    Serial.printf("wg: endpoint DNS pending, retry %d/%d\n", attempt, WG_CONNECT_ATTEMPTS);
+    delay(WG_CONNECT_RETRY_MS);
+  }
   if (err != ESP_OK) {
     Serial.printf("wg: connect failed err=%d\n", static_cast<int>(err));
     return;

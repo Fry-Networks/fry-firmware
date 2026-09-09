@@ -10,6 +10,7 @@
 #include "fry_config.h"
 #include "miner_key.h"
 #include "trigger_hooks.h"
+#include "wg_endpoint.h"
 
 #ifndef FRY_FIRMWARE_VERSION
 #define FRY_FIRMWARE_VERSION "0.0.0-dev"
@@ -96,7 +97,17 @@ void cmdSetWg(JsonDocument& doc) {
     return;
   }
 
-  fry_config::setWgEndpoint(endpoint);
+  // PROTOCOL.md sends endpoint as host:port, but esp_wireguard passes the stored endpoint
+  // straight to dns_gethostbyname(), which cannot parse a trailing :port. Storing the
+  // composite string made every IP literal look like a hostname, so resolution stayed
+  // asynchronous and esp_wireguard_connect() returned ESP_ERR_RETRY (err=513) forever.
+  const fry::WgEndpoint parsed = fry::parseWgEndpoint(endpoint);
+  if (!parsed.ok) {
+    respondError("set_wg", "bad_endpoint");
+    return;
+  }
+  fry_config::setWgEndpoint(parsed.host);
+  if (parsed.hasPort) fry_config::setWgPort(parsed.port);
   fry_config::setWgPeerPub(peerPub);
   fry_config::setWgPriv(priv);
   fry_config::setWgPsk(psk);
