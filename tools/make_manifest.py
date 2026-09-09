@@ -61,14 +61,20 @@ def merge_factory(env, build_dir, out_path, esptool, boot_app0, python):
         ("0xe000", boot_app0),
         ("0x10000", os.path.join(env_dir, "firmware.bin")),
     ]
-    for _, p in parts:
-        if not os.path.isfile(p):
-            raise SystemExit("make_manifest: missing %s (run `pio run -e %s`)" % (p, env))
-    cmd = [python, esptool, "--chip", chip, "merge_bin", "-o", out_path,
-           "--flash_mode", mode, "--flash_freq", freq, "--flash_size", size]
-    for off, p in parts:
-        cmd += [off, p]
-    subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL)
+    if not os.path.isfile(out_path):
+        for _, part in parts:
+            if not os.path.isfile(part):
+                raise SystemExit("make_manifest: missing %s (run `pio run -e %s`)" % (part, env))
+    # A pre-merged image may already be sitting in the output directory: CI merges inside the
+    # build job, which is the only place the Arduino framework (and therefore boot_app0.bin
+    # and esptool) is installed, and hands the result to the release job as an artifact.
+    # Reuse it rather than re-merging, but still run the verification below either way.
+    if not os.path.isfile(out_path):
+        cmd = [python, esptool, "--chip", chip, "merge_bin", "-o", out_path,
+               "--flash_mode", mode, "--flash_freq", freq, "--flash_size", size]
+        for off, part in parts:
+            cmd += [off, part]
+        subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL)
 
     # Prove the merge landed where the flasher will expect it, rather than trusting exit 0.
     app = open(os.path.join(env_dir, "firmware.bin"), "rb").read()
@@ -94,14 +100,21 @@ def main():
                     help="interpreter used to run esptool.py")
     ap.add_argument("--no-factory", action="store_true",
                     help="skip merged factory images (OTA-only manifest)")
+    ap.add_argument("--only", default=None,
+                    help="restrict to a single environment. CI builds one env per matrix job, "
+                         "so the merge step there can only see its own binaries.")
     a = ap.parse_args()
+
+    envs = (a.only,) if a.only else ENVS
+    if a.only and a.only not in ENVS:
+        raise SystemExit("make_manifest: unknown env %s" % a.only)
 
     dist = a.dist or (os.path.dirname(a.out) or ".")
     os.makedirs(dist, exist_ok=True)
 
     builds = {}
     missing = []
-    for env in ENVS:
+    for env in envs:
         bin_path = os.path.join(a.build_dir, env, "firmware.bin")
         if not os.path.isfile(bin_path):
             missing.append(bin_path)
@@ -118,7 +131,7 @@ def main():
         sys.exit(1)
 
     if not a.no_factory:
-        for env in ENVS:
+        for env in envs:
             if env not in FACTORY:
                 continue
             name = "firmware-%s-factory.bin" % env

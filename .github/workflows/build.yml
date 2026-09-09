@@ -42,6 +42,19 @@ jobs:
             fi
           done
 
+      - name: Merge factory image
+        # Must happen HERE, not in the release job: the release job never runs `pio run`, so
+        # ~/.platformio/packages is empty there and boot_app0.bin does not exist. Merging in
+        # the build job and shipping the result as an artifact is the only place both esptool
+        # and the Arduino framework are guaranteed present.
+        if: matrix.env != 'esp8266'
+        run: |
+          set -eu
+          python3 tools/make_manifest.py --version 0.0.0-ci --release-base . \
+            --build-dir .pio/build --dist . --out /tmp/ci-manifest.json --python python3 \
+            --only ${{ matrix.env }}
+          ls -l firmware-${{ matrix.env }}-factory.bin
+
       - uses: actions/upload-artifact@v4
         with:
           name: firmware-${{ matrix.env }}
@@ -49,6 +62,7 @@ jobs:
             firmware-${{ matrix.env }}.bin
             bootloader-${{ matrix.env }}.bin
             partitions-${{ matrix.env }}.bin
+            firmware-${{ matrix.env }}-factory.bin
           if-no-files-found: error
 
   test-native:
@@ -99,6 +113,8 @@ jobs:
               src="artifacts/firmware-$env/$extra-$env.bin"
               if [ -f "$src" ]; then cp "$src" "manifest_input/$env/$extra.bin"; fi
             done
+            fac="artifacts/firmware-$env/firmware-$env-factory.bin"
+            if [ -f "$fac" ]; then cp "$fac" "release/firmware-$env-factory.bin"; fi
           done
 
       - name: Generate ota/manifest.json
