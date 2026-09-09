@@ -81,6 +81,11 @@
     text-align: center;
   }
 
+  .latest-release-note {
+    margin: 6px 0 0;
+    color: var(--accent);
+  }
+
   label {
     display: block;
     font-size: var(--fs-meta);
@@ -301,6 +306,7 @@
 
   <div id="manifestInfo" class="info-row">
     <span id="manifestStatus">Loading firmware release info&hellip;</span>
+    <p id="latestReleaseNote" class="latest-release-note" hidden></p>
   </div>
 
   <div>
@@ -354,7 +360,13 @@
 // Pinned to an exact version via jsDelivr (immutable per npm release, CORS-enabled).
 import { ESPLoader, Transport } from "https://cdn.jsdelivr.net/npm/esptool-js@0.6.1/bundle.js";
 
-const MANIFEST_URL = "https://github.com/Fry-Networks/fry-firmware/releases/latest/download/manifest.json";
+// Served same-origin from this page's own docs/flash/fw/ directory — the release
+// pipeline publishes manifest.json + the firmware binaries there at release time.
+// GitHub's release-asset host sends no Access-Control-Allow-Origin on any hop, so a
+// cross-origin fetch straight to github.com/.../releases/... can never succeed from
+// a browser; same-origin sidesteps CORS entirely instead of working around it.
+const MANIFEST_URL = new URL("fw/manifest.json", document.baseURI).toString();
+const LATEST_RELEASE_API = "https://api.github.com/repos/Fry-Networks/fry-firmware/releases/latest";
 
 const BOARD_LABELS = {
   esp8266: "ESP8266",
@@ -380,6 +392,7 @@ const els = {
   confirmMessage: document.getElementById("confirmMessage"),
   confirmYes: document.getElementById("confirmYes"),
   confirmNo: document.getElementById("confirmNo"),
+  latestReleaseNote: document.getElementById("latestReleaseNote"),
 };
 
 let manifest = null;
@@ -463,7 +476,7 @@ function isLikelyCorsFailure(err) {
 async function loadManifest() {
   try {
     const res = await fetch(MANIFEST_URL, { cache: "no-store" });
-    if (!res.ok) throw new Error(`manifest fetch returned HTTP ${res.status}`);
+    if (!res.ok) throw new Error(`fw/manifest.json fetch returned HTTP ${res.status}`);
     manifest = await res.json();
     els.manifestStatus.textContent = `Fry firmware v${manifest.firmware_version} — select a board and press Connect & Flash.`;
     if ("serial" in navigator) els.flashBtn.disabled = false;
@@ -471,11 +484,42 @@ async function loadManifest() {
     manifest = null;
     els.flashBtn.disabled = true;
     els.manifestStatus.textContent = "Firmware release info unavailable — see error below.";
-    const diagnosis = isLikelyCorsFailure(err)
-      ? "Could not download the firmware manifest from GitHub. This is very likely GitHub's release-asset CORS policy blocking a cross-origin browser fetch (GitHub does not send Access-Control-Allow-Origin on release download URLs). This page cannot work around that from client-side code alone — the release pipeline needs to publish manifest.json (and the firmware binaries) somewhere that sends CORS headers, e.g. mirrored into the repo and served via raw.githubusercontent.com, or copied to a CORS-enabled CDN."
-      : "Could not load the firmware manifest.";
-    showError(diagnosis, err);
+    showError(
+      "Could not load fw/manifest.json. This page expects the release pipeline to publish " +
+      "manifest.json and the firmware binaries same-origin under docs/flash/fw/ (relative to " +
+      "this page) — if you're testing locally, confirm docs/flash/fw/manifest.json exists.",
+      err
+    );
   }
+  // Best-effort only: shows a small informational note, never blocks flashing.
+  checkLatestRelease();
+}
+
+async function checkLatestRelease() {
+  try {
+    const res = await fetch(LATEST_RELEASE_API, { cache: "no-store" });
+    if (!res.ok || !els.latestReleaseNote) return;
+    const data = await res.json();
+    const latestTag = String(data.tag_name || "").replace(/^v/, "");
+    if (!latestTag) return;
+    if (manifest && manifest.firmware_version && latestTag !== manifest.firmware_version) {
+      els.latestReleaseNote.hidden = false;
+      els.latestReleaseNote.textContent =
+        `Note: the latest GitHub release is v${latestTag}, but this page is currently bundling v${manifest.firmware_version}.`;
+    } else if (!manifest) {
+      els.latestReleaseNote.hidden = false;
+      els.latestReleaseNote.textContent = `Latest GitHub release: v${latestTag}.`;
+    }
+  } catch {
+    // api.github.com is reachable cross-origin in practice, but this is purely
+    // informational — never let it error out or gate flashing either way.
+  }
+}
+
+function resolveAssetUrl(u) {
+  // Accepts either a relative path (e.g. "firmware-esp32-factory.bin", resolved
+  // against this page) or a full absolute URL, so the manifest can carry either.
+  return new URL(u, document.baseURI).toString();
 }
 
 function resolveBuildForBoard(board) {
@@ -488,7 +532,7 @@ function resolveBuildForBoard(board) {
     if (!build.url || !build.sha256) {
       throw new Error("The esp8266 build entry is missing a url/sha256.");
     }
-    return { url: build.url, sha256: build.sha256, offset: 0x0 };
+    return { url: resolveAssetUrl(build.url), sha256: build.sha256, offset: 0x0 };
   }
   // ESP32 / ESP32-S3 / ESP32-C3: the plain "url" entry is an APP-ONLY image meant
   // for offset 0x10000 (starts with magic byte 0xe9) — writing that at 0x0 produces
@@ -497,7 +541,7 @@ function resolveBuildForBoard(board) {
   if (!build.factory || !build.factory.url || !build.factory.sha256) {
     throw new Error("This release predates browser flashing — download v0.2.0 or newer.");
   }
-  return { url: build.factory.url, sha256: build.factory.sha256, offset: 0x0 };
+  return { url: resolveAssetUrl(build.factory.url), sha256: build.factory.sha256, offset: 0x0 };
 }
 
 async function downloadAndVerify(build) {
@@ -508,8 +552,8 @@ async function downloadAndVerify(build) {
   } catch (err) {
     throw new Error(
       (isLikelyCorsFailure(err)
-        ? "Could not download the firmware binary — GitHub's release-asset CORS policy is blocking this browser fetch (no Access-Control-Allow-Origin on the download URL). "
-        : "Could not download the firmware binary. ") + String(err)
+        ? `Could not download the firmware binary from ${build.url} — this looks like a CORS-blocked cross-origin fetch (e.g. a manifest entry still pointing at a GitHub release URL, which GitHub never serves with Access-Control-Allow-Origin). Firmware binaries need to be served same-origin under docs/flash/fw/. `
+        : `Could not download the firmware binary from ${build.url}. `) + String(err)
     );
   }
   if (!res.ok) throw new Error(`Firmware download returned HTTP ${res.status}`);
