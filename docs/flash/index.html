@@ -359,6 +359,10 @@
 // esptool-js — Espressif official browser flashing library, Apache-2.0.
 // Pinned to an exact version via jsDelivr (immutable per npm release, CORS-enabled).
 import { ESPLoader, Transport } from "https://cdn.jsdelivr.net/npm/esptool-js@0.6.1/bundle.js";
+// Chip-description to board-key mapping (shared with test/flash/chipfamily.test.mjs).
+import { BOARD_LABELS, boardForChipDescription, mismatchMessage, unsupportedMessage } from "./chipfamily.js";
+// Exposed so the live-page verification exercises the same function the page uses.
+window.__fryFlasher = { BOARD_LABELS, boardForChipDescription };
 
 // Served same-origin from this page's own docs/flash/fw/ directory — the release
 // pipeline publishes manifest.json + the firmware binaries there at release time.
@@ -367,13 +371,6 @@ import { ESPLoader, Transport } from "https://cdn.jsdelivr.net/npm/esptool-js@0.
 // a browser; same-origin sidesteps CORS entirely instead of working around it.
 const MANIFEST_URL = new URL("fw/manifest.json", document.baseURI).toString();
 const LATEST_RELEASE_API = "https://api.github.com/repos/Fry-Networks/fry-firmware/releases/latest";
-
-const BOARD_LABELS = {
-  esp8266: "ESP8266",
-  esp32: "ESP32",
-  esp32s3: "ESP32-S3",
-  esp32c3: "ESP32-C3",
-};
 
 const STEP_ORDER = ["connecting", "erasing", "writing", "verifying", "done"];
 
@@ -434,9 +431,10 @@ function setProgress(pct) {
   els.progressBar.style.transform = `scaleX(${(Math.max(0, Math.min(100, pct)) / 100).toFixed(3)})`;
 }
 
-function askConfirm(message) {
+function askConfirm(message, yesLabel = "Continue") {
   return new Promise((resolve) => {
     els.confirmMessage.textContent = message;
+    els.confirmYes.textContent = yesLabel;
     els.confirmPanel.hidden = false;
     const cleanup = (result) => {
       els.confirmPanel.hidden = true;
@@ -460,11 +458,6 @@ function bytesToHex(buf) {
 async function sha256Hex(bytes) {
   const digest = await crypto.subtle.digest("SHA-256", bytes);
   return bytesToHex(digest);
-}
-
-function normalizeChipName(name) {
-  // esptool-js main() resolves names like "ESP32", "ESP32-C3", "ESP32-S3", "ESP8266".
-  return String(name || "").replace(/[^a-z0-9]/gi, "").toLowerCase();
 }
 
 function isLikelyCorsFailure(err) {
@@ -576,7 +569,7 @@ async function flash() {
   els.logPanel.textContent = "";
   els.flashBtn.disabled = true;
 
-  const board = els.boardSelect.value;
+  let board = els.boardSelect.value;
 
   let build;
   try {
@@ -617,18 +610,26 @@ async function flash() {
     setStep("connecting");
     els.statusLine.textContent = "Connecting to device…";
     const detectedRaw = await esploader.main();
-    const detected = normalizeChipName(detectedRaw);
+    // esptool-js reports a package/marketing string ("ESP32-S3 (QFN56) (revision v0.2)",
+    // "ESP32-D0WDQ6 ..."), never the board key, so map it to a family first.
+    const detected = boardForChipDescription(detectedRaw);
 
-    if (detected && detected !== board) {
-      const detectedLabel = BOARD_LABELS[detected] || detectedRaw;
-      const proceed = await askConfirm(
-        `Detected chip is ${detectedLabel}, but you selected ${BOARD_LABELS[board]}. ` +
-        `Flashing the wrong image can brick the board. Continue flashing the ${BOARD_LABELS[board]} ` +
-        `image anyway, or cancel and re-select ${detectedLabel} above?`
-      );
+    if (detected === null) {
+      throw new Error(unsupportedMessage(detectedRaw));
+    }
+    if (detected !== board) {
+      const proceed = await askConfirm(mismatchMessage(detectedRaw, detected, board), "Switch & flash");
       if (!proceed) {
         throw new Error("Flash cancelled after chip-detection mismatch.");
       }
+      // Switch to the detected family and re-resolve, re-download and re-verify its image.
+      // The bytes fetched for the previously selected board are never written.
+      board = detected;
+      els.boardSelect.value = board;
+      build = resolveBuildForBoard(board);
+      firmwareBytes = await downloadAndVerify(build);
+      els.statusLine.textContent =
+        `Switched to ${BOARD_LABELS[board]}: firmware v${manifest.firmware_version} downloaded and verified.`;
     }
 
     els.statusLine.textContent = `Connected to ${detectedRaw || BOARD_LABELS[board]}. Erasing flash…`;

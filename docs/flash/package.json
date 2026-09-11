@@ -1,0 +1,5 @@
+{
+  "type": "module",
+  "private": true,
+  "description": "Marks the flasher scripts as ES modules for node --test; GitHub Pages ignores this file."
+}
