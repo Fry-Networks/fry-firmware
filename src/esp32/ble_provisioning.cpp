@@ -6,6 +6,7 @@
 #include <cstring>
 
 #include "../core/fry_config.h"
+#include "provisioning_commit.h"
 
 #ifndef FRY_FIRMWARE_VERSION
 #define FRY_FIRMWARE_VERSION "0.0.0-dev"
@@ -85,12 +86,14 @@ class ProvCallbacks : public NimBLECharacteristicCallbacks {
       copyAttrValue(ch, wallet, sizeof(wallet), &rawLen);
       fry::ProvInputs in;
       in.walletValid = (rawLen == 58);
-      bool changed = s_fsm.feed(fry::ProvEvent::WalletWritten, in);
-      if (changed && s_fsm.state() == fry::ProvState::Connecting) {
-        // Commit semantics per PROTOCOL.md section 1: writing WALLET commits provisioning.
+      // Commit semantics per PROTOCOL.md section 1: writing WALLET commits provisioning.
+      // Persist BEFORE the FSM reports Connecting: loop() on the other core polls
+      // readyToConnect() and reads the credentials back from NVS immediately, so feeding the
+      // event first raced it into WiFi.begin("") ("SSID too long or missing").
+      fry::commitOnWallet(s_fsm, in, [&]() {
         fry_config::setWifi(s_pendingSsid, s_pendingPass);
         fry_config::setWallet(wallet);
-      }
+      });
       updateStatusChar();
     }
   }
