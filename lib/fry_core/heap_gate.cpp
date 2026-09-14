@@ -20,4 +20,12 @@ uint32_t queryMaxFreeBlock() {
 #endif
 }
 
+
+uint32_t otaMinContiguousBlock(bool isHttps, bool bearsslSingleBuffer, uint32_t configuredBlock) {
+  // Only BearSSL needs a second large CONTIGUOUS block at download time, and only over https.
+  // Keying this off the URL scheme alone blocked every ESP32 update: the gate runs after the
+  // HTTPS GET, so mbedtls already holds its buffers and the check measures the wrong moment.
+  return (isHttps && bearsslSingleBuffer) ? configuredBlock : 0;
+}
+
 }  // namespace fry

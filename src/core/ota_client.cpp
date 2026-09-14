@@ -11,6 +11,7 @@
 
 #include "config.h"
 #include "fry_config.h"
+#include "heap_gate.h"
 #include "heap_gate_wait.h"
 #include "semver.h"
 #include "http_tls.h"
@@ -104,10 +105,17 @@ bool downloadAndApply(const String& url, const String& shaExpect, const String& 
   // safe update: measured on COM11 at blk=34176 the http lab OTA was rejected by the
   // unconditional gate even though it needs none of that headroom. Bounded wait either way,
   // so a transient fragmentation dip becomes a short retry rather than a failed update.
-  const bool needsTlsBuffer = url.startsWith("https://");
-  if (!fry::waitForHeapGate(HEAP_GATE_OTA, needsTlsBuffer ? HEAP_GATE_OTA_BLOCK : 0)) {
+  const bool isHttps = url.startsWith("https://");
+#if defined(ARDUINO_ARCH_ESP8266)
+  constexpr bool kBearsslSingleBuffer = true;
+#else
+  constexpr bool kBearsslSingleBuffer = false;  // ESP32 family uses mbedtls
+#endif
+  const uint32_t minBlock =
+      fry::otaMinContiguousBlock(isHttps, kBearsslSingleBuffer, HEAP_GATE_OTA_BLOCK);
+  if (!fry::waitForHeapGate(HEAP_GATE_OTA, minBlock)) {
     Serial.printf("ota: heap gate failed (%s)\n",
-                  needsTlsBuffer ? "total free or largest contiguous block" : "total free");
+                  minBlock ? "total free or largest contiguous block" : "total free");
     http.end();
     return false;
   }

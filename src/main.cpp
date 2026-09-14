@@ -17,6 +17,7 @@
 #include "core/trigger_hooks.h"
 #include "core/vpn_relay.h"
 #include "core/wifi_station.h"
+#include "heap_gate.h"
 #include "reset_button.h"
 
 #ifndef FRY_FIRMWARE_VERSION
@@ -86,13 +87,13 @@ void emitHealthLogIfDue() {
   unsigned long now = millis();
   if (now - s_lastHealthLogMs < HEALTH_LOG_MS) return;
   s_lastHealthLogMs = now;
+  // blk must be the largest CONTIGUOUS block, not total free. On ESP32 this printed getFreeHeap()
+  // for both, so the field that the OTA gate actually decides on was invisible in every log we
+  // have — a board could report blk=149668 while refusing an update for want of a 36 KB block.
+  // fry::queryMaxFreeBlock() is the same source the gate reads.
   Serial.printf("[health] up=%lus heap=%u blk=%u rssi=%d vpn=%s relayed=%u temp=na\n",
                 now / 1000, static_cast<unsigned>(ESP.getFreeHeap()),
-#if defined(ARDUINO_ARCH_ESP8266)
-                static_cast<unsigned>(ESP.getMaxFreeBlockSize()),
-#else
-                static_cast<unsigned>(ESP.getFreeHeap()),
-#endif
+                static_cast<unsigned>(fry::queryMaxFreeBlock()),
                 fry_wifi::isConnected() ? fry_wifi::rssi() : 0, fry_vpn::isUp() ? "up" : "down",
                 static_cast<unsigned>(fry_vpn::relayedBytes()));
 }
