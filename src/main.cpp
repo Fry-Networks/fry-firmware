@@ -7,6 +7,7 @@
 #else
 #include <WiFi.h>
 #endif
+#include "boot_policy.h"
 #include "config.h"
 #include "core/fry_config.h"
 #include "core/miner_key.h"
@@ -16,6 +17,7 @@
 #include "core/trigger_hooks.h"
 #include "core/vpn_relay.h"
 #include "core/wifi_station.h"
+#include "reset_button.h"
 
 #ifndef FRY_FIRMWARE_VERSION
 #define FRY_FIRMWARE_VERSION "0.0.0-dev"
@@ -26,12 +28,50 @@
 
 namespace {
 
-enum class BootPhase { AwaitingProvisioning, ConnectingWifi, Ready };
+using fry::BootPhase;
 
 BootPhase s_phase = BootPhase::AwaitingProvisioning;
+fry::BootPolicy s_bootPolicy;
+fry::ResetButton s_resetButton;
+unsigned long s_lastResetHintMs = 0;
 char s_minerKey[40] = "IOT-PENDING";
 char s_deviceName[32] = {0};
 unsigned long s_lastHealthLogMs = 0;
+
+// The only way to change phase. Routing every transition through the policy means no call site
+// can forget to bring the provisioning transport up — which is precisely how a board whose stored
+// WiFi credentials had gone stale used to land in AwaitingProvisioning with no radio running, and
+// so become permanently invisible to the app. See lib/fry_core/boot_policy.h.
+void setPhase(BootPhase phase) {
+  s_phase = phase;
+  if (s_bootPolicy.onPhaseEntry(phase)) {
+    fry_provisioning::init(s_deviceName, s_minerKey);
+  }
+}
+
+// Recovery of last resort, polled in every phase. Clears stored WiFi credentials and wallet so
+// the board comes back up advertising for provisioning. fry_config::factoryReset() deliberately
+// preserves the salt and miner key, so the device keeps its server identity across the reset.
+void pollFactoryResetButton() {
+  unsigned long now = millis();
+  bool pressed = digitalRead(FRY_RESET_BUTTON_PIN) == LOW;
+
+  if (s_resetButton.update(pressed, static_cast<uint32_t>(now))) {
+    Serial.println("[reset] factory reset - clearing wifi + wallet, identity preserved");
+    Serial.flush();
+    fry_config::factoryReset();
+    ESP.restart();
+    return;
+  }
+
+  // Progress feedback, so a user holding the button can tell it is being seen.
+  uint32_t held = s_resetButton.heldMs(static_cast<uint32_t>(now));
+  if (held >= 1000 && now - s_lastResetHintMs >= 1000) {
+    s_lastResetHintMs = now;
+    Serial.printf("[reset] hold %lus/%lus\n", (unsigned long)(held / 1000),
+                  (unsigned long)(fry::kFactoryResetHoldMs / 1000));
+  }
+}
 
 void print_mac(char* out, size_t outLen) {
   uint8_t mac[6];
@@ -72,15 +112,17 @@ void attemptWifiConnect() {
     // rejected miner code never stops WiFi, the relay endpoint, health logging, or OTA.
     fry_trigger_register_now();  // T5 overrides; weak default just logs and returns
     fry_trigger_start_vpn();  // T6 overrides
-    s_phase = BootPhase::Ready;
+    setPhase(BootPhase::Ready);
   } else {
+    // Back to provisioning so the transport can surface the error and accept a retry. On a board
+    // that booted WITH credentials this is also where the transport starts for the first time —
+    // notifyWifiAuthFail() below would otherwise be shouting down a radio that was never on.
+    setPhase(BootPhase::AwaitingProvisioning);
     if (err == fry::ProvErr::NoIp) {
       fry_provisioning::notifyWifiNoIp();
     } else {
       fry_provisioning::notifyWifiAuthFail();
     }
-    // Stay in provisioning so the transport can surface the error and accept a retry.
-    s_phase = BootPhase::AwaitingProvisioning;
   }
 }
 
@@ -89,6 +131,8 @@ void attemptWifiConnect() {
 void setup() {
   Serial.begin(115200);
   delay(200);
+
+  pinMode(FRY_RESET_BUTTON_PIN, INPUT_PULLUP);  // BOOT button, active-low
 
   char mac[18] = "00:00:00:00:00:00";
   print_mac(mac, sizeof(mac));
@@ -105,12 +149,10 @@ void setup() {
   fry_serial_init();
 #endif
 
-  if (fry_config::hasWifi() && fry_config::hasWallet()) {
-    s_phase = BootPhase::ConnectingWifi;  // previously provisioned — skip straight to WiFi
-  } else {
-    fry_provisioning::init(s_deviceName, s_minerKey);
-    s_phase = BootPhase::AwaitingProvisioning;
-  }
+  // Previously provisioned boards skip straight to the join; the transport is started lazily by
+  // setPhase() if and when that join fails. Starting it here unconditionally is NOT an option on
+  // ESP8266, where the transport is a softAP and bringing it up switches the radio to WIFI_AP.
+  setPhase(fry::initialBootPhase(fry_config::hasWifi() && fry_config::hasWallet()));
 
   Serial.println("[boot] ready");
 }
@@ -120,12 +162,14 @@ void loop() {
   fry_serial_poll();
 #endif
 
+  pollFactoryResetButton();  // every phase — a wedged board must still be recoverable
+
   switch (s_phase) {
     case BootPhase::AwaitingProvisioning:
       fry_provisioning::loop();
       fry_provisioning::tick();
       if (fry_provisioning::readyToConnect()) {
-        s_phase = BootPhase::ConnectingWifi;
+        setPhase(BootPhase::ConnectingWifi);
       }
       break;
 

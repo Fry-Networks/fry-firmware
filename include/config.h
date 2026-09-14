@@ -32,6 +32,13 @@
 #define AP_TEARDOWN_MS 10000UL
 #endif
 
+// Physical button polled for the factory-reset long hold (active-low, INPUT_PULLUP). GPIO0 is the
+// BOOT/FLASH button on esp32dev, esp32-s3-devkitc-1 and nodemcuv2; the esp32-c3-devkitm-1 wires
+// its BOOT button to GPIO9 instead, so that env overrides this in build_flags.
+#ifndef FRY_RESET_BUTTON_PIN
+#define FRY_RESET_BUTTON_PIN 0
+#endif
+
 // [health] log line cadence.
 #ifndef HEALTH_LOG_MS
 #define HEALTH_LOG_MS 30000UL
