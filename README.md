@@ -2,6 +2,14 @@
 
 Fry Networks embedded firmware for ESP8266/ESP32/ESP32-S3/ESP32-C3 - dVPN endpoint miners with OTA updates.
 
+## Setting one up
+
+If you have a board and want it earning, start with **[docs/SETUP.md](docs/SETUP.md)** — flashing,
+provisioning over Bluetooth or Wi-Fi, claiming the miner key on the dashboard, monitoring, and the
+BOOT-button factory reset. No licence or activation key is required.
+
+The rest of this README is for working on the firmware itself.
+
 ## Protocol
 
 `PROTOCOL.md` is the byte-identical, shared contract with `fry-app-android`. Neither repo may

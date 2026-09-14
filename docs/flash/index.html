@@ -349,6 +349,33 @@
     <div id="logPanel"></div>
   </details>
 
+  <section id="nextSteps" hidden>
+    <h2>Next: get it earning</h2>
+    <p>Flashing is only the first step &mdash; the board still needs your Wi-Fi, your wallet, and a
+    claim on the dashboard. No licence or activation key is required.</p>
+    <ol>
+      <li><strong>Install the Android app.</strong>
+        <a href="https://github.com/Fry-Networks/fry-app-android/releases/latest" target="_blank" rel="noopener noreferrer">Download the latest APK &rarr;</a>
+      </li>
+      <li><strong>Provision the board.</strong> Open the app's Scan tab and give it your 2.4&nbsp;GHz
+      Wi-Fi and your 58-character Algorand address. ESP32 boards are found over Bluetooth; ESP8266
+      raises a <code>FRY-SETUP-XXXXXX</code> Wi-Fi network instead. Note the
+      <code>IOT-&hellip;</code> miner key it shows you.</li>
+      <li><strong>Claim it on the dashboard.</strong> Sign in at
+      <a href="https://dashboard.frynetworks.com" target="_blank" rel="noopener noreferrer">dashboard.frynetworks.com</a>,
+      connect your wallet, and register that miner key. <em>A device will not appear until you do
+      this</em> &mdash; the dashboard lists devices claimed by your account.</li>
+    </ol>
+    <p>Board already set up and not showing in the app? It will not advertise while it is on a
+    Wi-Fi network. Hold <strong>BOOT for 10 seconds</strong> to factory reset it &mdash; it keeps
+    its miner key &mdash; then scan again.</p>
+    <p>
+      <a href="https://github.com/Fry-Networks/fry-firmware/blob/main/docs/SETUP.md" target="_blank" rel="noopener noreferrer">Full setup guide &amp; troubleshooting &rarr;</a>
+      &nbsp;&middot;&nbsp;
+      <a href="https://discord.gg/frynetworks" target="_blank" rel="noopener noreferrer">Get help on Discord &rarr;</a>
+    </p>
+  </section>
+
   <footer>
     <a href="https://github.com/Fry-Networks/fry-firmware" target="_blank" rel="noopener noreferrer">Firmware source &amp; advanced flashing (esptool) &rarr;</a>
     <p class="powered-by">Powered by Fry Networks</p>
@@ -676,6 +703,11 @@ async function flash() {
     setProgress(100);
     els.statusLine.textContent =
       `Done — Fry firmware v${manifest.firmware_version} flashed and verified on ${BOARD_LABELS[board]}.`;
+
+    // A flashed board is not a working miner yet. Surface the remaining steps here rather than
+    // leaving the user at "verified" with nothing to do next.
+    const nextSteps = document.getElementById("nextSteps");
+    if (nextSteps) nextSteps.hidden = false;
 
     await esploader.after("hard_reset");
   } catch (err) {
