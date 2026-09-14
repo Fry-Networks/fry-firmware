@@ -80,8 +80,24 @@ jobs:
       - name: Run Unity suite (native)
         run: pio test -e native
 
+  # The GitHub Pages flasher serves firmware same-origin out of the committed docs/flash/fw, and
+  # nothing here regenerates it. Without this gate a tag can ship while the flasher keeps handing
+  # users the previous firmware -- which is exactly what happened with v0.2.0. Blocks the release.
+  flasher-assets:
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Flasher assets match the tag
+        run: python3 tools/check_flasher_assets.py --expect-version "${{ github.ref_name }}"
+
   release:
-    needs: [build, test-native]
+    needs: [build, test-native, flasher-assets]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:

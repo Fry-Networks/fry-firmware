@@ -130,6 +130,21 @@ def main():
             sys.stderr.write("  %s\n" % m)
         sys.exit(1)
 
+    # Copy the plain per-env images into the dist directory alongside the merged factory ones.
+    # The manifest names them unconditionally, and ESP8266 has no factory variant at all, so a
+    # dist that holds only factory images publishes a manifest whose esp8266 url 404s. This used
+    # to be done by hand after running the tool, which is exactly how the published flasher drifted
+    # a release behind the source.
+    if a.dist:
+        for env in envs:
+            src = os.path.join(a.build_dir, env, "firmware.bin")
+            dst = os.path.join(dist, "firmware-%s.bin" % env)
+            if os.path.abspath(src) != os.path.abspath(dst):
+                with open(src, "rb") as fsrc, open(dst, "wb") as fdst:
+                    fdst.write(fsrc.read())
+                print("make_manifest: copied %s (%d bytes)" % (
+                    os.path.basename(dst), os.path.getsize(dst)))
+
     if not a.no_factory:
         for env in envs:
             if env not in FACTORY:
