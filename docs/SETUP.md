@@ -12,7 +12,7 @@ process.
 
 | | |
 |---|---|
-| A supported board | ESP32, ESP32-S3, ESP32-C3, or ESP8266 |
+| A supported board | ESP32 (including the ESP-WROOM-32 module and ESP32-DevKitC), ESP32-S3, ESP32-C3, or ESP8266 |
 | A USB data cable | Charge-only cables will not work — the board must enumerate as a serial device |
 | A 2.4 GHz Wi-Fi network | The radio on these chips **cannot see 5 GHz networks at all** |
 | An Algorand wallet address | 58 characters. Rewards are paid here |

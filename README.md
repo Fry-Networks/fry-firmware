@@ -1,6 +1,8 @@
 # fry-firmware
 
-Fry Networks embedded firmware for ESP8266/ESP32/ESP32-S3/ESP32-C3 - dVPN endpoint miners with OTA updates.
+Fry Networks embedded firmware for ESP8266/ESP32/ESP32-S3/ESP32-C3 - dVPN endpoint miners with OTA
+updates. The ESP32 target covers the ESP-WROOM-32 / ESP-WROOM-32E module and the ESP32-DevKitC
+boards built around it; `esp32_wroom32` is a named alias of it, not a separate image.
 
 ## Setting one up
 
@@ -22,7 +24,9 @@ pio run -e esp8266
 pio run -e esp32
 pio run -e esp32s3
 pio run -e esp32c3
+pio run -e esp32_wroom32  # alias of esp32, for ESP-WROOM-32 / DevKitC (same binary)
 pio run -e esp32_lab      # esp32 + lab-only serial provisioning commands
+pio run -e esp32_wroom32_lab  # esp32_wroom32 + lab-only serial provisioning commands
 pio run -e esp8266_lab    # esp8266 + lab-only serial provisioning commands
 pio test -e native        # Unity tests (host, CI only - no compiler is required to build the
                            # board envs themselves)
