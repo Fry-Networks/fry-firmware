@@ -31,9 +31,25 @@ import sys
 ENVS = ("esp8266", "esp32", "esp32s3", "esp32c3")
 
 # env -> (esptool chip, bootloader offset, flash_mode, flash_freq, flash_size)
+#
+# flash_size is the value esptool stamps into the BOOTLOADER image header (byte 0x3, high nibble)
+# via merge_bin's _update_image_flash_params, and only at the bootloader offset. It must describe
+# a size the receiving chip actually has, NOT the size of the dev board we happen to build on.
+#
+# esp32s3 declared "8MB" here because esp32-s3-devkitc-1 is the N8 part. That is a brick risk for
+# anyone else: docs/flash/index.html writes the merged image with flashSize:"keep", so this header
+# reaches the chip verbatim, and docs/flash/chipfamily.js maps EVERY ESP32-S3 to this one image
+# with no N4/N8/N16 discrimination (esptool reports the die, never the module). A 4 MB S3 - the
+# S3-WROOM-1-N4 and the common clone DevKitC-1s - would then boot a header claiming more flash
+# than it has, which the second-stage bootloader treats as a hard failure, whereas a header
+# claiming LESS than the chip has is only a benign warning.
+#
+# "4MB" is therefore strictly safer and costs nothing: board_build.partitions = min_spiffs.csv
+# (platformio.ini [esp32common]) ends at exactly 0x400000, so no environment addresses flash
+# beyond 4 MB regardless of the part fitted.
 FACTORY = {
     "esp32":   ("esp32",   "0x1000", "dio", "40m", "4MB"),
-    "esp32s3": ("esp32s3", "0x0",    "dio", "80m", "8MB"),
+    "esp32s3": ("esp32s3", "0x0",    "dio", "80m", "4MB"),
     "esp32c3": ("esp32c3", "0x0",    "dio", "80m", "4MB"),
 }
 

@@ -1,6 +1,7 @@
 #include "../core/http_tls.h"
 
 #include "../core/heap_gate_wait.h"
+#include "heap_gate.h"
 #include "config.h"
 
 namespace fry_http {
@@ -19,7 +20,8 @@ String extractHost(const String& url) {
 
 }  // namespace
 
-bool beginHttpsUrl(HTTPClient& http, WiFiClientSecure& sec, const String& url) {
+bool beginHttpsUrl(HTTPClient& http, WiFiClientSecure& sec, const String& url,
+                   bool mflnProbeWorthwhile) {
   // DOCUMENTED LIMITATION (v0.2.0), not a bug for this run: unlike the ESP32 fix in this same
   // release (src/esp32/http_tls.cpp, sec.setCACertBundle()), this chip stays on setInsecure().
   // BearSSL trust-anchor verification (setTrustAnchors()/setX509Time()) needs its own
@@ -51,12 +53,28 @@ bool beginHttpsUrl(HTTPClient& http, WiFiClientSecure& sec, const String& url) {
   // attempts=1: no bounded wait here. This helper runs on every HTTPS call, and spinning up to
   // 3 s each time starved the loop badly enough to trip the software watchdog. The bounded
   // wait still applies where it belongs, at the OTA download gate in src/core/ota_client.cpp.
+  // A caller that already knows the peer refuses MFLN (GitHub, i.e. OTA) must not pay for the
+  // probe. Measured on this board: the OTA manifest fetch passed the gate, ran the probe, and
+  // still returned HTTP -1, because peak demand was max(32 KB probe, 16.4 KB iobuf) rather than
+  // the 16.4 KB the gate was sized for. The gate SAMPLES and does not RESERVE, so the block it
+  // saw did not survive to the allocation. Skipping the probe removes the 32 KB spike entirely
+  // and leaves only the buffers we actually intend to use.
   const bool canAffordBigTls = fry::waitForHeapGate(HEAP_GATE_OTA, HEAP_GATE_OTA_BLOCK, 1);
+  const bool runProbe = fry::shouldRunMflnProbe(canAffordBigTls, mflnProbeWorthwhile);
   String host = extractHost(url);
-  if (canAffordBigTls && !WiFiClientSecure::probeMaxFragmentLength(host, 443, 512)) {
+  if (!canAffordBigTls) {
+    Serial.println("tls: low contiguous heap - MFLN probe skipped, 512/512");
+    sec.setBufferSizes(512, 512);
+  } else if (!runProbe) {
+    // blk is logged because the 30 s [health] line samples far too coarsely to catch this peak,
+    // and HTTP -1 collapses connect-refused, iobuf-OOM and handshake-failure into one code. This
+    // is the only place the deciding quantity is visible at the deciding moment.
+    Serial.printf("tls: peer does not honour MFLN - probe skipped, 16384/512 (blk=%u)\n",
+                  static_cast<unsigned>(fry::queryMaxFreeBlock()));
+    sec.setBufferSizes(16384, 512);
+  } else if (!WiFiClientSecure::probeMaxFragmentLength(host, 443, 512)) {
     sec.setBufferSizes(16384, 512);
   } else {
-    if (!canAffordBigTls) Serial.println("tls: low contiguous heap - MFLN probe skipped, 512/512");
     sec.setBufferSizes(512, 512);
   }
 

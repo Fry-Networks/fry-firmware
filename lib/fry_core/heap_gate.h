@@ -27,6 +27,18 @@ bool heapGatePass(uint32_t freeTotal, uint32_t maxBlock, uint32_t minFreeTotal, 
 // Returns 0 (no contiguous requirement) unless this really is the BearSSL single-buffer path.
 uint32_t otaMinContiguousBlock(bool isHttps, bool bearsslSingleBuffer, uint32_t configuredBlock);
 
+// Whether ESP8266's BearSSL MFLN probe is worth running before sizing the TLS buffers.
+//
+// The probe is NOT free: WiFiClientSecure::probeMaxFragmentLength() opens its own throwaway
+// session on BearSSL's DEFAULT 16384+16384 buffers (~32 KB contiguous) before any setBufferSizes()
+// takes effect. Running it costs more contiguous heap than the 16384/512 path it is trying to
+// avoid, so it must only run when BOTH:
+//   - there is room for the big path at all (a low-heap board takes 512/512 unconditionally), and
+//   - the peer might actually say yes. GitHub does not honour MFLN, so probing it spends ~32 KB
+//     to be told something the caller already knew.
+// Pure so the rule is locked by a native test rather than only by a comment.
+bool shouldRunMflnProbe(bool canAffordBigTls, bool peerMightHonourMfln);
+
 // Largest allocatable contiguous heap block, in bytes:
 //   ESP8266      -> ESP.getMaxFreeBlockSize()
 //   ESP32 family -> ESP.getMaxAllocHeap()

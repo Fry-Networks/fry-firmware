@@ -55,6 +55,42 @@ void test_the_esp8266_crash_case_is_still_refused() {
     TEST_ASSERT_FALSE(fry::heapGatePass(42712, 34152, 20000, minBlock));
 }
 
+// --- MFLN probe policy (src/esp8266/http_tls.cpp) ------------------------------------------
+//
+// The probe is a heap consumer, not a heap saver: probeMaxFragmentLength() opens a throwaway
+// session on BearSSL's DEFAULT 16384+16384 buffers (~32 KB contiguous) BEFORE any setBufferSizes()
+// applies. Probing a peer that will refuse therefore spends more contiguous heap than the
+// 16384/512 path it was trying to avoid. GitHub refuses; hardwareapi does not.
+
+void test_a_peer_that_refuses_mfln_is_never_probed() {
+    // The fix. Ample heap is not a reason to spend 32 KB asking a question with a known answer.
+    TEST_ASSERT_FALSE(fry::shouldRunMflnProbe(true, false));
+}
+
+void test_low_contiguous_heap_never_probes_even_for_an_mfln_peer() {
+    // Pre-existing invariant, pinned so it cannot regress: below the gate we take 512/512 flat.
+    TEST_ASSERT_FALSE(fry::shouldRunMflnProbe(false, true));
+    TEST_ASSERT_FALSE(fry::shouldRunMflnProbe(false, false));
+}
+
+void test_an_mfln_capable_peer_with_heap_is_still_probed() {
+    // Guards against "fixing" this by disabling the probe outright. hardwareapi DOES honour MFLN,
+    // and a successful probe is what buys registration the cheap 512/512 path on a fragmented
+    // heap. Losing that would break registration on exactly the boards that need it most.
+    TEST_ASSERT_TRUE(fry::shouldRunMflnProbe(true, true));
+}
+
+void test_the_measured_esp8266_state_refuses_the_https_manifest_check() {
+    // Measured on COM11 (48:3F:DA:39:9E:42) this run, from the firmware's own log line:
+    //   "need blk>=36864 free>=20000, have blk=34272 free=42560"
+    // Free heap is ample; the board is 2,592 bytes short on the CONTIGUOUS block. It is refused
+    // before any TLS session is opened, which is why no probe and no crash occur.
+    TEST_ASSERT_FALSE(fry::heapGatePass(42560, 34272, 20000, kConfiguredBlock));
+    // ...and with that gate failing, no probe can run regardless of the peer.
+    const bool canAffordBigTls = fry::heapGatePass(42560, 34272, 20000, kConfiguredBlock);
+    TEST_ASSERT_FALSE(fry::shouldRunMflnProbe(canAffordBigTls, true));
+}
+
 }  // namespace
 
 // Unity's setUp/tearDown have C linkage, so they must sit at global scope.
@@ -70,5 +106,9 @@ int main(int, char**) {
     RUN_TEST(test_the_measured_esp32_heap_now_passes_the_gate);
     RUN_TEST(test_a_genuinely_exhausted_esp32_heap_is_still_refused);
     RUN_TEST(test_the_esp8266_crash_case_is_still_refused);
+    RUN_TEST(test_a_peer_that_refuses_mfln_is_never_probed);
+    RUN_TEST(test_low_contiguous_heap_never_probes_even_for_an_mfln_peer);
+    RUN_TEST(test_an_mfln_capable_peer_with_heap_is_still_probed);
+    RUN_TEST(test_the_measured_esp8266_state_refuses_the_https_manifest_check);
     return UNITY_END();
 }

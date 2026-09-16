@@ -28,4 +28,8 @@ uint32_t otaMinContiguousBlock(bool isHttps, bool bearsslSingleBuffer, uint32_t 
   return (isHttps && bearsslSingleBuffer) ? configuredBlock : 0;
 }
 
+bool shouldRunMflnProbe(bool canAffordBigTls, bool peerMightHonourMfln) {
+  return canAffordBigTls && peerMightHonourMfln;
+}
+
 }  // namespace fry

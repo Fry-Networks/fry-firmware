@@ -68,7 +68,14 @@ void manualRollback() {
 
 bool otaBeginUrl(HTTPClient& http, WiFiClientSecure& sec, WiFiClient& plain, const String& url) {
   if (url.startsWith("https://")) {
-    return fry_http::beginHttpsUrl(http, sec, url);
+    // GitHub - the compiled OTA_MANIFEST_URL host, and the *.githubusercontent.com targets its
+    // release redirects hand out - does not honour MFLN. On ESP8266, probing it costs a ~32 KB
+    // contiguous allocation purely to be told no, and that spike is what made every HTTPS
+    // manifest fetch return -1. Tell beginHttpsUrl not to bother. A lab override pointed at an
+    // MFLN-honouring host still gets the probe, and therefore still gets the cheap 512/512 path.
+    const bool githubHost =
+        url.indexOf("github.com") >= 0 || url.indexOf("githubusercontent.com") >= 0;
+    return fry_http::beginHttpsUrl(http, sec, url, !githubHost);
   }
   if (!http.begin(plain, url)) return false;
   http.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);
@@ -249,7 +256,15 @@ bool checkNow() {
   // unaffected and still checked, which is how OTA is exercised on this chip.
   if (manifestUrl.startsWith("https://") &&
       !fry::waitForHeapGate(HEAP_GATE_OTA, HEAP_GATE_OTA_BLOCK, 1)) {
-    Serial.println("ota: skipped https manifest check - insufficient contiguous heap");
+    // Print the numbers, not just the verdict. "insufficient" alone cost real diagnostic time:
+    // a board carrying a stale plain-http lab override never reaches this branch at all, and its
+    // unrelated "manifest fetch HTTP -1" (lab server unreachable) was read for two runs as
+    // evidence of a TLS/heap failure on the GitHub path that was in fact never attempted.
+    // With the shortfall visible, the two situations can never be confused again.
+    Serial.printf("ota: skipped https manifest check - need blk>=%u free>=%u, have blk=%u free=%u\n",
+                  static_cast<unsigned>(HEAP_GATE_OTA_BLOCK), static_cast<unsigned>(HEAP_GATE_OTA),
+                  static_cast<unsigned>(fry::queryMaxFreeBlock()),
+                  static_cast<unsigned>(ESP.getFreeHeap()));
     return false;
   }
 #endif
@@ -263,7 +278,11 @@ bool checkNow() {
   }
   int code = http.GET();
   if (code != 200) {
-    Serial.printf("ota: manifest fetch HTTP %d\n", code);
+    // Log the largest contiguous block alongside the code. HTTPClient collapses connect-refused,
+    // iobuf-OOM and TLS-handshake-failure all into -1, and the 30 s [health] line samples far too
+    // coarsely to catch the allocation peak, so without blk here a -1 is undiagnosable.
+    Serial.printf("ota: manifest fetch HTTP %d (blk=%u)\n", code,
+                  static_cast<unsigned>(fry::queryMaxFreeBlock()));
     http.end();
     return false;
   }

@@ -17,7 +17,10 @@ namespace fry_http {
 // character (path separators, the dot before the extension) replaced by '_'.
 extern const uint8_t x509_crt_bundle_start[] asm("_binary_data_cert_x509_crt_bundle_bin_start");
 
-bool beginHttpsUrl(HTTPClient& http, WiFiClientSecure& sec, const String& url) {
+// mflnProbeWorthwhile is deliberately unused here: mbedtls sizes its own in/out buffers and has
+// no probeMaxFragmentLength equivalent, so there is no probe to skip. The parameter exists for
+// the ESP8266 implementation of this same signature.
+bool beginHttpsUrl(HTTPClient& http, WiFiClientSecure& sec, const String& url, bool) {
   sec.setCACertBundle(x509_crt_bundle_start);
 
   if (!http.begin(sec, url)) return false;

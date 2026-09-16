@@ -114,7 +114,7 @@ The lines worth knowing:
 
 | Line | Meaning |
 |---|---|
-| `FRY boot v0.3.0 chip=ESP32 mac=... minerkey=IOT-...` | Boot banner with the board's identity |
+| `FRY boot v0.3.1 chip=ESP32 mac=... minerkey=IOT-...` | Boot banner with the board's identity |
 | `BLE advertising name=FRY-ESP32-XXXXXX svc=465259` | Waiting to be provisioned |
 | `wifi connected ip=...` | Joined your network |
 | `wifi connect failed reason=201` | Wi-Fi not found — wrong name, out of range, or 5 GHz only |
