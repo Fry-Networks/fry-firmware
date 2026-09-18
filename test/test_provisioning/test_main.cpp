@@ -8,6 +8,7 @@
 #endif
 #include <unity.h>
 
+#include <cstdio>
 #include <cstring>
 
 #include "miner_identity.h"
@@ -18,6 +19,7 @@
 #include "heap_gate.h"
 #include "semver.h"
 #include "wg_endpoint.h"
+#include "telemetry_body.h"
 
 using fry::bytesToHexUpper;
 using fry::computeMinerKey;
@@ -246,10 +248,86 @@ void test_miner_key_valid_format_and_deterministic(void) {
   TEST_ASSERT_EQUAL(36, static_cast<int>(strlen(key1)));
 }
 
+static fry::TelemetrySample sampleFixture() {
+  fry::TelemetrySample s;
+  s.uptimeS = 1234;
+  s.heapFree = 157000;
+  s.heapMaxBlock = 110580;
+  s.stackHighWater = 4096;
+  s.rssi = -37;
+  s.chip = "ESP32";
+  s.firmware = "0.3.1";
+  return s;
+}
+
+void test_telemetry_body_has_every_required_field(void) {
+  char out[384];
+  size_t n = fry::buildTelemetryBody(sampleFixture(), "IOTVPN", "abc123",
+                                     "2026-09-18T06:00:00Z", out, sizeof(out));
+  TEST_ASSERT_TRUE(n > 0);
+  TEST_ASSERT_EQUAL(n, strlen(out));
+  // The five fields the server validates before it will persist anything.
+  TEST_ASSERT_NOT_NULL(strstr(out, "\"miner_code\":\"IOTVPN\""));
+  TEST_ASSERT_NOT_NULL(strstr(out, "\"install_id\":\"abc123\""));
+  TEST_ASSERT_NOT_NULL(strstr(out, "\"measurement_type\":\"telemetry\""));
+  TEST_ASSERT_NOT_NULL(strstr(out, "\"timestamp\":\"2026-09-18T06:00:00Z\""));
+  TEST_ASSERT_NOT_NULL(strstr(out, "\"value\":{"));
+  // heap_max_block is the one the OTA gate actually decides on; losing it would make the
+  // telemetry useless for diagnosing a refused update.
+  TEST_ASSERT_NOT_NULL(strstr(out, "\"heap_max_block\":110580"));
+  TEST_ASSERT_NOT_NULL(strstr(out, "\"heap_free\":157000"));
+  TEST_ASSERT_NOT_NULL(strstr(out, "\"rssi\":-37"));
+  TEST_ASSERT_NOT_NULL(strstr(out, "\"chip\":\"ESP32\""));
+}
+
+void test_telemetry_body_rejects_unescapable_input(void) {
+  char out[384];
+  // A quote would break out of the JSON string. Refusing is safer than emitting a body the
+  // server parses as something other than what was measured.
+  TEST_ASSERT_EQUAL(0, static_cast<int>(fry::buildTelemetryBody(
+      sampleFixture(), "IOT\"VPN", "abc123", "2026-09-18T06:00:00Z", out, sizeof(out))));
+  TEST_ASSERT_EQUAL_STRING("", out);
+  // "has\backslash" was a trap: \b is the C backspace escape, so that literal is
+  // has + 0x08 + ackslash and contains no backslash at all. It passed via the control-character
+  // branch and left the c == '\\' branch with zero coverage. Both branches are now exercised
+  // separately, so neither can regress behind the other.
+  TEST_ASSERT_FALSE(fry::isJsonSafeToken("has\\backslash"));  // a real backslash
+  TEST_ASSERT_FALSE(fry::isJsonSafeToken("has\bbackspace"));  // a real control character
+  TEST_ASSERT_FALSE(fry::isJsonSafeToken(nullptr));
+  TEST_ASSERT_TRUE(fry::isJsonSafeToken("FEM-0123456789ABCDEF0123456789ABCDEF"));
+}
+
+void test_telemetry_body_refuses_to_truncate(void) {
+  char small[32];
+  // Truncated JSON is worse than no JSON: the server would reject it as malformed, or worse,
+  // accept a partial object. The builder must return 0 and leave the buffer empty.
+  TEST_ASSERT_EQUAL(0, static_cast<int>(fry::buildTelemetryBody(
+      sampleFixture(), "IOTVPN", "abc123", "2026-09-18T06:00:00Z", small, sizeof(small))));
+  TEST_ASSERT_EQUAL_STRING("", small);
+}
+
+void test_miner_key_uses_fem_prefix(void) {
+  // The prefix moved IOT- -> FEM- on 2026-09-18: one key namespace for every board and OS.
+  // The product type is carried by the miner CODE (FRY_MINER_CODE, still "IOTVPN"), which is
+  // independent of this. Guards against the prefix silently regressing.
+  const uint8_t mac6[3] = {0xAA, 0xBB, 0xCC};
+  const uint8_t salt[16] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16};
+  char key[40];
+  computeMinerKey(mac6, salt, key, sizeof(key));
+  TEST_ASSERT_EQUAL_STRING_LEN("FEM-", key, 4);
+  TEST_ASSERT_FALSE(strncmp(key, "IOT-", 4) == 0);
+  TEST_ASSERT_TRUE(isValidMinerKey(key));
+  // An IOT- key of otherwise correct shape must now be rejected outright.
+  char legacy[40];
+  snprintf(legacy, sizeof(legacy), "IOT-%s", key + 4);
+  TEST_ASSERT_EQUAL(36, static_cast<int>(strlen(legacy)));
+  TEST_ASSERT_FALSE(isValidMinerKey(legacy));
+}
+
 void test_miner_key_invalid_rejected(void) {
-  TEST_ASSERT_FALSE(isValidMinerKey("IOT-tooshort"));
+  TEST_ASSERT_FALSE(isValidMinerKey("FEM-tooshort"));
   TEST_ASSERT_FALSE(isValidMinerKey("BAD-0123456789ABCDEF0123456789ABCDEF"));
-  TEST_ASSERT_FALSE(isValidMinerKey("IOT-0123456789abcdef0123456789abcdef"));  // lowercase hex
+  TEST_ASSERT_FALSE(isValidMinerKey("FEM-0123456789abcdef0123456789abcdef"));  // lowercase hex
   TEST_ASSERT_FALSE(isValidMinerKey(nullptr));
 }
 
@@ -406,6 +484,10 @@ int main(int argc = 0, char** argv = nullptr) {
   RUN_TEST(test_socks5_truncated_request);
   RUN_TEST(test_sha256_known_vector_abc);
   RUN_TEST(test_miner_key_valid_format_and_deterministic);
+  RUN_TEST(test_miner_key_uses_fem_prefix);
+  RUN_TEST(test_telemetry_body_has_every_required_field);
+  RUN_TEST(test_telemetry_body_rejects_unescapable_input);
+  RUN_TEST(test_telemetry_body_refuses_to_truncate);
   RUN_TEST(test_miner_key_invalid_rejected);
   RUN_TEST(test_device_name_format_and_validate);
   return UNITY_END();

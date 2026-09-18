@@ -57,7 +57,7 @@ bootstrap credential and registration falls back to per-device tokens only.
     DTR/RTS-de-asserted-before-open pattern that avoids resetting the board on connect.
   - `provision.py`, `cap.py` — serial provisioning and bounded capture.
   - `flash.sh` — retrying upload to an explicit port.
-  - `gate_boot.py` — asserts the boot banner, a well-formed `IOT-<32 hex>` miner key, and no
+  - `gate_boot.py` — asserts the boot banner, a well-formed `FEM-<32 hex>` miner key, and no
     crash marker within a bounded window.
   - `gate_wifi.py`, `gate_heap.py` — WiFi-join and heap-floor regression gates.
   - `scan_identity.py` — fails a build that leaks the developer's username or an absolute

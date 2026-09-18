@@ -13,7 +13,7 @@ Service `46525900-0001-4000-8000-4652594e4554` (0x465259 = "FRY", 0x4652594e4554
 | WiFi password | `46525902-0001-4000-8000-4652594e4554` | write | UTF-8, 0..64 bytes |
 | Wallet        | `46525903-0001-4000-8000-4652594e4554` | write | UTF-8, exactly 58 bytes (Algorand) |
 | Device name   | `46525904-0001-4000-8000-4652594e4554` | read | UTF-8, see grammar below |
-| Miner key     | `46525905-0001-4000-8000-4652594e4554` | read | `IOT-<32 uppercase hex>` |
+| Miner key     | `46525905-0001-4000-8000-4652594e4554` | read | `FEM-<32 uppercase hex>` |
 | Status        | `46525906-0001-4000-8000-4652594e4554` | read + notify | 1 byte state, plus a 2nd byte error code when state==4 |
 | Firmware ver  | `46525907-0001-4000-8000-4652594e4554` | read | UTF-8 semver |
 | Chip type     | `46525908-0001-4000-8000-4652594e4554` | read | `ESP32` or `ESP32-S3` or `ESP32-C3` |
@@ -54,10 +54,10 @@ peripheral must still accept the 58-byte wallet via a long/prepared write.
 AP SSID `FRY-SETUP-<MAC6>`, open, IP `192.168.4.1`, DNS catch-all on port 53, HTTP on port 80.
 
 - `GET /` returns the HTML provisioning form (PROGMEM, under 4 KB)
-- `GET /info` returns `{"deviceName":"FRY-ESP8266-XXXXXX","minerKey":"IOT-...","fw":"0.1.0","chip":"ESP8266"}`
+- `GET /info` returns `{"deviceName":"FRY-ESP8266-XXXXXX","minerKey":"FEM-...","fw":"0.1.0","chip":"ESP8266"}`
 - `GET /api/scan` returns `{"nets":[{"ssid":"...","rssi":-50,"enc":true}]}` from a cached STA pre-scan
 - `POST /provision` takes form-encoded `ssid`, `pass`, `wallet` and returns `200 {"ok":true}` or `400 {"ok":false,"err":"<reason>"}`
-- `GET /status` returns `{"status":0..4,"err":0..5,"minerKey":"IOT-...","ip":"..."}`
+- `GET /status` returns `{"status":0..4,"err":0..5,"minerKey":"FEM-...","ip":"..."}`
 
 The AP is torn down 10 seconds after status reaches 3.
 
@@ -65,7 +65,7 @@ The AP is torn down 10 seconds after status reaches 3.
 
 - **Device name grammar:** `^FRY-(ESP8266|ESP32|ESP32-S3|ESP32-C3)-[0-9A-F]{6}$`
   where MAC6 is the last 3 bytes of the station MAC in uppercase hex.
-- **Miner key:** `IOT-` followed by 32 uppercase hex characters, computed as
+- **Miner key:** `FEM-` followed by 32 uppercase hex characters, computed as
   `SHA256(mac6 || salt)` truncated to 16 bytes, where `salt` is 16 random bytes generated once on
   first boot and persisted. The key is generated once and never regenerated. It is case-sensitive
   and must be transmitted byte-exact.
@@ -86,10 +86,40 @@ omitted entirely when both are empty.
 - `PUT /PoC/{miner_key}/hardware` with body `{"document":{...}}`, one slot per call, where
   `slot_number = (UTC minutes since midnight / 10) % 144`. Success is any 2xx; there is no response body.
 - `GET /versions/IOTVPN?platform=<os>` for reward and version configuration.
+- `POST /measurements/{miner_key}` with the device telemetry body below, every
+  `TELEMETRY_INTERVAL_MS` (600000, matching the PoC cadence). Success is `202`.
+  **Auth is the per-device token only** — unlike every other call in this section, the bootstrap
+  token is never an acceptable fallback here, so the firmware skips the cycle entirely until a
+  registration has issued one. The path parameter is the miner KEY, not the install id: the server
+  resolves that value against `minerKey`/`canonicalId`, which is what keeps a sample attributable
+  when the install id is unknown to it.
 - **Never** call `GET /credentials/{key}/verified` with the bootstrap token. It is rejected by
   design and naive clients loop forever on 401 recovery.
 
 `os` is the build environment name: `esp8266`, `esp32`, `esp32s3` or `esp32c3`.
+
+### 5.1 Telemetry body (`POST /measurements/{miner_key}`)
+
+```json
+{"miner_code":"IOTVPN","install_id":"<32 hex>","measurement_type":"telemetry",
+ "timestamp":"2026-09-18T06:00:00Z","value":{
+   "uptime_s":1234,"heap_free":157000,"heap_max_block":110580,
+   "stack_high_water":4096,"rssi":-37,"chip":"ESP32","firmware":"0.3.1"}}
+```
+
+Twelve fields, five at the top level and seven under `value`. `uptime_s`, `heap_free`,
+`heap_max_block` and `stack_high_water` are unsigned integers; `rssi` is signed; the rest are
+strings. `timestamp` is RFC3339 UTC and is **never** sent before NTP has synced — an epoch-1970
+value would silently mis-date the sample, so the firmware skips the cycle instead.
+
+`stack_high_water` is reported in bytes on the ESP32 family (`uxTaskGetStackHighWaterMark`) and is
+`0` on ESP8266, which has no per-task stack accounting — `0` means "not measurable here", not
+"exhausted". `heap_max_block` is the largest contiguous block and is the value the OTA gate
+actually decides on, which is why it is carried separately from `heap_free`.
+
+The builder refuses rather than escapes: if `miner_code`, `install_id`, `timestamp`, `chip` or
+`firmware` contains `"`, `\` or any byte below `0x20`, no body is produced and the cycle is
+skipped. It also refuses to truncate — a partial JSON object is worse than no sample.
 
 ## 6. OTA manifest
 
@@ -134,7 +164,7 @@ board resets on every connect.
 ## 9. Serial log lines that the QA gates grep for
 
 ```
-FRY boot v<ver> chip=<CHIP> mac=<MAC> minerkey=IOT-<32HEX>
+FRY boot v<ver> chip=<CHIP> mac=<MAC> minerkey=FEM-<32HEX>
 [boot] ready
 BLE advertising name=<devname> svc=46525900
 AP started FRY-SETUP-<MAC6> ip=192.168.4.1

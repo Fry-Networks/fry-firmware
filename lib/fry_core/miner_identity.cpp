@@ -27,13 +27,13 @@ void computeMinerKey(const uint8_t mac6[3], const uint8_t salt[16], char* outKey
   char hex[33];
   bytesToHexUpper(digest, 16, hex, sizeof(hex));  // truncate to first 16 bytes = 32 hex chars
 
-  snprintf(outKey, outKeyLen, "IOT-%s", hex);
+  snprintf(outKey, outKeyLen, "FEM-%s", hex);
 }
 
 bool isValidMinerKey(const char* key) {
   if (!key) return false;
-  if (strlen(key) != 36) return false;  // "IOT-" (4) + 32 hex chars
-  if (strncmp(key, "IOT-", 4) != 0) return false;
+  if (strlen(key) != 36) return false;  // "FEM-" (4) + 32 hex chars
+  if (strncmp(key, "FEM-", 4) != 0) return false;
   for (int i = 0; i < 32; i++) {
     if (!isHexUpper(key[4 + i])) return false;
   }

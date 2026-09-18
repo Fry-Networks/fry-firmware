@@ -7,7 +7,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import _serialutil as su
 
 BANNER_RE = re.compile(r"FRY boot v\S+ chip=\S+ mac=[0-9A-Fa-f:]+ minerkey=(\S+)")
-MINERKEY_RE = re.compile(r"^IOT-[0-9A-F]{32}$")
+MINERKEY_RE = re.compile(r"^FEM-[0-9A-F]{32}$")
 CRASH_MARKERS = ("Exception (", "Fatal exception", "wdt reset", "Soft WDT", "abort()",
                   "rst cause:2", "rst cause:3", "Guru Meditation Error", "Panic", "CORRUPT HEAP")
 
@@ -50,7 +50,7 @@ def main():
             print("[gate_boot] FAIL: no boot banner in %ds" % a.seconds, flush=True)
             sys.exit(1)
         if not miner_key or not MINERKEY_RE.match(miner_key):
-            print("[gate_boot] FAIL: miner key '%s' does not match ^IOT-[0-9A-F]{32}$" % miner_key,
+            print("[gate_boot] FAIL: miner key '%s' does not match ^FEM-[0-9A-F]{32}$" % miner_key,
                   flush=True)
             sys.exit(1)
         print("[gate_boot] PASS minerkey=%s" % miner_key, flush=True)

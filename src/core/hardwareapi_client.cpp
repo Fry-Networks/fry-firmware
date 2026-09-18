@@ -11,6 +11,7 @@
 #include "miner_key.h"
 #include "ota_client.h"
 #include "provisioning_transport.h"
+#include "telemetry.h"
 #include "trigger_hooks.h"
 #include "wifi_station.h"
 
@@ -235,6 +236,11 @@ void tick() {
       s_registered = true;
     }
   }
+
+  // Telemetry drives its own TELEMETRY_INTERVAL_MS and yields to the OTA heap gate; composed
+  // here for the same reason fry_ota::tick() is — only one strong definition of
+  // fry_trigger_report_loop_tick may exist (see trigger_hooks.h).
+  fry_telemetry::tick();
 
   if ((now - s_lastPocMs) >= POC_INTERVAL_MS) {
     s_lastPocMs = now;

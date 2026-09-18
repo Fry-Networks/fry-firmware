@@ -9,7 +9,7 @@ namespace fry_identity {
 // Reads the last 3 bytes of the station MAC address into mac6[3].
 void getMac6(uint8_t mac6[3]);
 
-// Returns the persisted miner key ("IOT-<32 hex>"), generating + persisting salt and key on
+// Returns the persisted miner key ("FEM-<32 hex>"), generating + persisting salt and key on
 // first call if they do not exist yet. Never regenerates once persisted (PROTOCOL.md section 4).
 // outKey must be at least 37 bytes.
 void ensureMinerKey(char* outKey, size_t outKeyLen);

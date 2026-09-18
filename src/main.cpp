@@ -35,7 +35,7 @@ BootPhase s_phase = BootPhase::AwaitingProvisioning;
 fry::BootPolicy s_bootPolicy;
 fry::ResetButton s_resetButton;
 unsigned long s_lastResetHintMs = 0;
-char s_minerKey[40] = "IOT-PENDING";
+char s_minerKey[40] = "FEM-PENDING";
 char s_deviceName[32] = {0};
 unsigned long s_lastHealthLogMs = 0;
 

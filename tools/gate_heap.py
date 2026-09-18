@@ -6,8 +6,8 @@
 # PASS iff at least one [health] line appears (steady state reached) and no heap= sample ever
 # drops below --floor, with no crash marker. Exit 0 = PASS, 1 = FAIL.
 #
-# FLOOR: 8000 bytes is a conservative placeholder — well below HEAP_GATE_TLS (15000, the point
-# at which this firmware itself refuses a TLS handshake) so it should only trip on a genuine
+# FLOOR: 8000 bytes is a conservative placeholder — well below HEAP_GATE_OTA (20000, the total-free
+# gate this firmware applies before a TLS download) so it should only trip on a genuine
 # leak/fragmentation regression, not a normal operational dip. RECALIBRATE against real captured
 # runs the same way the sensmos reference documents (max(min_observed - headroom, absolute_floor))
 # once this firmware has an on-hardware soak history; this default has not been hardware-measured.

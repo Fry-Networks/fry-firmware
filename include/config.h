@@ -17,6 +17,13 @@
 #define LEASE_SECONDS 900
 #endif
 
+// Device telemetry POST cadence (POST /measurements/<miner_key>). Matches POC_INTERVAL_MS:
+// both are "report current condition" traffic and there is no value in sampling heap/RSSI
+// faster than the PoC tick already observes the device.
+#ifndef TELEMETRY_INTERVAL_MS
+#define TELEMETRY_INTERVAL_MS 600000UL    // 10 min
+#endif
+
 // OTA manifest poll interval.
 #ifndef OTA_CHECK_MS
 #define OTA_CHECK_MS 21600000UL           // 6 h

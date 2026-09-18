@@ -66,7 +66,7 @@ Tap your device, then enter:
 - your 58-character Algorand wallet address
 
 The board saves the credentials, joins your network, and registers itself. The app shows its
-**miner key** — `IOT-` followed by 32 hex characters. **Write this down.** You need it in step 5,
+**miner key** — `FEM-` followed by 32 hex characters. **Write this down.** You need it in step 5,
 and it is derived from the board's MAC, so it stays the same across factory resets.
 
 ### A board does not appear in the scan
@@ -89,7 +89,7 @@ because the dashboard lists devices belonging to your account, not every device 
 
 1. Sign in at **<https://dashboard.frynetworks.com>** and connect your wallet (Pera, Defly, Lute
    and Kibisis are supported).
-2. Register the `IOT-...` miner key from step 4 to your account.
+2. Register the `FEM-...` miner key from step 4 to your account.
 3. The device appears under **Devices**.
 
 If the app says the device is online but the dashboard shows nothing, you are almost certainly at
@@ -114,7 +114,7 @@ The lines worth knowing:
 
 | Line | Meaning |
 |---|---|
-| `FRY boot v0.3.1 chip=ESP32 mac=... minerkey=IOT-...` | Boot banner with the board's identity |
+| `FRY boot v0.3.1 chip=ESP32 mac=... minerkey=FEM-...` | Boot banner with the board's identity |
 | `BLE advertising name=FRY-ESP32-XXXXXX svc=465259` | Waiting to be provisioned |
 | `wifi connected ip=...` | Joined your network |
 | `wifi connect failed reason=201` | Wi-Fi not found — wrong name, out of range, or 5 GHz only |
@@ -164,5 +164,5 @@ range. If it keeps failing at the same step, factory reset first so the board st
 **Nothing on serial** — wrong baud rate (it is 115200), a charge-only USB cable, or a board that is
 not powered.
 
-Still stuck? Ask in **<https://discord.gg/frynetworks>** with your board type, the `IOT-` miner key,
+Still stuck? Ask in **<https://discord.gg/frynetworks>** with your board type, the `FEM-` miner key,
 and the serial log around the failure.
