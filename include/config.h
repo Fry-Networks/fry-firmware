@@ -54,11 +54,6 @@
 #define SOCKS5_PORT 1080
 #endif
 
-// Minimum free-heap gate before attempting a TLS handshake (bytes).
-#ifndef HEAP_GATE_TLS
-#define HEAP_GATE_TLS 15000
-#endif
-
 // Minimum free-heap gate before attempting an OTA download (bytes).
 #ifndef HEAP_GATE_OTA
 #define HEAP_GATE_OTA 20000
