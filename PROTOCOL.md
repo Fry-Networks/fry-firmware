@@ -87,12 +87,15 @@ omitted entirely when both are empty.
   `slot_number = (UTC minutes since midnight / 10) % 144`. Success is any 2xx; there is no response body.
 - `GET /versions/IOTVPN?platform=<os>` for reward and version configuration.
 - `POST /measurements/{miner_key}` with the device telemetry body below, every
-  `TELEMETRY_INTERVAL_MS` (600000, matching the PoC cadence). Success is `202`.
-  **Auth is the per-device token only** — unlike every other call in this section, the bootstrap
-  token is never an acceptable fallback here, so the firmware skips the cycle entirely until a
-  registration has issued one. The path parameter is the miner KEY, not the install id: the server
-  resolves that value against `minerKey`/`canonicalId`, which is what keeps a sample attributable
-  when the install id is unknown to it.
+  `TELEMETRY_INTERVAL_MS` (600000, matching the PoC cadence). Success is `202 {"ok":true}`.
+  **Auth is the SHARED bearer token, not the per-device token.** This endpoint is the one gated by
+  `verify_bearer_token_general`, which compares the presented token against the server's
+  `API_BEARER_TOKEN` and answers `401` on any mismatch — so a per-device token can never satisfy
+  it (env unset is `500`, missing is `401`, wrong is `401`). The firmware still waits for a
+  device token before its first post, but only as a readiness signal: that token appearing is what
+  proves registration completed and the server has a row to attribute the sample to. The path
+  parameter is the miner KEY, not the install id — the server resolves it against
+  `minerKey`/`canonicalId`, which keeps a sample attributable when the install id is unknown.
 - **Never** call `GET /credentials/{key}/verified` with the bootstrap token. It is rejected by
   design and naive clients loop forever on 401 recovery.
 

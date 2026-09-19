@@ -18,6 +18,8 @@
 #include "telemetry_body.h"
 #include "wifi_station.h"
 
+#include <generated/fry_secrets.h>
+
 #ifndef FRY_MINER_CODE
 #define FRY_MINER_CODE "IOTVPN"
 #endif
@@ -33,6 +35,7 @@ namespace {
 
 unsigned long s_lastMs = 0;
 bool s_loggedSkipNoToken = false;
+bool s_loggedSkipNoAuth = false;
 bool s_loggedSkipHeap = false;
 bool s_loggedSkipClock = false;
 bool s_loggedSkipIdentity = false;
@@ -67,15 +70,31 @@ void tick() {
   if (s_lastMs != 0 && (now - s_lastMs) < TELEMETRY_INTERVAL_MS) return;
   s_lastMs = now;
 
-  String token = fry_config::getDeviceToken();
-  if (token.length() == 0) {
+  // The device token is NOT the credential for this endpoint -- it is the readiness signal.
+  // /measurements authenticates with the SHARED bearer (verify_bearer_token_general on ZEUS00,
+  // mirrored in legacy-telemetry.ts: `token !== expected` -> 401), so a per-device token can
+  // never satisfy it. Measured on hardware: sending the device token earns a flat
+  // "post failed http=401" every interval. What the device token DOES tell us is that
+  // registration has completed, so the server has a row this sample can be attributed to --
+  // posting before that is accepted but never persisted ("unknown_install").
+  if (fry_config::getDeviceToken().length() == 0) {
     if (!s_loggedSkipNoToken) {
-      Serial.println("telemetry: no device token yet - skipping until registration succeeds");
+      Serial.println("telemetry: not registered yet - skipping until registration succeeds");
       s_loggedSkipNoToken = true;
     }
     return;
   }
   s_loggedSkipNoToken = false;
+
+  String auth = String(FRY_API_TOKEN);
+  if (auth.length() == 0) {
+    if (!s_loggedSkipNoAuth) {
+      Serial.println("telemetry: no FRY_API_TOKEN compiled in - skipping (a POST would only earn a 401)");
+      s_loggedSkipNoAuth = true;
+    }
+    return;
+  }
+  s_loggedSkipNoAuth = false;
 
   // Identity before the heap gate: both are NVS reads, and an empty one must abort before any
   // allocation. ensureInstallId/ensureMinerKey are void, so the only failure signal is the
@@ -99,31 +118,33 @@ void tick() {
   // an unresolvable install still attributable.
   String url = fry_config::getApiBase() + "/measurements/" + minerKey;
 
-  // Yield to OTA. One attempt, no blocking wait: a bounded wait inside the loop has previously
-  // starved it badly enough to trip the software watchdog.
+  // TOTAL-FREE gate only. One attempt, no blocking wait: a bounded wait inside the loop has
+  // previously starved it badly enough to trip the software watchdog.
   //
-  // The CONTIGUOUS-block half of the gate is BearSSL-only, exactly as in ota_client.cpp. Asking
-  // every chip for HEAP_GATE_OTA_BLOCK (36864) re-imports the bug heap_gate.h documents: a
-  // T-Beam idling at 110,580 B contiguous still failed it mid-session, so no ESP32 board could
-  // ever pass. On ESP32/C3 that would have made telemetry silently never post -- and because the
-  // skip below is one-shot-latched, the serial log would have said so exactly once and then gone
-  // quiet forever.
-  const bool isHttps = url.startsWith("https://");
-#if defined(ARDUINO_ARCH_ESP8266)
-  constexpr bool kBearsslSingleBuffer = true;
-#else
-  constexpr bool kBearsslSingleBuffer = false;  // ESP32 family uses mbedtls
-#endif
-  const uint32_t minBlock =
-      fry::otaMinContiguousBlock(isHttps, kBearsslSingleBuffer, HEAP_GATE_OTA_BLOCK);
+  // Deliberately NO contiguous-block requirement. Telemetry is a ~250-byte POST to hardwareapi,
+  // which honours MFLN, so beginHttpsUrl() sizes BearSSL at 512/512 whenever the big path is
+  // unaffordable -- the same path registration, lease renewal and PoC take, none of which gate
+  // on heap at all. src/esp8266/http_tls.cpp states the rule outright: "Gating everything on the
+  // OTA-sized threshold would block those small calls too."
+  //
+  // Both ways of getting this wrong were measured on hardware:
+  //   * HEAP_GATE_OTA_BLOCK (36864) unconditionally -> heap_gate.h's documented ESP32 bug, where
+  //     a T-Beam idling at 110,580 B contiguous still failed mid-session;
+  //   * the same threshold via otaMinContiguousBlock() -> correct on ESP32, but on COM11
+  //     (ESP8266, blk=32520 with the VPN up) it refused every cycle while that very board had
+  //     just completed an HTTPS registration on the 512/512 path in the same second.
+  // Sizing the TLS buffers is beginHttpsUrl()'s job, not this gate's. What remains here is the
+  // one thing that is genuinely telemetry's business: do not run at all on a chip that is nearly
+  // out of heap.
+  //
   // Sample once and log THESE numbers: re-reading the heap to build the message prints values
   // the gate never saw, which makes a diagnostic line that cannot be trusted.
   const uint32_t freeNow = static_cast<uint32_t>(ESP.getFreeHeap());
   const uint32_t blkNow = static_cast<uint32_t>(fry::queryMaxFreeBlock());
-  if (!fry::waitForHeapGate(HEAP_GATE_OTA, minBlock, 1)) {
+  if (!fry::waitForHeapGate(HEAP_GATE_OTA, 0, 1)) {
     if (!s_loggedSkipHeap) {
-      Serial.printf("telemetry: heap gate not met - need free>=%u blk>=%u, have free=%u blk=%u\n",
-                    static_cast<unsigned>(HEAP_GATE_OTA), static_cast<unsigned>(minBlock),
+      Serial.printf("telemetry: heap gate not met - need free>=%u, have free=%u blk=%u\n",
+                    static_cast<unsigned>(HEAP_GATE_OTA),
                     static_cast<unsigned>(freeNow), static_cast<unsigned>(blkNow));
       s_loggedSkipHeap = true;
     }
@@ -167,7 +188,7 @@ void tick() {
   HTTPClient http;
   int code = -1;
   if (fry_http::beginHttpsUrl(http, sec, url)) {
-    http.addHeader("Authorization", "Bearer " + token);
+    http.addHeader("Authorization", "Bearer " + auth);
     http.addHeader("Content-Type", "application/json");
     code = http.POST(body);
   }

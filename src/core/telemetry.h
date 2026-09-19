@@ -6,22 +6,28 @@
 // side had never persisted a single evidenceType='telemetry' row: there was no producer, not a
 // broken consumer.
 //
-// Auth is the PER-DEVICE token the registration response already persists
-// (fry_config::setDeviceToken, NVS "fry"/"deviceToken"). The header is built inline rather than
-// through hardwareapi_client's addAuthHeader(), which is file-local and unreachable from here --
-// and deliberately so: addAuthHeader() falls back to the build-time FRY_API_TOKEN, and telemetry
-// must never spend the bootstrap credential. No token means no POST. Nothing secret is compiled
-// into the binary.
+// Auth is the SHARED bearer (FRY_API_TOKEN), not the per-device token. /measurements is the one
+// endpoint in this firmware that is gated by verify_bearer_token_general on ZEUS00 — mirrored in
+// legacy-telemetry.ts, which compares the presented token against API_BEARER_TOKEN and answers
+// 401 on any mismatch. A per-device token can therefore never satisfy it; sending one was
+// measured on hardware as a flat "post failed http=401" once per interval, forever.
+//
+// The per-device token is still read, but purely as a READINESS signal: it exists only after a
+// successful registration, which is also when the server has a device row this sample can be
+// attributed to. Posting earlier is accepted and then dropped as "unknown_install".
 //
 // Conditions that skip a cycle silently rather than failing:
-//   * no device token yet — the board has not completed a registration, so there is nothing to
-//     authenticate with and a POST would only earn a 401;
+//   * not registered yet — no device token persisted, so the server has nothing to attribute a
+//     sample to;
+//   * no FRY_API_TOKEN compiled in (the default for a local build — CI injects it) — a POST
+//     could only earn a 401, so the cycle is skipped and said once;
 //   * empty install id or miner key — nothing the server could attribute the sample to;
-//   * insufficient heap — total free is gated on every chip. The CONTIGUOUS-block half is
-//     BearSSL-only (ESP8266 https), matching fry::otaMinContiguousBlock: a TLS handshake there
-//     needs ~34-37 KB in ONE block and the OTA path needs the same memory, so telemetry yields
-//     rather than being the allocation that starves an update. Applying that block requirement
-//     on ESP32 would gate out every cycle forever (see heap_gate.h);
+//   * insufficient TOTAL free heap (HEAP_GATE_OTA). There is deliberately no contiguous-block
+//     requirement: this is a ~250-byte POST to a peer that honours MFLN, so beginHttpsUrl()
+//     drops BearSSL to 512/512 when the big path is unaffordable — exactly what registration,
+//     lease renewal and PoC already rely on, and none of those gate on heap at all. Imposing
+//     HEAP_GATE_OTA_BLOCK here refused every cycle on a board that was registering successfully
+//     over HTTPS at the same moment;
 //   * clock not NTP-synced — a 1970 timestamp would silently mis-date the sample.
 namespace fry_telemetry {
 
