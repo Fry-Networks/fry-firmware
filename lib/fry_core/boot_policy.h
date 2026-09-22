@@ -26,6 +26,14 @@ enum class BootPhase : uint8_t {
 // straight away; without them there is nothing to do but wait to be provisioned.
 BootPhase initialBootPhase(bool hasCredentials);
 
+// Whether stored configuration is complete enough to skip provisioning on this boot.
+//
+// WiFi credentials alone are not enough: a board that stored an SSID but was never committed
+// would boot straight into a join it has no business attempting. The commit marker is a wallet
+// for the BLE/SoftAP transports (PROTOCOL.md section 1: the WALLET write commits) and the
+// wallet-less fry/provDone flag for Improv Serial, whose protocol carries no wallet field.
+bool hasBootCredentials(bool hasWifi, bool hasWallet, bool hasProvDone);
+
 // Tracks whether the provisioning transport has been brought up, and answers the single question
 // the boot sequence asks on every phase entry: "must I start it now?".
 //

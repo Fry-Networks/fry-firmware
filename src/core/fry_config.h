@@ -21,6 +21,10 @@ bool getMinerKey(char* out, size_t outLen);  // returns false if never generated
 void setMinerKey(const char* key);
 bool getSalt(uint8_t out[16]);  // returns false if never generated
 void setSalt(const uint8_t salt[16]);
+// fry/provDone — "these credentials were committed", set by a transport that has no wallet to
+// store (Improv Serial). hasWallet() plays the same role for BLE/SoftAP. Cleared by factoryReset.
+bool hasProvDone();
+void setProvDone();
 String getInstallId();
 void setInstallId(const char* id);
 bool hasInstallId();
@@ -57,7 +61,7 @@ uint8_t getOtaBootFails();
 void setOtaBootFails(uint8_t v);
 void clearOtaBootFails();
 
-// Wipes fry_wifi, fry/wallet, fry/installId, fry/deviceToken, fry_vpn and fry_ota.
+// Wipes fry_wifi, fry/wallet, fry/provDone, fry/installId, fry/deviceToken, fry_vpn and fry_ota.
 // PRESERVES fry/salt and fry/minerKey so a re-provisioned board keeps one server identity
 // (PROTOCOL.md section 7, factory_reset).
 void factoryReset();

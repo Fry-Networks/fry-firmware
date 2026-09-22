@@ -67,6 +67,28 @@ void test_successful_provisioning_does_not_restart_the_transport() {
   TEST_ASSERT_TRUE(policy.transportStarted());
 }
 
+
+// ---- the boot credential predicate ----------------------------------------------------------
+// Improv Serial carries no wallet, so "committed" cannot mean "a wallet is stored" any more.
+// It now means a wallet OR the wallet-less fry/provDone marker - but never WiFi on its own,
+// which would send a half-provisioned board into a join it was never told to make.
+void test_boot_credentials_need_wifi_and_a_commit_marker() {
+  TEST_ASSERT_TRUE(fry::hasBootCredentials(true, true, false));   // BLE / SoftAP: wallet
+  TEST_ASSERT_TRUE(fry::hasBootCredentials(true, false, true));   // Improv: provDone
+  TEST_ASSERT_TRUE(fry::hasBootCredentials(true, true, true));    // both, e.g. re-provisioned
+  TEST_ASSERT_FALSE(fry::hasBootCredentials(true, false, false)); // ssid stored, never committed
+  TEST_ASSERT_FALSE(fry::hasBootCredentials(false, true, false)); // wallet but no network
+  TEST_ASSERT_FALSE(fry::hasBootCredentials(false, false, true));
+  TEST_ASSERT_FALSE(fry::hasBootCredentials(false, false, false));
+}
+
+void test_boot_credentials_drive_the_initial_phase() {
+  TEST_ASSERT_EQUAL((int)BootPhase::ConnectingWifi,
+                    (int)fry::initialBootPhase(fry::hasBootCredentials(true, false, true)));
+  TEST_ASSERT_EQUAL((int)BootPhase::AwaitingProvisioning,
+                    (int)fry::initialBootPhase(fry::hasBootCredentials(true, false, false)));
+}
+
 }  // namespace
 
 // Unity's setUp/tearDown have C linkage (unity.h declares them inside an extern "C" block), so
@@ -83,5 +105,7 @@ int main(int, char**) {
   RUN_TEST(test_repeated_join_failures_start_the_transport_only_once);
   RUN_TEST(test_ready_phase_never_starts_the_transport);
   RUN_TEST(test_successful_provisioning_does_not_restart_the_transport);
+  RUN_TEST(test_boot_credentials_need_wifi_and_a_commit_marker);
+  RUN_TEST(test_boot_credentials_drive_the_initial_phase);
   return UNITY_END();
 }

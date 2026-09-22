@@ -36,6 +36,14 @@ void notifyWifiNoIp();
 void notifyApiOk();
 void notifyApiFail();
 
+// Commits WiFi-only credentials offered by Improv Serial (src/core/improv_serial_glue.cpp),
+// whose protocol carries no wallet field. Validates the SSID exactly as the BLE/SoftAP paths do,
+// persists it together with the wallet-less fry/provDone marker under the same
+// persist-before-Connecting rule as the WALLET write, and drives the SAME FSM, so status/error
+// reporting and the boot sequence's readyToConnect() poll are unchanged. Returns true once the
+// FSM is Connecting. Called only by the Improv glue: BLE and SoftAP behaviour is untouched.
+bool commitWifiOnlyCredentials(const char* ssid, const char* pass);
+
 // Tears down the transport once no longer needed (ESP8266: AP_TEARDOWN_MS after Connected, per
 // PROTOCOL.md section 3; ESP32 BLE has no mandated teardown and this is a no-op there).
 void tick();

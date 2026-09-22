@@ -156,6 +156,32 @@ void init(const char* deviceName, const char* minerKey) {
   Serial.printf("BLE advertising name=%s svc=465259\n", deviceName);
 }
 
+bool commitWifiOnlyCredentials(const char* ssid, const char* pass) {
+  if (!ssid) return false;
+  // A previous join failed and parked the FSM in Error. The BLE/SoftAP paths have no recovery
+  // from there short of a reboot; an Improv client can simply try again, so reset first. Only
+  // this entry point does it — the app-facing paths behave exactly as before.
+  if (s_fsm.state() == fry::ProvState::Error) {
+    s_fsm.feed(fry::ProvEvent::Reset, {});
+  }
+
+  const size_t ssidLen = strlen(ssid);
+  fry::ProvInputs in;
+  in.ssidValid = (ssidLen >= 1 && ssidLen <= 32);
+  s_fsm.feed(fry::ProvEvent::SsidWritten, in);
+  if (!in.ssidValid) {
+    updateStatusChar();
+    return false;
+  }
+
+  fry::commitWifiOnly(s_fsm, [&]() {
+    fry_config::setWifi(ssid, pass ? pass : "");
+    fry_config::setProvDone();  // no wallet to stand in for "committed" on this path
+  });
+  updateStatusChar();
+  return s_fsm.readyToConnect();
+}
+
 void loop() {
   // NimBLE services connections on its own host task; nothing to pump here.
 }

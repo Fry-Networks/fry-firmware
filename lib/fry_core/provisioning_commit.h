@@ -19,4 +19,16 @@ bool commitOnWallet(ProvisioningFsm& fsm, const ProvInputs& in, Persist persist)
   return fsm.feed(ProvEvent::WalletWritten, in);
 }
 
+// The same rule for the wallet-less Improv Serial commit: persist first (the loop task reads the
+// credentials straight back out of the store the moment the FSM says Connecting), then feed the
+// event. There is no wallet to validate, so the only precondition is that the FSM is Provisioning
+// - i.e. a valid SSID was accepted first.
+template <typename Persist>
+bool commitWifiOnly(ProvisioningFsm& fsm, Persist persist) {
+  if (fsm.state() == ProvState::Provisioning) {
+    persist();
+  }
+  return fsm.feed(ProvEvent::WifiOnlyCommit, ProvInputs{});
+}
+
 }  // namespace fry

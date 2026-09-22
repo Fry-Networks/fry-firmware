@@ -153,7 +153,8 @@ void setup() {
   // Previously provisioned boards skip straight to the join; the transport is started lazily by
   // setPhase() if and when that join fails. Starting it here unconditionally is NOT an option on
   // ESP8266, where the transport is a softAP and bringing it up switches the radio to WIFI_AP.
-  setPhase(fry::initialBootPhase(fry_config::hasWifi() && fry_config::hasWallet()));
+  setPhase(fry::initialBootPhase(fry::hasBootCredentials(
+      fry_config::hasWifi(), fry_config::hasWallet(), fry_config::hasProvDone())));
 
   Serial.println("[boot] ready");
 }

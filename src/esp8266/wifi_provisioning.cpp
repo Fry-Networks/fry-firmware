@@ -10,6 +10,7 @@
 
 #include "../core/fry_config.h"
 #include "config.h"
+#include "provisioning_commit.h"
 
 #ifndef FRY_FIRMWARE_VERSION
 #define FRY_FIRMWARE_VERSION "0.0.0-dev"
@@ -196,6 +197,29 @@ void init(const char* deviceName, const char* minerKey) {
   s_server.begin();
 
   Serial.printf("AP started %s ip=192.168.4.1\n", apName);
+}
+
+bool commitWifiOnlyCredentials(const char* ssid, const char* pass) {
+  if (!ssid) return false;
+  // See the ESP32 transport: an Improv client may retry after a failed join, so clear an Error
+  // parked by the previous attempt. The captive portal's own path is untouched.
+  if (s_fsm.state() == fry::ProvState::Error) {
+    s_fsm.feed(fry::ProvEvent::Reset, {});
+  }
+
+  const size_t ssidLen = strlen(ssid);
+  fry::ProvInputs in;
+  in.ssidValid = (ssidLen >= 1 && ssidLen <= 32);
+  s_fsm.feed(fry::ProvEvent::SsidWritten, in);
+  if (!in.ssidValid) return false;
+
+  fry::commitWifiOnly(s_fsm, [&]() {
+    fry_config::setWifi(ssid, pass ? pass : "");
+    optimistic_yield(1000);  // feed the WDT — the LittleFS-JSON store rewrites the whole file
+    fry_config::setProvDone();
+    optimistic_yield(1000);
+  });
+  return s_fsm.readyToConnect();
 }
 
 void loop() {

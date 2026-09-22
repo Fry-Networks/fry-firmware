@@ -26,6 +26,13 @@ bool ProvisioningFsm::feed(ProvEvent ev, const ProvInputs& in) {
           _state = ProvState::Error;
           _err = ProvErr::BadSsid;
         }
+      } else if (ev == ProvEvent::WifiOnlyCommit) {
+        // Same commit point as a wallet write, minus the wallet: the Improv client has already
+        // sent everything it carries. The wallet-less marker persisted alongside the credentials
+        // (fry/provDone) is what lets the NEXT boot skip provisioning without one.
+        _state = ProvState::Connecting;
+        _err = ProvErr::None;
+        _wifiUp = false;
       } else if (ev == ProvEvent::WalletWritten) {
         // Commit semantics per PROTOCOL.md section 1: writing WALLET commits provisioning.
         if (in.walletValid) {

@@ -99,6 +99,21 @@ void setSalt(const uint8_t salt[16]) {
   p.end();
 }
 
+bool hasProvDone() {
+  KvStore p;
+  p.begin("fry", true);
+  bool has = p.isKey("provDone") && p.getBool("provDone", false);
+  p.end();
+  return has;
+}
+
+void setProvDone() {
+  KvStore p;
+  p.begin("fry", false);
+  p.putBool("provDone", true);
+  p.end();
+}
+
 String getInstallId() {
   KvStore p;
   p.begin("fry", true);
@@ -333,10 +348,11 @@ void clearOtaBootFails() {
 void factoryReset() {
   clearWifi();
 
-  // fry namespace: remove wallet/installId/deviceToken but PRESERVE salt + minerKey.
+  // fry namespace: remove wallet/provDone/installId/deviceToken but PRESERVE salt + minerKey.
   KvStore p;
   p.begin("fry", false);
   p.remove("wallet");
+  p.remove("provDone");
   p.remove("installId");
   p.remove("deviceToken");
   p.end();

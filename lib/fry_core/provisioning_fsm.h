@@ -34,6 +34,10 @@ enum class ProvEvent : uint8_t {
   ApiOk,
   ApiFail,
   Reset,
+  // Improv Serial (src/core/improv_serial_glue.cpp) commits with WiFi credentials only: its
+  // protocol has no wallet field. Appended at the end - ProvEvent is internal and is never
+  // serialized, unlike ProvState/ProvErr whose numbering PROTOCOL.md section 2 fixes.
+  WifiOnlyCommit,
 };
 
 struct ProvInputs {
