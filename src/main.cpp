@@ -10,6 +10,7 @@
 #include "boot_policy.h"
 #include "config.h"
 #include "core/fry_config.h"
+#include "core/improv_serial_glue.h"
 #include "core/miner_key.h"
 #include "core/ota_client.h"
 #include "core/provisioning_transport.h"
@@ -149,6 +150,7 @@ void setup() {
 #ifdef FRY_SERIAL_PROVISION
   fry_serial_init();
 #endif
+  fry_improv::init(s_deviceName, s_minerKey);  // no-op unless FRY_HAS_IMPROV
 
   // Previously provisioned boards skip straight to the join; the transport is started lazily by
   // setPhase() if and when that join fails. Starting it here unconditionally is NOT an option on
@@ -163,6 +165,9 @@ void loop() {
 #ifdef FRY_SERIAL_PROVISION
   fry_serial_poll();
 #endif
+  // Improv Serial answers only while the provisioning transport is up — the same predicate the
+  // boot policy uses to decide the board is reachable for provisioning at all.
+  fry_improv::poll(s_bootPolicy.transportStarted());
 
   pollFactoryResetButton();  // every phase — a wedged board must still be recoverable
 
