@@ -100,6 +100,71 @@ try:
     check("clean single file exits 0",
           rc == 0 and "PASS" in out,
           "rc=%d\n%s" % (rc, out))
+
+    # ---- cases 6-10: .pio/ and .gitignore are pruned from WALKS, never from arguments ---------
+    # The marker written into the fake build output is taken from the scanner being tested (its
+    # own always-present needle), so this file never has to contain an identity marker itself -
+    # the same trap that made the scanner flag its own source. Read via importlib rather than a
+    # literal so it tracks whatever the scanner actually looks for.
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("scan_identity_under_test", SCANNER)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    MARKER = mod.NEEDLES[-1].decode("latin1")  # the generic needle, always last in the tuple
+
+    pio_root = os.path.join(tmp, "tree")
+    pio_bin = os.path.join(pio_root, ".pio", "build", "esp32", "firmware.bin")
+    os.makedirs(os.path.dirname(pio_bin))
+    with open(pio_bin, "w") as f:
+        f.write("padding " + MARKER + " padding\n")
+    with open(os.path.join(pio_root, "clean.txt"), "w") as f:
+        f.write("ordinary source\n")
+
+    # ---- case 6: POSITIVE CONTROL - the marker IS detected in that file --------------------
+    # Without this, case 7 would also pass against a scanner that detects nothing at all.
+    rc, out = run(pio_bin)
+    check("positive control: the derived marker is detected in .pio/build/esp32/firmware.bin",
+          rc == 1 and "hit(s)" in out,
+          "rc=%d\n%s" % (rc, out))
+
+    # ---- case 7: a tree walk does not descend into .pio/ -------------------------------------
+    rc, out = run(pio_root)
+    check("tree walk skips .pio/ and exits clean",
+          rc == 0 and "firmware.bin" not in out and "clean.txt" in out,
+          "rc=%d\n%s" % (rc, out))
+
+    # ---- case 8: naming a skipped path explicitly still scans it -----------------------------
+    # The skip set prunes descendants of a walked root, not the root argument, so both the file
+    # and the .pio directory itself remain scannable on demand.
+    rc_file, out_file = run(pio_bin)
+    rc_dir, out_dir = run(os.path.join(pio_root, ".pio"))
+    check("explicit .pio paths are still scanned (file and directory argument)",
+          rc_file == 1 and rc_dir == 1 and "firmware.bin" in out_dir,
+          "file rc=%d dir rc=%d\n%s\n%s" % (rc_file, rc_dir, out_file, out_dir))
+
+    # ---- case 9: a plain "<name>/" line in .gitignore prunes that directory ------------------
+    gi_root = os.path.join(tmp, "gitignored")
+    os.makedirs(os.path.join(gi_root, "out"))
+    with open(os.path.join(gi_root, "out", "leak.txt"), "w") as f:
+        f.write(LEAK_TEXT + "\n")
+    with open(os.path.join(gi_root, "keep.txt"), "w") as f:
+        f.write("ordinary source\n")
+    gi_file = os.path.join(gi_root, ".gitignore")
+    with open(gi_file, "w") as f:
+        f.write("# generated\nout/\n")
+    rc, out = run(gi_root)
+    check("a .gitignore entry 'out/' keeps out/leak.txt out of the walk",
+          rc == 0 and "leak.txt" not in out and "keep.txt" in out,
+          "rc=%d\n%s" % (rc, out))
+
+    # ---- case 10: remove the .gitignore and the same leak is flagged again -------------------
+    # Proves case 9 is the .gitignore doing the work, not the file being undetectable.
+    os.remove(gi_file)
+    rc, out = run(gi_root)
+    check("removing the .gitignore makes out/leak.txt a hit again",
+          rc == 1 and "leak.txt" in out and "hit(s)" in out,
+          "rc=%d\n%s" % (rc, out))
 finally:
     shutil.rmtree(tmp, ignore_errors=True)
 
