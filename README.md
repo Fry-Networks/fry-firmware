@@ -32,6 +32,8 @@ pio test -e native        # Unity tests (host, CI only - no compiler is required
                            # board envs themselves)
 ```
 
+Native unit tests on Linux: install build-essential, then run pio test -e native.
+
 `FRY_API_TOKEN` is read from the environment at build time by `tools/fry_prebuild.py` and baked
 into `include/generated/fry_secrets.h`. It is optional; an empty token disables the build-time
 bootstrap credential and registration falls back to per-device tokens only.
