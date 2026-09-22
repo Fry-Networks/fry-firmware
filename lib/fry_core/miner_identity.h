@@ -22,6 +22,17 @@ void computeMinerKey(const uint8_t mac6[3], const uint8_t salt[16], char* outKey
 // ^FEM-[0-9A-F]{32}$ — exact length and character class, case-sensitive.
 bool isValidMinerKey(const char* key);
 
+// ^IOT-[0-9A-Fa-f]{32}$ — a key generated before the 2026-09-18 prefix change. Accepts either
+// hex case because that is what boards in the field actually hold; isValidMinerKey stays strict.
+bool isLegacyMinerKey(const char* key);
+
+// Rewrites a legacy "IOT-<hex>" key as "FEM-<same hex>", preserving the hex digits exactly
+// (case included) so the device keeps its identity — only the namespace prefix changes.
+// Returns false, leaving `out` untouched, for anything that is not a legacy key and for
+// outLen < 37 ("FEM-" + 32 hex chars + NUL). Idempotent by refusal: migrating an already
+// migrated key returns false.
+bool migrateLegacyMinerKey(const char* in, char* out, size_t outLen);
+
 // "FRY-<chipTag>-<MAC6 as 6 uppercase hex chars>". chipTag is one of
 // "ESP8266" | "ESP32" | "ESP32-S3" | "ESP32-C3". outName must be at least 32 bytes.
 void formatDeviceName(const char* chipTag, const uint8_t mac6[3], char* outName, size_t outNameLen);

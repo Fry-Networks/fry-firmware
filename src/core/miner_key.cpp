@@ -37,6 +37,12 @@ void generateSalt(uint8_t out[16]) {
   }
 }
 
+void copyKey(char* out, size_t outLen, const char* key) {
+  if (!out || outLen == 0) return;
+  strncpy(out, key, outLen - 1);
+  out[outLen - 1] = 0;
+}
+
 const char* chipTag() {
 #if defined(FRY_CHIP)
   return FRY_CHIP;
@@ -57,7 +63,34 @@ void getMac6(uint8_t mac6[3]) {
 
 void ensureMinerKey(char* outKey, size_t outKeyLen) {
   if (fry_config::getMinerKey(outKey, outKeyLen)) {
-    return;  // already generated — never regenerate (PROTOCOL.md section 4)
+    if (fry::isValidMinerKey(outKey)) {
+      return;  // already generated — never regenerate (PROTOCOL.md section 4)
+    }
+    // A board flashed before the 2026-09-18 prefix change holds an "IOT-<hex>" key. Only the
+    // namespace prefix moved, so rewrite it in place and keep the hex: same device, same
+    // identity. A stored key that is neither valid nor legacy is left exactly as it is —
+    // ensureMinerKey never replaces a key that exists (PROTOCOL.md section 4).
+    char migrated[37];
+    if (!fry::migrateLegacyMinerKey(outKey, migrated, sizeof(migrated))) {
+      return;
+    }
+    // Write, then read back through a FRESH store handle (fry_config opens one per call, so a
+    // successful read proves it reached NVS / LittleFS rather than a cached copy). One retry.
+    for (int attempt = 0; attempt < 2; attempt++) {
+      fry_config::setMinerKey(migrated);
+      char readBack[40] = {0};
+      if (fry_config::getMinerKey(readBack, sizeof(readBack)) && strcmp(readBack, migrated) == 0) {
+        copyKey(outKey, outKeyLen, migrated);
+        Serial.println("[identity] migrated legacy key prefix IOT- -> FEM- (hex preserved)");
+        return;
+      }
+    }
+    // The store would not take it. Run this boot on the migrated key anyway so nothing downstream
+    // sees the legacy prefix; the write is attempted again on the next boot.
+    copyKey(outKey, outKeyLen, migrated);
+    Serial.println("[identity] legacy key migration could not be persisted - using the migrated "
+                   "key for this boot, retrying on the next one");
+    return;
   }
 
   uint8_t mac6[3];

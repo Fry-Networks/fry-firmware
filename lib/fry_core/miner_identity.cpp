@@ -11,6 +11,8 @@ namespace {
 
 bool isHexUpper(char c) { return (c >= '0' && c <= '9') || (c >= 'A' && c <= 'F'); }
 
+bool isHexAnyCase(char c) { return isHexUpper(c) || (c >= 'a' && c <= 'f'); }
+
 const char* const kChipTags[] = {"ESP8266", "ESP32", "ESP32-S3", "ESP32-C3"};
 const size_t kChipTagCount = sizeof(kChipTags) / sizeof(kChipTags[0]);
 
@@ -37,6 +39,25 @@ bool isValidMinerKey(const char* key) {
   for (int i = 0; i < 32; i++) {
     if (!isHexUpper(key[4 + i])) return false;
   }
+  return true;
+}
+
+bool isLegacyMinerKey(const char* key) {
+  if (!key) return false;
+  if (strlen(key) != 36) return false;  // "IOT-" (4) + 32 hex chars
+  if (strncmp(key, "IOT-", 4) != 0) return false;
+  for (int i = 0; i < 32; i++) {
+    if (!isHexAnyCase(key[4 + i])) return false;
+  }
+  return true;
+}
+
+bool migrateLegacyMinerKey(const char* in, char* out, size_t outLen) {
+  if (!out || outLen < 37) return false;
+  if (!isLegacyMinerKey(in)) return false;
+  memcpy(out, "FEM-", 4);
+  memcpy(out + 4, in + 4, 32);  // verbatim: the hex digits, and their case, are the identity
+  out[36] = 0;
   return true;
 }
 
