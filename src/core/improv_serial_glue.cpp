@@ -75,11 +75,15 @@ State currentState() {
   return s_awaitingWifi ? State::Provisioning : State::Ready;
 }
 
+// The firmware NAME reported in the device-info result. ESP Web Tools compares it byte for byte
+// against the "name" in docs/flash/manifest.json (`firmware===this._manifest.name` in the
+// vendored bundle); a mismatch makes every later visit look like a different product to install
+// rather than an update, and prompts an erase. tools/check_flasher_assets.py reads THIS literal
+// out of THIS file and fails the release if the two have drifted apart.
+const char kImprovFirmwareName[] = "Fry Firmware";
+
 void sendDeviceInfo() {
-  // The first string is the firmware NAME and must stay exactly "Fry Firmware": ESP Web Tools
-  // compares it byte for byte against the "name" in the flasher manifest, and a mismatch makes
-  // every later visit look like a different product to install rather than an update.
-  const char* info[] = {"Fry Firmware", FRY_FIRMWARE_VERSION, FRY_CHIP, s_deviceName};
+  const char* info[] = {kImprovFirmwareName, FRY_FIRMWARE_VERSION, FRY_CHIP, s_deviceName};
   sendResult(Command::RequestDeviceInfo, info, 4);
 }
 
