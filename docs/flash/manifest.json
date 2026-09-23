@@ -1,0 +1,93 @@
+{
+  "name": "Fry Firmware",
+  "version": "0.3.2",
+  "new_install_prompt_erase": true,
+  "new_install_improv_wait_time": 20,
+  "builds": [
+    {
+      "chipFamily": "ESP8266",
+      "parts": [
+        {
+          "path": "fw/firmware-esp8266.bin",
+          "offset": 0,
+          "sha256": "b972b2954fbf08b27e8523de3ef005e6a5fb473e6862c00b2e974a2ebc294f5e"
+        }
+      ]
+    },
+    {
+      "chipFamily": "ESP32",
+      "parts": [
+        {
+          "path": "fw/bootloader-esp32.bin",
+          "offset": 4096,
+          "sha256": "3d234a7471f67b013686dabd4dee7c1fa915c9928463616a94bc9297acf1abf8"
+        },
+        {
+          "path": "fw/partitions-esp32.bin",
+          "offset": 32768,
+          "sha256": "0a8b5720e7b77ff11f1462458c3a509dee79224e5279898f26d6a2e3ae0517b7"
+        },
+        {
+          "path": "fw/boot_app0-esp32.bin",
+          "offset": 57344,
+          "sha256": "f94c5d786a7a8fab06ac5d10e33bf37711a6697636dc037559ea19cc410a17f0"
+        },
+        {
+          "path": "fw/firmware-esp32.bin",
+          "offset": 65536,
+          "sha256": "5d6a3185e005c27819b0f99e4c5f97420128a6c1324f7b6ce2424e4b6323c975"
+        }
+      ]
+    },
+    {
+      "chipFamily": "ESP32-S3",
+      "parts": [
+        {
+          "path": "fw/bootloader-esp32s3.bin",
+          "offset": 0,
+          "sha256": "e01a2300de23c8d601e9f2a37684b5dbc83ae37132d5a8833e23520afd895f92"
+        },
+        {
+          "path": "fw/partitions-esp32s3.bin",
+          "offset": 32768,
+          "sha256": "0a8b5720e7b77ff11f1462458c3a509dee79224e5279898f26d6a2e3ae0517b7"
+        },
+        {
+          "path": "fw/boot_app0-esp32s3.bin",
+          "offset": 57344,
+          "sha256": "f94c5d786a7a8fab06ac5d10e33bf37711a6697636dc037559ea19cc410a17f0"
+        },
+        {
+          "path": "fw/firmware-esp32s3.bin",
+          "offset": 65536,
+          "sha256": "6f1a818015af0f73af01f74d89bc70336e608e7481dd0185b6239f33f6efd1d2"
+        }
+      ]
+    },
+    {
+      "chipFamily": "ESP32-C3",
+      "parts": [
+        {
+          "path": "fw/bootloader-esp32c3.bin",
+          "offset": 0,
+          "sha256": "30d47ab1f344cfa69f6b2f718ffa72fc7baea6db047eaabefea162db29e6821c"
+        },
+        {
+          "path": "fw/partitions-esp32c3.bin",
+          "offset": 32768,
+          "sha256": "0a8b5720e7b77ff11f1462458c3a509dee79224e5279898f26d6a2e3ae0517b7"
+        },
+        {
+          "path": "fw/boot_app0-esp32c3.bin",
+          "offset": 57344,
+          "sha256": "f94c5d786a7a8fab06ac5d10e33bf37711a6697636dc037559ea19cc410a17f0"
+        },
+        {
+          "path": "fw/firmware-esp32c3.bin",
+          "offset": 65536,
+          "sha256": "e06be8420aae7b296415c9769fd25c8f4f6a15a56bd4599b78cd423fcca2486f"
+        }
+      ]
+    }
+  ]
+}
