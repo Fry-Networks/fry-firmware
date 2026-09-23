@@ -18,8 +18,18 @@ writes a blank board from offset 0x0 and needs bootloader + partition table + bo
 app in one image. Each ESP32-family build therefore gains a "factory" entry alongside it.
 The ESP8266 needs no such thing: its firmware.bin is already a complete 0x0 image.
 
+With --ewt-out it ALSO writes an ESP Web Tools manifest (docs/flash/manifest.json) for the
+browser flasher. That one lists the SEPARATE PARTS at their real offsets rather than the merged
+factory image, and the difference matters: merge_bin pads the gaps between parts with 0xFF, and
+the NVS partition sits in one of those gaps (0x9000-0xe000 here). Flashing a merged image over a
+working board therefore overwrites NVS with 0xFF and silently destroys the miner key and the
+stored Wi-Fi credentials — exactly what "leave Erase unchecked to keep your settings" promises not
+to do. Parts skip the gaps, so NVS is never touched. The merged factory images stay: the OTA
+release path and the existing docs/flash/fw/manifest.json still use them.
+
 Offsets and flash settings below are not guesses — they were read back from the actual
-`pio run -t upload` command line for each environment.
+`pio run -t upload` command line for each environment, and every offset this tool writes is
+re-checked against the partition table in the build's own partitions.bin before it is emitted.
 """
 import argparse
 import hashlib
@@ -53,6 +63,33 @@ FACTORY = {
     "esp32c3": ("esp32c3", "0x0",    "dio", "80m", "4MB"),
 }
 
+# ESP Web Tools treats a connected board as an UPDATE of this product, rather than a different
+# product to install, only when the firmware NAME the board reports over Improv Serial equals this
+# string exactly (`firmware===this._manifest.name` in the vendored bundle). The device side is
+# kImprovFirmwareName in src/core/improv_serial_glue.cpp; tools/check_flasher_assets.py asserts the
+# two are still the same string, because a silent drift turns every future update into a new
+# install and an erase prompt.
+IMPROV_FIRMWARE_NAME = "Fry Firmware"
+
+# Seconds ESP Web Tools waits after a flash for the board to answer over Improv Serial before it
+# gives up and shows the plain "installed" screen. THIS IS THE ONE PLACE TO CHANGE IT: measure
+# boot banner -> first Improv response on real hardware and put the measured value here. The
+# library's own default when the field is absent is 10 s.
+IMPROV_WAIT_TIME_S = 20
+
+# env -> the chipFamily string ESP Web Tools matches against the chip it detects over serial.
+EWT_CHIP_FAMILY = {
+    "esp8266": "ESP8266",
+    "esp32": "ESP32",
+    "esp32s3": "ESP32-S3",
+    "esp32c3": "ESP32-C3",
+}
+
+# Fixed offsets shared by every ESP32-family layout here (the bootloader offset is per-chip and
+# comes from FACTORY above). Both are asserted against the build's partitions.bin.
+OTADATA_OFFSET = 0xE000
+APP_OFFSET = 0x10000
+
 PIO_PACKAGES = os.path.join(os.path.expanduser("~"), ".platformio", "packages")
 DEFAULT_ESPTOOL = os.path.join(PIO_PACKAGES, "tool-esptoolpy", "esptool.py")
 DEFAULT_BOOT_APP0 = os.path.join(
@@ -65,6 +102,90 @@ def sha256_of(path):
         for chunk in iter(lambda: f.read(65536), b""):
             h.update(chunk)
     return h.hexdigest()
+
+
+# ESP-IDF partition table: 32-byte entries, each starting with the magic 0x50AA, ending at an MD5
+# entry (0xEBEB) or 0xFF padding. Parsed rather than assumed so the offsets written into the web
+# manifest are the offsets the firmware itself was linked against.
+PART_MAGIC = b"\xaa\x50"
+PART_MD5_MAGIC = b"\xeb\xeb"
+PART_TYPE_APP = 0
+PART_TYPE_DATA = 1
+PART_SUBTYPE_DATA_OTA = 0x00  # "otadata"
+
+
+def parse_partition_table(path):
+    """Returns [{type, subtype, offset, size, label}] from a partitions.bin."""
+    with open(path, "rb") as f:
+        raw = f.read()
+    entries = []
+    for pos in range(0, len(raw) - 31, 32):
+        chunk = raw[pos:pos + 32]
+        if chunk[:2] == PART_MD5_MAGIC:
+            continue
+        if chunk[:2] != PART_MAGIC:
+            break
+        ptype, subtype = chunk[2], chunk[3]
+        offset = int.from_bytes(chunk[4:8], "little")
+        size = int.from_bytes(chunk[8:12], "little")
+        label = chunk[12:28].rstrip(b"\x00").decode("utf-8", "replace")
+        entries.append({"type": ptype, "subtype": subtype, "offset": offset,
+                        "size": size, "label": label})
+    if not entries:
+        raise SystemExit("make_manifest: %s holds no partition entries" % path)
+    return entries
+
+
+def check_parts_against_table(env, parts, table):
+    """Fails unless every part lands where the partition table says it should.
+
+    The app must sit at the app partition's own offset and fit inside it, boot_app0 must sit on
+    otadata, and NOTHING may touch a data partition other than otadata - nvs is where the miner
+    key and the Wi-Fi credentials live, and a part that overlapped it would wipe them on an
+    update that promised to keep them.
+    """
+    app_parts = [p for p in table if p["type"] == PART_TYPE_APP]
+    if not app_parts:
+        raise SystemExit("make_manifest: %s partition table has no app partition" % env)
+    app = min(app_parts, key=lambda p: p["offset"])
+    otadata = [p for p in table
+               if p["type"] == PART_TYPE_DATA and p["subtype"] == PART_SUBTYPE_DATA_OTA]
+
+    for offset, path in parts:
+        size = os.path.getsize(path)
+        name = os.path.basename(path)
+        if name.startswith("firmware"):
+            if offset != app["offset"]:
+                raise SystemExit("make_manifest: %s app part at 0x%x but partition '%s' is at 0x%x"
+                                 % (env, offset, app["label"], app["offset"]))
+            if size > app["size"]:
+                raise SystemExit("make_manifest: %s app is %d bytes, partition '%s' holds %d"
+                                 % (env, size, app["label"], app["size"]))
+        if name.startswith("boot_app0"):
+            if not otadata or offset != otadata[0]["offset"]:
+                raise SystemExit("make_manifest: %s boot_app0 part at 0x%x but otadata is at %s"
+                                 % (env, offset, "0x%x" % otadata[0]["offset"] if otadata else "absent"))
+        for entry in table:
+            if entry["type"] != PART_TYPE_DATA or entry["subtype"] == PART_SUBTYPE_DATA_OTA:
+                continue
+            if offset < entry["offset"] + entry["size"] and entry["offset"] < offset + size:
+                raise SystemExit(
+                    "make_manifest: %s part %s (0x%x..0x%x) overlaps data partition '%s' "
+                    "(0x%x..0x%x) - flashing it would erase stored settings"
+                    % (env, name, offset, offset + size, entry["label"],
+                       entry["offset"], entry["offset"] + entry["size"]))
+
+
+def check_parts_against_factory(env, parts, factory_path):
+    """Cross-check: every part must appear verbatim at its offset in the merged factory image."""
+    with open(factory_path, "rb") as f:
+        merged = f.read()
+    for offset, path in parts:
+        with open(path, "rb") as f:
+            data = f.read()
+        if merged[offset:offset + len(data)] != data:
+            raise SystemExit("make_manifest: %s part %s does not match the factory image at 0x%x"
+                             % (env, os.path.basename(path), offset))
 
 
 def merge_factory(env, build_dir, out_path, esptool, boot_app0, python):
@@ -100,6 +221,70 @@ def merge_factory(env, build_dir, out_path, esptool, boot_app0, python):
     return out_path
 
 
+def copy_file(src, dst):
+    with open(src, "rb") as fsrc, open(dst, "wb") as fdst:
+        fdst.write(fsrc.read())
+    return dst
+
+
+def write_ewt_manifest(envs, version, build_dir, dist, asset_base, boot_app0, out_path):
+    """Writes the ESP Web Tools manifest, copying each part into `dist` next to the images.
+
+    Parts, deliberately, not the merged factory image - see the module docstring.
+    """
+    builds = []
+    for env in envs:
+        env_dir = os.path.join(build_dir, env)
+        app = os.path.join(env_dir, "firmware.bin")
+        if env == "esp8266":
+            # A complete 0x0 image already: bootloader, user1 and everything else in one file.
+            parts = [(0x0, copy_file(app, os.path.join(dist, "firmware-esp8266.bin")))]
+        else:
+            bl_off = int(FACTORY[env][1], 16)
+            parts = [
+                (bl_off, copy_file(os.path.join(env_dir, "bootloader.bin"),
+                                   os.path.join(dist, "bootloader-%s.bin" % env))),
+                (0x8000, copy_file(os.path.join(env_dir, "partitions.bin"),
+                                   os.path.join(dist, "partitions-%s.bin" % env))),
+                (OTADATA_OFFSET, copy_file(boot_app0,
+                                           os.path.join(dist, "boot_app0-%s.bin" % env))),
+                (APP_OFFSET, copy_file(app, os.path.join(dist, "firmware-%s.bin" % env))),
+            ]
+            check_parts_against_table(env, parts,
+                                      parse_partition_table(os.path.join(env_dir, "partitions.bin")))
+            factory = os.path.join(dist, "firmware-%s-factory.bin" % env)
+            if os.path.isfile(factory):
+                check_parts_against_factory(env, parts, factory)
+
+        builds.append({
+            "chipFamily": EWT_CHIP_FAMILY[env],
+            "parts": [{
+                "path": "%s/%s" % (asset_base.rstrip("/"), os.path.basename(path)),
+                "offset": offset,
+                # Not an ESP Web Tools field - it reads only path and offset and ignores the
+                # rest. tools/check_flasher_assets.py uses it to prove the published bytes are
+                # the bytes this tool measured, which the upstream format has no way to express.
+                "sha256": sha256_of(path),
+            } for offset, path in parts],
+        })
+
+    manifest = {
+        "name": IMPROV_FIRMWARE_NAME,
+        "version": version,
+        "new_install_prompt_erase": True,
+        "new_install_improv_wait_time": IMPROV_WAIT_TIME_S,
+        "builds": builds,
+    }
+    out_dir = os.path.dirname(out_path)
+    if out_dir:
+        os.makedirs(out_dir, exist_ok=True)
+    with open(out_path, "w", encoding="utf-8", newline="\n") as f:
+        json.dump(manifest, f, indent=2)
+        f.write("\n")
+    print("make_manifest: wrote %s (ESP Web Tools, %d builds, %d parts)"
+          % (out_path, len(builds), sum(len(b["parts"]) for b in builds)))
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--version", required=True, help="firmware_version to embed, e.g. 0.2.0")
@@ -116,6 +301,10 @@ def main():
                     help="interpreter used to run esptool.py")
     ap.add_argument("--no-factory", action="store_true",
                     help="skip merged factory images (OTA-only manifest)")
+    ap.add_argument("--ewt-out", default=None,
+                    help="also write an ESP Web Tools manifest here (e.g. docs/flash/manifest.json)")
+    ap.add_argument("--ewt-asset-base", default="fw",
+                    help="path prefix, relative to --ewt-out, under which the parts are published")
     ap.add_argument("--only", default=None,
                     help="restrict to a single environment. CI builds one env per matrix job, "
                          "so the merge step there can only see its own binaries.")
@@ -173,6 +362,14 @@ def main():
                 "sha256": sha256_of(out_path),
             }
             print("make_manifest: merged %s (%d bytes)" % (name, os.path.getsize(out_path)))
+
+    if a.ewt_out:
+        if a.no_factory:
+            # The factory cross-check is the only independent confirmation that a part carries the
+            # right bytes at the right offset, and it is cheap. Refuse rather than skip it quietly.
+            raise SystemExit("make_manifest: --ewt-out needs the factory images (drop --no-factory)")
+        write_ewt_manifest(envs, a.version, a.build_dir, dist, a.ewt_asset_base, a.boot_app0,
+                           a.ewt_out)
 
     manifest = {"firmware_version": a.version, "builds": builds}
 
