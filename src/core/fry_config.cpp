@@ -268,6 +268,48 @@ void setSocksPort(uint32_t v) {
   p.end();
 }
 
+String getWgAllowed() {
+  KvStore p;
+  p.begin("fry_vpn", true);
+  String v = p.getString("wgAllowed", "");
+  p.end();
+  return v;
+}
+void setWgAllowed(const char* csv) {
+  KvStore p;
+  p.begin("fry_vpn", false);
+  p.putString("wgAllowed", csv);
+  p.end();
+}
+
+uint32_t getWgKeepalive() {
+  KvStore p;
+  p.begin("fry_vpn", true);
+  uint32_t v = p.getUInt("wgKeepalive", 25);
+  p.end();
+  return v;
+}
+void setWgKeepalive(uint32_t v) {
+  KvStore p;
+  p.begin("fry_vpn", false);
+  p.putUInt("wgKeepalive", v);
+  p.end();
+}
+
+uint32_t getWgProvAt() {
+  KvStore p;
+  p.begin("fry_vpn", true);
+  uint32_t v = p.getUInt("wgProvAt", 0);
+  p.end();
+  return v;
+}
+void setWgProvAt(uint32_t epochS) {
+  KvStore p;
+  p.begin("fry_vpn", false);
+  p.putUInt("wgProvAt", epochS);
+  p.end();
+}
+
 bool hasVpnConfig() {
   KvStore p;
   p.begin("fry_vpn", true);

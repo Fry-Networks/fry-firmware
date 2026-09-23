@@ -14,9 +14,23 @@
 #include "../core/fry_config.h"
 #include "../core/hardwareapi_client.h"
 #include "socks5_parse.h"
+#include "wg_provision.h"
 
 #if IP_NAPT
 #include <lwip/lwip_napt.h>
+#endif
+
+// esp_wireguard 0.4.5 defaults WIREGUARD_MAX_SRC_IPS to 1 (wireguard-platform.h), filled
+// unconditionally with the device's OWN tunnel /32. That leaves zero room for a route back to
+// the server's own tunnel IP, so every reply the server sends gets ERR_RTE: the handshake
+// reports "up" but no data ever crosses (seen on the bench as a live tunnel that never answers a
+// ping). [esp32common] in platformio.ini raises this to 4 - one slot for the device's own /32
+// (which esp_wireguard always fills) plus lib/fry_core/wg_provision.h's kWgMaxPlannedRoutes (3).
+// This is a compile-time check that the flag actually landed, not just a runtime assumption.
+#ifndef CONFIG_WIREGUARD_MAX_SRC_IPS
+#error "CONFIG_WIREGUARD_MAX_SRC_IPS is unset - see the comment above and [esp32common] in platformio.ini"
+#elif CONFIG_WIREGUARD_MAX_SRC_IPS != 4
+#error "CONFIG_WIREGUARD_MAX_SRC_IPS must be exactly 4 - see the comment above"
 #endif
 
 namespace fry_vpn {
@@ -165,30 +179,100 @@ void relayTaskFn(void*) {
 static constexpr int      WG_CONNECT_ATTEMPTS = 10;
 static constexpr uint32_t WG_CONNECT_RETRY_MS = 500;
 
-void init() {
-  // A WireGuard handshake with an unset clock cannot succeed, so honour the result rather
-  // than discarding it - proceeding would spend the retry budget on a misleading error.
-  if (!fry_hwapi::ensureNtpSynced()) {  // PROTOCOL.md / T6
-    Serial.println("wg: NTP not synced - skipping handshake");
-    return;
-  }
+// How often tick() retries loadConfig()+bringUp() while neither has succeeded yet (e.g. NTP
+// isn't synced yet at boot, or the fetch client hasn't provisioned a config yet). This governs
+// only the LOCAL esp_wireguard bring-up attempt, which has no HTTP-style failure to classify;
+// the network FETCH itself (src/esp32/wg_provision_client.cpp) uses
+// lib/fry_core/wg_provision.h's classifyWgFetch/wgRetryDelayMs schedule instead.
+static constexpr unsigned long WG_BRINGUP_RETRY_MS = 5000;
 
+namespace {
+bool s_initAttempted = false;  // esp_wireguard_init() must never be called more than once ever
+unsigned long s_lastBringUpAttemptMs = 0;
+}  // namespace
+
+// True once a config exists AND this build trusts it. Production ESP32 builds only trust a
+// SERVER-provisioned config (wgProvAt != 0, set by wg_provision_client.cpp after a successful
+// POST); FRY_SERIAL_PROVISION lab builds keep trusting whatever the `set_wg` serial command
+// wrote, exactly as before this change (wgProvAt is never set on that path).
+bool provisioningGateOpen() {
+#ifdef FRY_SERIAL_PROVISION
+  return true;
+#else
+  return fry_config::getWgProvAt() != 0;
+#endif
+}
+
+// Loads the persisted config into the file-scope String/wgConfig fields. Returns false (and logs
+// exactly the historical message) when no config is stored yet at all.
+bool loadConfig() {
   s_priv = fry_config::getWgPriv();
   s_pub = fry_config::getWgPeerPub();
   s_psk = fry_config::getWgPsk();
   s_addr = fry_config::getWgAddr();  // e.g. "10.13.13.2/24"
   s_endpoint = fry_config::getWgEndpoint();
-  uint32_t port = fry_config::getWgPort();
 
   if (s_priv.length() == 0 || s_pub.length() == 0 || s_endpoint.length() == 0) {
     Serial.println("wg: no VPN config - skipping");
-    return;
+    return false;
   }
 
+  uint32_t addrIp;
+  int addrPrefix;
+  char netmaskBuf[16];
+  if (fry::parseIpv4Cidr(s_addr.c_str(), &addrIp, &addrPrefix) &&
+      fry::formatIpv4(fry::prefixToMask(addrPrefix), netmaskBuf, sizeof(netmaskBuf)) > 0) {
+    s_netmask = netmaskBuf;
+  } else {
+    // Historical fallback: the lab `set_wg` serial command has always required a literal
+    // "/24" address (serial_commands.cpp's cmdSetWg rejects anything else), so a config
+    // written before this change - or any value that fails to parse - keeps behaving exactly
+    // as it always did rather than failing closed.
+    s_netmask = "255.255.255.0";
+  }
   int slash = s_addr.indexOf('/');
-  String ip = (slash >= 0) ? s_addr.substring(0, slash) : s_addr;
-  s_netmask = "255.255.255.0";  // /24, per PROTOCOL.md section 7 set_wg (never /32)
-  s_addr = ip;
+  s_addr = (slash >= 0) ? s_addr.substring(0, slash) : s_addr;
+  return true;
+}
+
+// Applies lib/fry_core/wg_provision.h's planned route list (persisted as a `;`-joined CIDR
+// string) via esp_wireguard_add_allowed_ip, once the tunnel is up. This is the runtime half of
+// the WIREGUARD_MAX_SRC_IPS fix - the build-time half is the static_assert-equivalent #error
+// block above requiring CONFIG_WIREGUARD_MAX_SRC_IPS == 4.
+void applyAllowedIps() {
+  String csv = fry_config::getWgAllowed();
+  int start = 0;
+  while (start <= static_cast<int>(csv.length())) {
+    int sep = csv.indexOf(';', start);
+    String entry = (sep < 0) ? csv.substring(start) : csv.substring(start, sep);
+    if (entry.length() > 0) {
+      uint32_t ip;
+      int prefix;
+      if (fry::parseIpv4Cidr(entry.c_str(), &ip, &prefix)) {
+        char ipStr[16];
+        char maskStr[16];
+        fry::formatIpv4(ip, ipStr, sizeof(ipStr));
+        fry::formatIpv4(fry::prefixToMask(prefix), maskStr, sizeof(maskStr));
+        esp_err_t err = esp_wireguard_add_allowed_ip(&s_wgCtx, ipStr, maskStr);
+        Serial.printf("wg: allowed-ip %s/%s %s\n", ipStr, maskStr,
+                      err == ESP_OK ? "ok" : "FAILED");
+      }
+    }
+    if (sep < 0) break;
+    start = sep + 1;
+  }
+}
+
+// The actual esp_wireguard init/connect. Safe to call repeatedly while it keeps failing (NTP not
+// synced yet, or a transient connect failure) - esp_wireguard_init() itself only ever runs once
+// per boot, guarded by s_initAttempted, per the "never init twice" rule.
+bool bringUp() {
+  // A WireGuard handshake with an unset clock cannot succeed, so honour the result rather
+  // than discarding it - proceeding would spend the retry budget on a misleading error.
+  if (!fry_hwapi::ensureNtpSynced()) {  // PROTOCOL.md / T6
+    Serial.println("wg: NTP not synced - skipping handshake");
+    return false;
+  }
 
   memset(&s_wgConfig, 0, sizeof(s_wgConfig));
   s_wgConfig.private_key = s_priv.c_str();
@@ -197,13 +281,17 @@ void init() {
   s_wgConfig.address = s_addr.c_str();
   s_wgConfig.netmask = s_netmask.c_str();
   s_wgConfig.endpoint = s_endpoint.c_str();
-  s_wgConfig.port = static_cast<uint16_t>(port);
-  s_wgConfig.persistent_keepalive = 25;
+  s_wgConfig.port = static_cast<uint16_t>(fry_config::getWgPort());
+  s_wgConfig.persistent_keepalive = static_cast<uint16_t>(fry_config::getWgKeepalive());
 
-  esp_err_t err = esp_wireguard_init(&s_wgConfig, &s_wgCtx);
-  if (err != ESP_OK) {
-    Serial.printf("wg: init failed err=%d\n", static_cast<int>(err));
-    return;
+  esp_err_t err;
+  if (!s_initAttempted) {
+    s_initAttempted = true;
+    err = esp_wireguard_init(&s_wgConfig, &s_wgCtx);
+    if (err != ESP_OK) {
+      Serial.printf("wg: init failed err=%d\n", static_cast<int>(err));
+      return false;
+    }
   }
   for (int attempt = 1; attempt <= WG_CONNECT_ATTEMPTS; ++attempt) {
     err = esp_wireguard_connect(&s_wgCtx);
@@ -213,11 +301,12 @@ void init() {
   }
   if (err != ESP_OK) {
     Serial.printf("wg: connect failed err=%d\n", static_cast<int>(err));
-    return;
+    return false;
   }
   // Deliberately NEVER call esp_wireguard_set_default(&s_wgCtx) — that would make the WG
   // interface the default route and kill this device's own STA-routed traffic (T6 constraint).
   s_initialized = true;
+  applyAllowedIps();
 
 #if IP_NAPT
   ip_addr_t staIp = {};
@@ -230,10 +319,28 @@ void init() {
                   "unset) - falling back to the SOCKS5 tunnel-only relay");
   xTaskCreate(relayTaskFn, "fry_relay", 4096, nullptr, 1, nullptr);
 #endif
+  return true;
+}
+
+void init() {
+  if (!loadConfig()) return;
+  if (!provisioningGateOpen()) {
+    Serial.println("wg: config present but not yet server-provisioned - deferring bring-up");
+    return;  // tick() retries once the fetch client (or, in a lab build, `set_wg`) commits one
+  }
+  bringUp();
 }
 
 void tick() {
-  if (!s_initialized) return;
+  if (!s_initialized) {
+    unsigned long now = millis();
+    if (now - s_lastBringUpAttemptMs < WG_BRINGUP_RETRY_MS) return;
+    s_lastBringUpAttemptMs = now;
+    if (!loadConfig()) return;
+    if (!provisioningGateOpen()) return;
+    bringUp();
+    return;
+  }
   bool up = (esp_wireguard_peer_is_up(&s_wgCtx) == ESP_OK);
   if (up && !s_wasUp) {
     char pub8[9] = {0};
