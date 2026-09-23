@@ -159,6 +159,14 @@ size_t formatIpv4Cidr(uint32_t ip, int prefix, char* out, size_t outLen) {
   return static_cast<size_t>(n);
 }
 
+int maskToPrefix(uint32_t mask) {
+  int prefix = 0;
+  for (uint32_t bit = 0x80000000u; bit != 0 && (mask & bit) != 0; bit >>= 1) {
+    prefix++;
+  }
+  return prefix;
+}
+
 // ── Response validation ──────────────────────────────────────────────────────────────────────
 
 namespace {

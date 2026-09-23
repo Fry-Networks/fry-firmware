@@ -1,6 +1,7 @@
 #include "fry_config.h"
 
 #include <cstring>
+#include <ctime>
 
 #include "config.h"
 #include "kv_store.h"
@@ -184,6 +185,20 @@ void setWgPriv(const char* v) {
   p.end();
 }
 
+String getWgPub() {
+  KvStore p;
+  p.begin("fry_vpn", true);
+  String v = p.getString("wgPub", "");
+  p.end();
+  return v;
+}
+void setWgPub(const char* v) {
+  KvStore p;
+  p.begin("fry_vpn", false);
+  p.putString("wgPub", v);
+  p.end();
+}
+
 String getWgPeerPub() {
   KvStore p;
   p.begin("fry_vpn", true);
@@ -308,6 +323,27 @@ void setWgProvAt(uint32_t epochS) {
   p.begin("fry_vpn", false);
   p.putUInt("wgProvAt", epochS);
   p.end();
+}
+
+void setWgKeypair(const char* priv, const char* pub) {
+  KvStore p;
+  p.begin("fry_vpn", false);
+  p.putString("wgPriv", priv);
+  p.putString("wgPub", pub);
+  p.end();
+}
+
+void setWgProvisioned(const char* peerPub, const char* psk, const char* endpointHost,
+                      uint16_t endpointPort, const char* addrCidr, const char* allowedCsv,
+                      uint32_t keepaliveS) {
+  setWgPsk(psk);
+  setWgEndpoint(endpointHost);
+  setWgPort(endpointPort);
+  setWgAddr(addrCidr);
+  setWgAllowed(allowedCsv);
+  setWgKeepalive(keepaliveS);
+  setWgPeerPub(peerPub);  // hasVpnConfig()'s existing commit marker
+  setWgProvAt(static_cast<uint32_t>(time(nullptr)));  // the new production-trust gate, written LAST
 }
 
 bool hasVpnConfig() {

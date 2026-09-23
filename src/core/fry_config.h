@@ -1,7 +1,7 @@
 #pragma once
 // Chip-agnostic persisted configuration. Namespaces and keys are fixed by the T3 contract and
 // must match exactly across chips: fry_wifi{ssid,pass}, fry{wallet,minerKey,salt,installId,
-// deviceToken,apiBase}, fry_vpn{wgPriv,wgPeerPub,wgPsk,wgEndpoint,wgPort,wgAddr,socksPort,
+// deviceToken,apiBase}, fry_vpn{wgPriv,wgPub,wgPeerPub,wgPsk,wgEndpoint,wgPort,wgAddr,socksPort,
 // wgAllowed,wgKeepalive,wgProvAt}, fry_ota{pending,url,bootfails}.
 #include <Arduino.h>
 
@@ -36,6 +36,11 @@ void setApiBase(const char* base);
 // ── fry_vpn ───────────────────────────────────────────────────────────────
 String getWgPriv();
 void setWgPriv(const char* v);
+// This device's OWN WireGuard public key (paired with wgPriv) — distinct from wgPeerPub, which
+// is the SERVER's key. Naming is deliberately parallel to the wgPriv/wgPeerPub pair: "ours" has
+// no suffix, "theirs" is *Peer*.
+String getWgPub();
+void setWgPub(const char* v);
 String getWgPeerPub();
 void setWgPeerPub(const char* v);
 String getWgPsk();
@@ -60,6 +65,21 @@ void setWgKeepalive(uint32_t v);
 // lab builds are exempt — they keep trusting whatever the `set_wg` serial command wrote).
 uint32_t getWgProvAt();
 void setWgProvAt(uint32_t epochS);
+
+// Persists a freshly generated keypair BEFORE the provisioning POST is sent, so a crash or
+// reset between keygen and the server's response never orphans it — the server's 201/200
+// idempotent-replay behavior recovers from posting the same public key again.
+void setWgKeypair(const char* priv, const char* pub);
+
+// The single entry point src/esp32/wg_provision_client.cpp calls after a successful POST.
+// Writes every field, then wgPeerPub (hasVpnConfig()'s existing commit marker), then wgProvAt
+// LAST — the new production trust gate in vpn_wireguard.cpp keys off wgProvAt, so a reset that
+// interrupts this call always leaves either "nothing changed" or "fully committed", never a
+// state the production gate would trust while some other field is still stale.
+void setWgProvisioned(const char* peerPub, const char* psk, const char* endpointHost,
+                      uint16_t endpointPort, const char* addrCidr, const char* allowedCsv,
+                      uint32_t keepaliveS);
+
 bool hasVpnConfig();
 void clearVpn();
 

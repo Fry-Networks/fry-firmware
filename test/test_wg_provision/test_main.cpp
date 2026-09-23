@@ -277,6 +277,18 @@ void test_format_ipv4_and_cidr_roundtrip() {
   TEST_ASSERT_EQUAL_STRING("10.13.13.0/24", cidr);
 }
 
+void test_mask_to_prefix_roundtrips_with_prefix_to_mask() {
+  // Real-world need: wg_provision_client.cpp turns WiFi.subnetMask() back into a prefix length
+  // for planWgRoutes' STA-capture check.
+  TEST_ASSERT_EQUAL_INT(24, fry::maskToPrefix(0xFFFFFF00u));
+  TEST_ASSERT_EQUAL_INT(0, fry::maskToPrefix(0x00000000u));
+  TEST_ASSERT_EQUAL_INT(32, fry::maskToPrefix(0xFFFFFFFFu));
+  TEST_ASSERT_EQUAL_INT(20, fry::maskToPrefix(0xFFFFF000u));  // a /20 LAN such as 192.168.0.0/20
+  for (int p = 0; p <= 32; p++) {
+    TEST_ASSERT_EQUAL_INT(p, fry::maskToPrefix(fry::prefixToMask(p)));
+  }
+}
+
 // ── Route planning (9) — where the in-scope bug's fix is proven ────────────────────────────────
 
 void test_route_plan_includes_the_servers_allowed_ip() {
@@ -477,6 +489,7 @@ int main(int, char**) {
   RUN_TEST(test_parse_ipv4_cidr_rejects_trailing_junk);
   RUN_TEST(test_prefix_to_mask_boundaries);
   RUN_TEST(test_format_ipv4_and_cidr_roundtrip);
+  RUN_TEST(test_mask_to_prefix_roundtrips_with_prefix_to_mask);
 
   RUN_TEST(test_route_plan_includes_the_servers_allowed_ip);
   RUN_TEST(test_route_plan_caps_at_three_entries);

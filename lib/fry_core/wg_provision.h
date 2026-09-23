@@ -114,6 +114,13 @@ size_t formatIpv4(uint32_t ip, char* out, size_t outLen);
 // Formats "a.b.c.d/nn". Returns characters written (excluding NUL), or 0 if outLen < 19.
 size_t formatIpv4Cidr(uint32_t ip, int prefix, char* out, size_t outLen);
 
+// Inverse of prefixToMask: counts leading one-bits in a canonical mask (contiguous ones then
+// contiguous zeros, e.g. 0xFFFFFF00 -> 24). Used to turn WiFi.subnetMask() into a prefix length
+// for planWgRoutes' STA-capture check. A non-canonical mask (a zero bit before a one bit) yields
+// the count of leading ones before the first zero — the best a caller can do with a malformed
+// mask; this is not a validity check.
+int maskToPrefix(uint32_t mask);
+
 // ── Route planning ───────────────────────────────────────────────────────────────────────────
 
 constexpr int kWgMaxPlannedRoutes = 3;  // CONFIG_WIREGUARD_MAX_SRC_IPS(4) - 1 for the device's
