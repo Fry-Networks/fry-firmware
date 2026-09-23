@@ -15,6 +15,7 @@
 #include "../core/hardwareapi_client.h"
 #include "socks5_parse.h"
 #include "wg_provision.h"
+#include "wg_provision_client.h"
 
 #if IP_NAPT
 #include <lwip/lwip_napt.h>
@@ -333,6 +334,12 @@ void init() {
 
 void tick() {
   if (!s_initialized) {
+#ifndef FRY_SERIAL_PROVISION
+    // Drives its own retry/backoff schedule (lib/fry_core/wg_provision.h's
+    // classifyWgFetch/wgRetryDelayMs); a no-op once a config already exists. Lab builds skip
+    // this entirely - they only ever get a config from the `set_wg` serial command.
+    fry_wg_provision::tick();
+#endif
     unsigned long now = millis();
     if (now - s_lastBringUpAttemptMs < WG_BRINGUP_RETRY_MS) return;
     s_lastBringUpAttemptMs = now;
