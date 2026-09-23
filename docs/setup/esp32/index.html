@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Set up a Fry miner &mdash; ESP32 &amp; ESP8266</title>
+<meta name="description" content="Flash, provision, register and monitor a Fry Networks ESP32 or ESP8266 miner." />
+<style>
+  :root {
+    --bg: #09090B; --surface: #1A1A1E; --card: #242428; --primary: #E5271C;
+    --accent: #00C49A; --warn: #F5A524; --text: #EFECEA; --muted: #9B9793; --border: #323236;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; background: var(--bg); color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    line-height: 1.55; }
+  body { padding: 32px 16px 64px; }
+  main { max-width: 760px; margin: 0 auto; }
+  header { border-bottom: 1px solid var(--border); padding-bottom: 20px; margin-bottom: 8px; }
+  h1 { font-size: 1.9rem; margin: 0 0 6px; letter-spacing: -0.02em; }
+  h1 .fry { color: var(--primary); }
+  h2 { font-size: 1.25rem; margin: 36px 0 10px; scroll-margin-top: 16px; }
+  h3 { font-size: 1rem; margin: 20px 0 6px; color: var(--accent); }
+  p, li { font-size: 1rem; }
+  .lede { color: var(--muted); margin: 0; }
+  a { color: var(--accent); }
+  code { background: var(--card); border: 1px solid var(--border); border-radius: 5px;
+    padding: 1px 5px; font-size: 0.9em; overflow-wrap: anywhere; }
+  nav.toc { background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+    padding: 14px 18px; margin-top: 24px; }
+  nav.toc ol { margin: 0; padding-left: 20px; }
+  nav.toc li { margin: 3px 0; }
+  section { border-top: 1px solid var(--border); padding-top: 4px; }
+  .callout { background: var(--card); border: 1px solid var(--border); border-left: 3px solid var(--accent);
+    border-radius: 8px; padding: 12px 14px; margin: 14px 0; }
+  .callout.warn { border-left-color: var(--warn); }
+  .callout.warn strong { color: var(--warn); }
+  .callout p:first-child { margin-top: 0; }
+  .callout p:last-child { margin-bottom: 0; }
+  table { width: 100%; border-collapse: collapse; margin: 14px 0; font-size: 0.95rem; }
+  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border);
+    vertical-align: top; }
+  th { color: var(--muted); font-weight: 600; }
+  dl { margin: 14px 0; }
+  dt { font-weight: 600; margin-top: 12px; }
+  dd { margin: 4px 0 0; color: var(--muted); }
+  footer { margin-top: 48px; border-top: 1px solid var(--border); padding-top: 14px;
+    color: var(--muted); font-size: 0.8rem; }
+  @media (max-width: 480px) { body { padding: 20px 14px 48px; } h1 { font-size: 1.5rem; } }
+</style>
+</head>
+<body>
+<main>
+<header>
+  <h1>Setting up a <span class="fry">Fry</span> miner</h1>
+  <p class="lede">Flash the board, give it Wi-Fi, register its key. Fifteen minutes, no phone
+  required, no licence or activation key.</p>
+</header>
+<nav class="toc"><ol><li><a href="#boards">Supported boards</a></li><li><a href="#flash">Flash the firmware</a></li><li><a href="#provision">Give it Wi-Fi</a></li><li><a href="#key">Find your miner key</a></li><li><a href="#register">Register it on the dashboard</a></li><li><a href="#earning">What earning actually requires</a></li><li><a href="#monitoring">Watching it run</a></li><li><a href="#troubleshooting">When something is wrong</a></li></ol></nav>
+<section>
+<h2 id="boards">Supported boards</h2>
+<p>Any of these will run the firmware:</p>
+<ul><li>ESP32 (incl. ESP-WROOM-32)</li><li>ESP32-S3</li><li>ESP32-C3</li><li>ESP8266</li></ul>
+<p>They differ in how you set them up: the ESP32 family is provisioned over Bluetooth or over
+USB from a browser, while the ESP8266 raises its own Wi-Fi network instead of Bluetooth.</p>
+</section>
+<section>
+<h2 id="flash">Flash the firmware</h2>
+<p>Plug the board into a computer with a USB data cable &mdash; a charge-only cable will not
+enumerate a serial port &mdash; and open the flasher in Chrome or Edge on the desktop:</p>
+<p><a href="https://fry-networks.github.io/fry-firmware/flash/">https://fry-networks.github.io/fry-firmware/flash/</a></p>
+<p>Press <strong>Connect &amp; Flash</strong> and pick the serial port. The flasher detects which
+chip you have and writes the matching build; there is no board to choose and nothing to download.</p>
+<div class="callout" id="legacy-key">
+  <p><strong>Updating a board that already works?</strong> Leave <strong>Erase</strong> unchecked.
+  The update writes the bootloader, the partition table and the application, and never touches the
+  area holding your miner key and Wi-Fi credentials, so the board keeps its identity.</p>
+  <p>Boards flashed before 2026-09-18 show IOT- and the same 32 hex characters. Firmware 0.3.2 rewrites the prefix to FEM- on first boot, keeping the hex, so the device keeps its identity.</p>
+</div>
+</section>
+<section>
+<h2 id="provision">Give it Wi-Fi</h2>
+<h3>From the browser, with no phone</h3>
+<p>Straight after flashing, choose <strong>Connect to Wi-Fi</strong> in the same dialog, enter
+your 2.4&nbsp;GHz network and its password, and the board joins it. Then press
+<strong>Visit Device</strong>, which opens the dashboard registration page with your miner key
+already in the address.</p>
+<p class="lede">Improv Serial via the web flasher — Connect to Wi-Fi, then Visit Device. Once 0.3.2 ships, a Chrome/Edge desktop browser alone is enough; this answers the 2026-09-18 report from a user with no Android phone.</p>
+<h3>From the Android app</h3>
+<p>The app finds an ESP32 board over Bluetooth, advertising as <code>FRY-&lt;CHIP&gt;-&lt;last 6 MAC hex&gt;</code> (service
+<code>46525900-0001-4000-8000-4652594e4554</code>). An ESP8266 has no Bluetooth: it raises an open Wi-Fi network
+<code>FRY-SETUP-XXXXXX (ESP8266 only, open, 192.168.4.1)</code> instead &mdash; join it and the setup page opens by itself. The app asks for
+your Wi-Fi and your Algorand wallet address in one step.</p>
+</section>
+<section>
+<h2 id="key">Find your miner key</h2>
+<p>The miner key is the board's identity: <strong>FEM- followed by 32 uppercase hex characters</strong>. It is generated once, on the
+board itself, and never changes &mdash; not on a factory reset, and not on a firmware update.
+There are four places to read it:</p>
+<dl>
+  <dt>The web flasher</dt><dd>Press <strong>Visit Device</strong> after provisioning &mdash; it carries the key.</dd>
+  <dt>A serial console</dt><dd><code>FRY boot v&lt;version&gt; chip=&lt;chip&gt; mac=&lt;mac&gt; minerkey=&lt;key&gt; at 115200 baud</code></dd>
+  <dt>The Android app</dt><dd>shown on the provisioning screen and copyable from device detail</dd>
+  <dt>The ESP8266 setup page</dt><dd>http://192.168.4.1/info while the board serves FRY-SETUP-xxxxxx</dd>
+</dl>
+<p class="lede">Over Bluetooth it is also readable directly from characteristic
+<code>46525905-0001-4000-8000-4652594e4554 (read)</code>.</p>
+</section>
+<section>
+<h2 id="register">Register it on the dashboard</h2>
+<p>A board that is running and online still earns nothing until a wallet claims its key. Sign in
+at <a href="https://dashboard.frynetworks.com">https://dashboard.frynetworks.com</a>, connect your wallet, open <a href="https://dashboard.frynetworks.com/new_registration">https://dashboard.frynetworks.com/new_registration</a> and
+enter the miner key. <strong>Visit Device</strong> in the flasher opens that page for you, with
+the key in the URL fragment: <code>https://dashboard.frynetworks.com/new_registration#key=&lt;MINER_KEY&gt;</code>.</p>
+<p class="lede">The prefilled link is not live yet &mdash; PENDING dashboard change (fragment, never a query string, so keys stay out of server logs and Referer). Until it lands,
+paste the key into the key field on that page.</p>
+<div class="callout warn">
+  <p><strong>Do not press &ldquo;Generate Free FEM Key&rdquo;.</strong> ESP32/ESP8266 owners must NOT use the dashboard&#x27;s &#x27;Generate Free FEM Key&#x27; button. It mints a placeholder key that exists only in main.devices; your board has its own key and can never match the generated one.</p>
+</div>
+<p>A board that self-registers appears in main.devices with is_registered:false and no owner. Until a wallet registers the key on the dashboard it earns nothing and is invisible in My Devices. Until then the dashboard shows it as an unregistered
+<strong>Fry Edge Miner</strong>.</p>
+</section>
+<section>
+<h2 id="earning">What earning actually requires</h2>
+<table>
+  <tr><th>Reward token</th><td>fNODE (ASA 2485202024)</td></tr>
+  <tr><th>Miner code</th><td><code>IOTVPN</code></td></tr>
+  <tr><th>Base reward</th><td>59.52 per slot</td></tr>
+  <tr><th>Slots per day</th><td>144 (one every ten minutes)</td></tr>
+  <tr><th>Devices per network</th><td>10</td></tr>
+  <tr><th>Stake multipliers</th><td>unregistered = 0&times;, none = 1&times;</td></tr>
+  <tr><th>Payout schedule</th><td>Friday 00:00 UTC (FRYday), maturing 30 days later</td></tr>
+</table>
+<p class="lede">An ESP32 device earns at multiplier 1. The 1.5x/3x FRY 2.0 tiers exist for desktop FEM only — this is policy, not a defect.</p>
+<p>So a board earns when it is registered to a wallet, online, and reporting. Nothing else is
+required: there is no licence, no activation key and no stake.</p>
+</section>
+<section>
+<h2 id="monitoring">Watching it run</h2>
+<p>A board counts as active while it has been seen within the last
+<strong>15 minutes</strong>. It reports on several schedules, all in seconds:</p>
+<table>
+  <tr><th>Registration heartbeat</th><td>3600</td></tr>
+  <tr><th>Lease renewal</th><td>900</td></tr>
+  <tr><th>Proof of connectivity</th><td>600</td></tr>
+  <tr><th>Telemetry</th><td>600</td></tr>
+</table>
+<p>The statuses you will see against a device:</p>
+<ul><li>Not registered — key exists but no wallet claimed it</li><li>Active — seen within the last 15 minutes</li><li>Inactive — no PoC document inside the window</li><li>Not earning — reward_eligible is false, with a reason</li></ul>
+</section>
+<section>
+<h2 id="troubleshooting">When something is wrong</h2>
+<dl>
+  <dt>&ldquo;Key not found&rdquo; when registering</dt><dd>The key is not in any store yet. Either the board has never successfully registered (see &#x27;registration failed&#x27; below) or the key was mistyped — keys are uppercase with no spaces.</dd>
+  <dt>&ldquo;Already registered&rdquo;</dt><dd>The key is registered. If it is not in your list, another wallet claimed it, or it self-registered and nobody has claimed it yet.</dd>
+  <dt>Provisioning reports an error</dt><dd>The board reported an error during provisioning. Error 4, shown as &#x27;Device registration with hardwareapi failed&#x27;, means the server refused the board&#x27;s registration — Wi-Fi itself is fine.</dd>
+  <dt>The board registers, then the dashboard never sees it</dt><dd>Boards still holding a <a href="#legacy-key">legacy-prefix</a> key are refused at registration today. Re-flash 0.3.2 and the board converts its own key on first boot.</dd>
+  <dt>The board is not discoverable any more</dt><dd>It does not advertise while it is on a
+  Wi-Fi network. Hold the <strong>BOOT</strong> button for ten seconds to factory reset it; it
+  keeps its miner key and its identity, and comes back ready to be provisioned again.</dd>
+</dl>
+<p>Still stuck? Ask on <a href="https://discord.gg/frynetworks">Discord</a> &mdash; include the miner key, the board
+type and what the serial console printed.</p>
+</section>
+<footer>
+  <p>This page is generated by <code>tools/render_guide.py</code> from a facts file in which every
+  value carries the evidence that established it. Edit the facts and re-render; do not edit this
+  page by hand.</p>
+</footer>
+</main>
+</body>
+</html>
