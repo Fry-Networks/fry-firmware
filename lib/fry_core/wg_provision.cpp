@@ -358,6 +358,34 @@ WgRoutePlan planWgRoutes(const char* addressCidr, const char* const* allowedIps,
 
 // ── HTTP outcome classification + retry schedule ────────────────────────────────────────────
 
+const char* wgOutcomeName(WgFetchOutcome outcome) {
+  switch (outcome) {
+    case WgFetchOutcome::Ok:
+      return "Ok";
+    case WgFetchOutcome::NoToken:
+      return "NoToken";
+    case WgFetchOutcome::NoHeap:
+      return "NoHeap";
+    case WgFetchOutcome::NoClock:
+      return "NoClock";
+    case WgFetchOutcome::TransientError:
+      return "TransientError";
+    case WgFetchOutcome::Unauthorized401:
+      return "Unauthorized401";
+    case WgFetchOutcome::Forbidden403:
+      return "Forbidden403";
+    case WgFetchOutcome::Conflict409:
+      return "Conflict409";
+    case WgFetchOutcome::RateLimited429:
+      return "RateLimited429";
+    case WgFetchOutcome::OtherClientError4xx:
+      return "OtherClientError4xx";
+    case WgFetchOutcome::ServerError5xx:
+      return "ServerError5xx";
+  }
+  return "Unknown";  // unreachable while every enumerator above is covered - fails loudly, not silently, if one is ever added and missed here
+}
+
 WgFetchOutcome classifyWgFetch(bool hasToken, bool heapOk, bool clockOk, int32_t httpStatus) {
   if (!hasToken) return WgFetchOutcome::NoToken;
   if (!heapOk) return WgFetchOutcome::NoHeap;

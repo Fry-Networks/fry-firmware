@@ -171,6 +171,12 @@ enum class WgFetchOutcome {
   ServerError5xx,
 };
 
+// Machine-readable name for a log line (e.g. "wg: provision deferred reason=Forbidden403
+// retry_in=21600s") — never a value that could be confused with a secret, only the outcome enum
+// spelled out. Every enumerator is covered explicitly (no default case) so a new WgFetchOutcome
+// value that forgets to update this fails loudly (returns "Unknown") rather than silently.
+const char* wgOutcomeName(WgFetchOutcome outcome);
+
 // Checked in this order: token -> heap -> clock -> HTTP status. `httpStatus` is ignored (and may
 // be any value, including <=0 for "no request was sent") whenever an earlier gate already fails.
 WgFetchOutcome classifyWgFetch(bool hasToken, bool heapOk, bool clockOk, int32_t httpStatus);

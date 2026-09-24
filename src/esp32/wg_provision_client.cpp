@@ -41,15 +41,18 @@ uint32_t arduinoIpToHostOrder(uint32_t arduinoOrder) {
         ((arduinoOrder & 0xFF0000u) >> 8) | ((arduinoOrder >> 24) & 0xFFu);
 }
 
-// Reuses the persisted keypair if both halves already exist; otherwise generates one, persists
-// it, and logs "wg: keypair generated". Writes the 44-char b64 public key (+ NUL) to `pubOut`.
-// Returns false only if the point multiplication itself fails (should not happen in practice).
+// Reuses the persisted keypair if both halves already exist (logging "wg: keypair reused
+// pub=<8>"); otherwise generates one, persists it, and logs "wg: keypair generated pub=<8>".
+// Writes the 44-char b64 public key (+ NUL) to `pubOut`. Never logs anything beyond the 8-char
+// pubkey prefix - not the private key, not the rest of the public key. Returns false only if the
+// point multiplication itself fails (should not happen in practice).
 bool ensureKeypair(char pubOut[45]) {
   String existingPriv = fry_config::getWgPriv();
   String existingPub = fry_config::getWgPub();
   if (existingPriv.length() == 44 && existingPub.length() == 44) {
     std::strncpy(pubOut, existingPub.c_str(), 44);
     pubOut[44] = 0;
+    Serial.printf("wg: keypair reused pub=%.8s\n", pubOut);
     return true;
   }
 
@@ -78,10 +81,9 @@ bool ensureKeypair(char pubOut[45]) {
   // Persisted BEFORE the POST is sent — a crash/reset between keygen and the server's response
   // never orphans it: the server's 200-idempotent-replay behavior recovers on retry.
   fry_config::setWgKeypair(privB64, pubB64);
-  Serial.println("wg: keypair generated");
-
   std::strncpy(pubOut, pubB64, 44);
   pubOut[44] = 0;
+  Serial.printf("wg: keypair generated pub=%.8s\n", pubOut);
   return true;
 }
 
@@ -214,6 +216,8 @@ void tick() {
   fry::WgRetrySchedule sched = fry::wgRetryDelayMs(outcome, s_attemptNumber, retryAfterS);
   if (s_attemptNumber != 0xFFFFFFFFu) s_attemptNumber++;
   s_nextAttemptMs = now + sched.delayMs;
+  Serial.printf("wg: provision deferred reason=%s retry_in=%us\n", fry::wgOutcomeName(outcome),
+                static_cast<unsigned>(sched.delayMs / 1000));
 }
 
 }  // namespace fry_wg_provision

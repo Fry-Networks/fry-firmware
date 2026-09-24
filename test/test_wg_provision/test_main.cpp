@@ -391,7 +391,24 @@ void test_route_plan_rejects_bad_address_cidr() {
   TEST_ASSERT_EQUAL_STRING("bad_address_cidr", plan.rejectReason);
 }
 
-// ── HTTP outcome classification + retry schedule (5) ────────────────────────────────────────
+// ── HTTP outcome classification + retry schedule (6) ────────────────────────────────────────
+
+void test_outcome_name_covers_every_enumerator() {
+  // Pins the exact log-line spelling ("wg: provision deferred reason=<this>...") and guards
+  // against a new WgFetchOutcome value silently falling through to "Unknown".
+  TEST_ASSERT_EQUAL_STRING("Ok", fry::wgOutcomeName(fry::WgFetchOutcome::Ok));
+  TEST_ASSERT_EQUAL_STRING("NoToken", fry::wgOutcomeName(fry::WgFetchOutcome::NoToken));
+  TEST_ASSERT_EQUAL_STRING("NoHeap", fry::wgOutcomeName(fry::WgFetchOutcome::NoHeap));
+  TEST_ASSERT_EQUAL_STRING("NoClock", fry::wgOutcomeName(fry::WgFetchOutcome::NoClock));
+  TEST_ASSERT_EQUAL_STRING("TransientError", fry::wgOutcomeName(fry::WgFetchOutcome::TransientError));
+  TEST_ASSERT_EQUAL_STRING("Unauthorized401", fry::wgOutcomeName(fry::WgFetchOutcome::Unauthorized401));
+  TEST_ASSERT_EQUAL_STRING("Forbidden403", fry::wgOutcomeName(fry::WgFetchOutcome::Forbidden403));
+  TEST_ASSERT_EQUAL_STRING("Conflict409", fry::wgOutcomeName(fry::WgFetchOutcome::Conflict409));
+  TEST_ASSERT_EQUAL_STRING("RateLimited429", fry::wgOutcomeName(fry::WgFetchOutcome::RateLimited429));
+  TEST_ASSERT_EQUAL_STRING("OtherClientError4xx",
+                          fry::wgOutcomeName(fry::WgFetchOutcome::OtherClientError4xx));
+  TEST_ASSERT_EQUAL_STRING("ServerError5xx", fry::wgOutcomeName(fry::WgFetchOutcome::ServerError5xx));
+}
 
 void test_classify_gates_checked_before_http_status() {
   // With an earlier gate failing, httpStatus is irrelevant — proves check ORDER, not just result.
@@ -501,6 +518,7 @@ int main(int, char**) {
   RUN_TEST(test_route_plan_coexists_with_bench_lan_supernet);
   RUN_TEST(test_route_plan_rejects_bad_address_cidr);
 
+  RUN_TEST(test_outcome_name_covers_every_enumerator);
   RUN_TEST(test_classify_gates_checked_before_http_status);
   RUN_TEST(test_classify_maps_status_codes);
   RUN_TEST(test_retry_403_is_flat_and_long_never_tight_loop);
