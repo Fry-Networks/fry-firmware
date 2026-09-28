@@ -23,4 +23,14 @@ int compareSemver(const char* a, const char* b);
 // Convenience wrapper: true when `latest` is strictly newer than `current`.
 bool isNewerVersion(const char* latest, const char* current);
 
+// SemVer 2.0.0 section 11 precedence, for OTA selection. Unlike compareSemver above (unchanged, and
+// still what isNewerVersion uses), a pre-release sorts BELOW its release: 0.4.1-rc.1 < 0.4.1, and
+// identifiers compare numerically when both are numeric, lexically otherwise, numeric < alpha, and
+// a longer identifier list wins a tie. Build metadata ("+...") is ignored. Missing core components
+// read as 0; a null or empty string reads as 0.0.0. Returns -1, 0 or 1.
+int compareSemverPrecedence(const char* a, const char* b);
+
+// True when `latest` has strictly higher precedence than `current`.
+bool isNewerVersionOta(const char* latest, const char* current);
+
 }  // namespace fry
