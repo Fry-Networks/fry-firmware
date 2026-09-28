@@ -11,6 +11,7 @@
 #include "miner_key.h"
 #include "ota_client.h"
 #include "provisioning_transport.h"
+#include "reg_result.h"
 #include "telemetry.h"
 #include "trigger_hooks.h"
 #include "wifi_station.h"
@@ -37,9 +38,30 @@ namespace {
 // rejecting our miner code with a 4xx) retried on literally every tick() call instead of backing
 // off, since `!s_registered` alone was enough to trigger another attempt.
 unsigned long s_lastRegisterAttemptMs = 0;
+// Delay after the last attempt before the next one: the hourly heartbeat after a success or a 4xx,
+// 60 s doubling to an hour while hardwareapi is unreachable (fry::nextRegisterDelayMs).
+unsigned long s_nextRegisterDelayMs = INSTALL_HEARTBEAT_MS;
+uint32_t s_regFailures = 0;
+int s_lastRegHttp = 0;
+bool s_loggedNoKey = false;
 unsigned long s_lastPocMs = 0;
 bool s_registered = false;
 bool s_ntpSynced = false;
+
+const uint32_t kQuickRetryMs = 2000;
+
+// The server's own words for a rejection ("detail" or "error" in the JSON body), bounded and with
+// every key-shaped token masked (fry::sanitizeServerDetail). Never logs the body wholesale.
+void readServerDetail(HTTPClient& http, const char* minerKey, char* out, size_t outLen) {
+  out[0] = 0;
+  const int size = http.getSize();
+  if (size > 2048) return;  // not a JSON error body; do not buffer it
+  JsonDocument rdoc;
+  if (deserializeJson(rdoc, http.getString())) return;
+  const char* d = rdoc["detail"].is<const char*>() ? rdoc["detail"].as<const char*>()
+                                                   : (rdoc["error"] | "");
+  fry::sanitizeServerDetail(d, minerKey, out, outLen);
+}
 
 // Authorization header per PROTOCOL.md section 5: the per-device token once issued, else the
 // build-time bootstrap token, omitted entirely when both are empty. Never call this before the
@@ -78,6 +100,15 @@ bool ensureNtpSynced(uint32_t timeoutMs) {
 bool registerInstallation() {
   char minerKey[40];
   fry_identity::ensureMinerKey(minerKey, sizeof(minerKey));
+  if (minerKey[0] == 0) {
+    // USER_SUPPLIED board without a key: there is nothing to register as. Not an API failure.
+    if (!s_loggedNoKey) {
+      s_loggedNoKey = true;
+      Serial.println("api: registration skipped - no miner key yet");
+    }
+    fry_provisioning::notifyKeyMissing();
+    return false;
+  }
   char installId[40];
   fry_identity::ensureInstallId(installId, sizeof(installId));
   char deviceName[32];
@@ -97,19 +128,26 @@ bool registerInstallation() {
   serializeJson(doc, body);
 
   String url = fry_config::getApiBase() + "/installations/" + minerKey + "/installations/" + installId;
-  const uint32_t backoffMs[3] = {2000, 4000, 8000};
 
-  for (int attempt = 0; attempt <= 3; attempt++) {
+  // One attempt plus one quick retry for an outage only. Anything longer is tick()'s schedule, so
+  // the loop (Improv, the reset button, the relay) is never held for more than one retry.
+  int code = -1;
+  fry::RegClass cls = fry::RegClass::Unreachable;
+  char detail[128] = {0};
+  for (int attempt = 0; attempt < 2; attempt++) {
     WiFiClientSecure sec;
     HTTPClient http;
-    int code = -1;
+    code = -1;
     if (fry_http::beginHttpsUrl(http, sec, url)) {
       addAuthHeader(http);
       http.addHeader("Content-Type", "application/json");
       code = http.POST(body);
     }
+    s_lastRegHttp = code;
+    fry_ota::noteHeartbeat(code, "register");  // any HTTP answer proves this image can reach us
+    cls = fry::classifyRegistration(code);
 
-    if (code > 0 && code < 300) {
+    if (cls == fry::RegClass::Ok) {
       JsonDocument rdoc;
       deserializeJson(rdoc, http.getString());
       const char* token = rdoc["device_token"] | "";
@@ -117,35 +155,46 @@ bool registerInstallation() {
       http.end();
       Serial.printf("api: registered install=%s token=%s\n", installId,
                     strlen(token) > 0 ? "present" : "none");
-      fry_ota::confirmGood();  // registration succeeding is this firmware's "proved itself good"
+      if (!fry_config::getKeyOk()) fry_config::setKeyOk(true);  // the key is now confirmed
+      s_regFailures = 0;
+      s_nextRegisterDelayMs = INSTALL_HEARTBEAT_MS;
       fry_provisioning::notifyApiOk();
       return true;
     }
-    http.end();
-
-    if (code >= 400 && code < 500) {
-      // Terminal — never retry a 4xx (e.g. the server's miner_code enum rejecting FRY_MINER_CODE,
-      // or a 401 because our bootstrap token is only valid for FEM- keys). This does NOT touch
-      // fry_config's device token: there is no per-device token to recover here, only the
-      // bootstrap token, and a 4xx on that is a server-policy rejection, not an expired
-      // credential — nothing to "recover" by clearing anything.
-      Serial.printf(
-          "api: register rejected http=%d - server does not accept this miner code yet\n", code);
-      fry_provisioning::notifyApiFail();
-      return false;
+    if (!fry::regClassRetryQuickly(cls)) {
+      // A 4xx is the server's answer; asking again seconds later gets the same one. This does NOT
+      // touch fry_config's device token: a 4xx here is a policy rejection, not an expired
+      // credential, and there is nothing to recover by clearing anything.
+      readServerDetail(http, minerKey, detail, sizeof(detail));
+      http.end();
+      break;
     }
-    if (attempt < 3) delay(backoffMs[attempt]);  // transport error or 5xx — retry
+    http.end();
+    if (attempt == 0) delay(kQuickRetryMs);
   }
 
-  Serial.printf("api: registration failed install=%s (transport error or 5xx, retries exhausted)\n",
-                installId);
-  fry_provisioning::notifyApiFail();
+  if (s_regFailures < 0xFFFFFFFFu) s_regFailures++;
+  s_nextRegisterDelayMs = fry::nextRegisterDelayMs(cls, s_regFailures);
+  const fry::ProvErr err = fry::regClassProvErr(cls);
+  if (cls == fry::RegClass::Unreachable) {
+    Serial.printf("api: registration failed install=%s http=%d detail=%u (%s) next=%lus\n", installId,
+                  code, static_cast<unsigned>(err), fry::regClassText(cls),
+                  s_nextRegisterDelayMs / 1000UL);
+  } else {
+    Serial.printf("api: register rejected http=%d detail=%u (%s) server=\"%s\" next=%lus\n", code,
+                  static_cast<unsigned>(err), fry::regClassText(cls), detail,
+                  s_nextRegisterDelayMs / 1000UL);
+  }
+  fry_provisioning::notifyApiFail(err);
   return false;
 }
+
+int lastRegisterHttp() { return s_lastRegHttp; }
 
 bool renewLease() {
   char minerKey[40];
   fry_identity::ensureMinerKey(minerKey, sizeof(minerKey));
+  if (minerKey[0] == 0) return false;  // no key, no installation to lease
   char installId[40];
   fry_identity::ensureInstallId(installId, sizeof(installId));
 
@@ -163,14 +212,16 @@ bool renewLease() {
   int code = http.sendRequest("PATCH", body);  // String overload — avoids a const/non-const
                                                 // uint8_t* signature mismatch between cores
   http.end();
+  fry_ota::noteHeartbeat(code, "lease");
   return code > 0 && code < 300;
 }
 
 int putPoc() {
-  if (!ensureNtpSynced()) return -1;  // NTP before the first PoC, per PROTOCOL.md section 5
-
   char minerKey[40];
   fry_identity::ensureMinerKey(minerKey, sizeof(minerKey));
+  if (minerKey[0] == 0) return -1;  // nothing to report as - checked before the NTP wait
+
+  if (!ensureNtpSynced()) return -1;  // NTP before the first PoC, per PROTOCOL.md section 5
 
   JsonDocument doc;
   JsonObject document = doc["document"].to<JsonObject>();
@@ -191,6 +242,7 @@ int putPoc() {
   http.addHeader("Content-Type", "application/json");
   int code = http.PUT(body);
   http.end();
+  fry_ota::noteHeartbeat(code, "poc");
   return code;
 }
 
@@ -224,12 +276,12 @@ void tick() {
   // Gated purely by elapsed time since the LAST ATTEMPT (success or failure) — never by
   // `!s_registered` alone. Registration is one optional subsystem, not a boot gate: WiFi, the
   // VPN/relay endpoint, the health loop and OTA all keep running whether or not this succeeds.
-  // A rejected (4xx) or failed (5xx/transport, retries exhausted) attempt backs off to the same
-  // INSTALL_HEARTBEAT_MS interval as a normal heartbeat and is retried indefinitely — so if the
-  // server later starts accepting this miner code, the device recovers on its own without a
-  // reflash — but it never tight-loops.
+  // A rejected (4xx) attempt waits the same hour as a normal heartbeat; an unreachable server
+  // (transport, 5xx, 429) is retried after 60 s, doubling to an hour (fry::nextRegisterDelayMs).
+  // Either way it is retried indefinitely — so if the server later accepts this key, the device
+  // recovers on its own without a reflash — but it never tight-loops.
   bool dueForAttempt =
-      (s_lastRegisterAttemptMs == 0) || (now - s_lastRegisterAttemptMs) >= INSTALL_HEARTBEAT_MS;
+      (s_lastRegisterAttemptMs == 0) || (now - s_lastRegisterAttemptMs) >= s_nextRegisterDelayMs;
   if (dueForAttempt) {
     s_lastRegisterAttemptMs = now;
     if (registerInstallation()) {

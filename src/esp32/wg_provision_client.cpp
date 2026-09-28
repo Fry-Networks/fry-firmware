@@ -99,7 +99,11 @@ void tick() {
   // (unlike hardwareapi_client.cpp's addAuthHeader) — a board mints a WireGuard peer only once
   // it has actually registered and holds its own per-device token.
   String token = fry_config::getDeviceToken();
-  bool hasToken = token.length() > 0;
+  // A USER_SUPPLIED board without a key has no peer to request; it is treated like a missing
+  // token (the same long deferral), never as a POST to an empty key path.
+  char minerKey[40] = {0};
+  if (token.length() > 0) fry_identity::ensureMinerKey(minerKey, sizeof(minerKey));
+  bool hasToken = token.length() > 0 && minerKey[0] != 0;
   bool heapOk = fry::heapGatePass(
       ESP.getFreeHeap(), fry::queryMaxFreeBlock(), HEAP_GATE_OTA,
       fry::otaMinContiguousBlock(/*isHttps=*/true, /*bearsslSingleBuffer=*/false, HEAP_GATE_OTA_BLOCK));
@@ -117,8 +121,6 @@ void tick() {
     if (!ensureKeypair(pubB64)) {
       Serial.println("wg: keypair generation failed");
     } else {
-      char minerKey[40];
-      fry_identity::ensureMinerKey(minerKey, sizeof(minerKey));
       char body[192];
       fry::buildWgProvisionBody(pubB64, FRY_FIRMWARE_VERSION, FRY_CHIP, body, sizeof(body));
 

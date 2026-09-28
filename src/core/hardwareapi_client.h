@@ -5,9 +5,13 @@
 
 namespace fry_hwapi {
 
-// POST /installations/{miner_key}/installations/{install_id}. Retries on transport errors and
-// 5xx only (never 4xx), 2/4/8s backoff, up to 3 retries. Persists the returned device_token.
+// POST /installations/{miner_key}/installations/{install_id}. One quick retry (2 s) on a
+// transport error, 5xx or 429 only - never on a 4xx; tick() schedules the next attempt
+// (lib/fry_core/reg_result.h). Persists the returned device_token. Skipped without a miner key.
 bool registerInstallation();
+
+// The HTTP status of the last registration attempt this boot (<= 0 transport error, 0 if none).
+int lastRegisterHttp();
 
 // POST/PATCH /installations/{miner_key}/leases/{install_id} {"lease_seconds":LEASE_SECONDS}.
 bool renewLease();
