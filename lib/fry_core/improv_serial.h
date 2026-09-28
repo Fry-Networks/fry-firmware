@@ -14,6 +14,9 @@
 #include <cstddef>
 #include <cstdint>
 
+#include "device_status.h"
+#include "key_policy.h"
+
 namespace fry {
 namespace improv {
 
@@ -36,6 +39,7 @@ enum class Error : uint8_t {
   InvalidRpc = 0x01,
   UnknownCommand = 0x02,
   UnableToConnect = 0x03,
+  NotAuthorized = 0x04,  // command not available in this phase (e.g. Wi-Fi settings once Ready)
   Unknown = 0xFF,
 };
 
@@ -44,6 +48,10 @@ enum class Command : uint8_t {
   RequestState = 0x02,
   RequestDeviceInfo = 0x03,
   RequestScannedWifi = 0x04,
+  // Fry vendor commands (PROTOCOL.md section 11.4). 0xF0-0xF1 only; everything else in the
+  // vendor range, and any other unassigned code such as 0x42, is still UnknownCommand.
+  FrySetMinerKey = 0xF0,
+  FryGetStatus = 0xF1,
 };
 
 // Field limits. The largest command that exists is WifiSettings:
@@ -99,6 +107,12 @@ class Parser {
 bool decodeWifiSettings(const uint8_t* data, uint8_t dataLen, char* ssid, size_t ssidCap,
                         char* pass, size_t passCap);
 
+// Splits a FrySetMinerKey (0xF0) payload - [keyLen][key] - into a NUL-terminated buffer. Returns
+// false, leaving `key` untouched, when the length byte disagrees with the payload or the value
+// does not fit keyCap: that is a malformed RPC. A well-framed value of any other length decodes;
+// the caller's isAcceptableOwnerKey() check then answers bad_key.
+bool decodeKeyWrite(const uint8_t* data, uint8_t dataLen, char* key, size_t keyCap);
+
 // Encoders. Each returns the number of bytes written to `out`, or 0 if it would not fit.
 size_t encodeCurrentState(State state, uint8_t* out, size_t outCap);
 size_t encodeError(Error error, uint8_t* out, size_t outCap);
@@ -106,6 +120,13 @@ size_t encodeError(Error error, uint8_t* out, size_t outCap);
 // which is the empty result that terminates a scan response.
 size_t encodeRpcResult(uint8_t command, const char* const* strings, uint8_t count, uint8_t* out,
                        size_t outCap);
+// 0xF0 result: ["ok", masked] | ["err","7","bad_key"] | ["err","8","key_locked"] |
+// ["err","8","store_failed"].
+size_t encodeKeyWriteResult(KeyWriteVerdict verdict, const char* maskedKey, uint8_t* out,
+                            size_t outCap);
+// 0xF1 result: ["1", state, legacy, detail, keySet, keyMasked, fw, lastRegHttp, hbAgeS, ota,
+// apCode] - every field a decimal or plain string, "1" being this layout's version.
+size_t encodeFryStatus(const DeviceStatus& status, uint8_t* out, size_t outCap);
 
 }  // namespace improv
 }  // namespace fry
