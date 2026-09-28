@@ -6,6 +6,26 @@ out.mkdir(parents=True, exist_ok=True)
 esc = tok.replace("\\", "\\\\").replace('"', '\\"')
 (out / "fry_secrets.h").write_text('#pragma once\n#define FRY_API_TOKEN "%s"\n' % esc)
 print("fry_prebuild: api token %s" % ("present (%d chars)" % len(tok) if tok else "EMPTY - registration disabled in this build"))
+
+# Test OTA channel fault images (src/core/ota_client.h). Only an ESP32-family *_test env may carry
+# one: those boards read only the ota-test prerelease manifest, and their bootloader can roll the
+# fault back. ESP8266 has one slot, so a fault image there would crash-loop until reflashed over USB.
+_env_name = env.subst("$PIOENV")
+_is_test_env = _env_name.endswith("_test")
+_fault = os.environ.get("FRY_TEST_FAULT", "")
+_smuggled = " ".join(env.GetProjectOption("build_flags", []) or []) + " " + os.environ.get("PLATFORMIO_BUILD_FLAGS", "")
+if not _is_test_env and ("FRY_TEST_FAULT" in _smuggled or "FRY_OTA_TEST_CHANNEL" in _smuggled):
+    print("fry_prebuild: REFUSED - FRY_TEST_FAULT / FRY_OTA_TEST_CHANNEL in the flags of %s, which is not a *_test env" % _env_name)
+    env.Exit(1)
+if _fault:
+    if _fault not in ("1", "2", "3"):
+        print("fry_prebuild: REFUSED - FRY_TEST_FAULT must be 1, 2 or 3 (got %r)" % _fault)
+        env.Exit(1)
+    if not _is_test_env or _env_name.startswith("esp8266"):
+        print("fry_prebuild: REFUSED - FRY_TEST_FAULT is only for ESP32-family *_test envs, not %s" % _env_name)
+        env.Exit(1)
+    env.Append(CPPDEFINES=[("FRY_TEST_FAULT", _fault)])
+    print("fry_prebuild: TEST FAULT %s compiled into %s - test channel only, never publish to prod" % (_fault, _env_name))
 for k in ("PROJECT_DIR", "PROJECT_CORE_DIR"):
     p = env.subst("$" + k)
     env.Append(CCFLAGS=["-ffile-prefix-map=%s=." % p, "-fmacro-prefix-map=%s=." % p])

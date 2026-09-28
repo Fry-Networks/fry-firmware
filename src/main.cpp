@@ -158,6 +158,14 @@ void setup() {
   Serial.printf("FRY boot v%s chip=%s mac=%s minerkey=%s\n", FRY_FIRMWARE_VERSION, FRY_CHIP, mac,
                 s_minerKey[0] ? s_minerKey : "NONE");
 
+#if defined(FRY_TEST_FAULT) && FRY_TEST_FAULT == 1
+  // Test channel only (src/core/ota_client.h #errors otherwise): an image that dies before it can
+  // prove itself, so the bootloader must roll it back.
+  Serial.println("[fault] FRY_TEST_FAULT=1 - aborting in setup() after the banner");
+  Serial.flush();
+  abort();
+#endif
+
   fry_ota::init();  // may restart the device (manual rollback) — call before anything stateful
 
 #ifdef FRY_SERIAL_PROVISION
@@ -183,6 +191,8 @@ void setup() {
 }
 
 void loop() {
+  fry_ota::loopGuard();  // every phase: a pending image that never reaches hardwareapi rolls back
+
 #ifdef FRY_SERIAL_PROVISION
   fry_serial_poll();
 #endif

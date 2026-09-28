@@ -1,10 +1,22 @@
 #pragma once
-// OTA client per PROTOCOL.md section 6. Rollback uses the NVS boot counter from T2
-// (lib/fry_core/ota_boot_counter.h), NOT Update.rollBack()/esp_ota_mark_app_valid_cancel_
-// rollback() — that ESP-IDF call is a no-op on the arduino-esp32 2.0.x bootloader shipped with
-// espressif32@6.12.0 (it is built without app-rollback support), so relying on it would silently
-// never roll back a bad image.
+// OTA client per PROTOCOL.md sections 6 and 11.5.
+//
+// Rollback. The ESP32-family bootloader shipped with espressif32@6.12.0 IS built with app rollback
+// (CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y in every chip's sdkconfig). What defeated it was
+// arduino-esp32's initArduino(), which marks the running image valid before setup() unless the
+// sketch overrides the weak verifyRollbackLater(). src/esp32/ota_rollback.cpp now overrides it, so
+// a new image stays PENDING_VERIFY until noteHeartbeat() sees the first hardwareapi answer; a crash
+// or reboot before that makes the bootloader boot the previous image, and loopGuard() rolls back an
+// image that never gets an answer. The NVS boot counter (lib/fry_core/ota_boot_counter.h) is kept
+// as a second line, and is the only one on ESP8266, which has a single slot.
 #include <Arduino.h>
+
+// Test-only fault injection (tools/fry_prebuild.py sets it from FRY_TEST_FAULT for ESP32-family
+// *_test envs and refuses everything else): 1 abort in setup() after the banner, 2 never
+// heartbeat, 3 crash 60 s after the first heartbeat.
+#if defined(FRY_TEST_FAULT) && !defined(FRY_OTA_TEST_CHANNEL)
+#error "FRY_TEST_FAULT is for *_test (test OTA channel) builds only"
+#endif
 
 namespace fry_ota {
 
@@ -14,9 +26,25 @@ namespace fry_ota {
 // (ESP32/S3/C3) or just logs the failure (ESP8266 has one slot — rollback is impossible there).
 void init();
 
-// Call once the device has proven itself good (this firmware wires it to the first successful
-// hardwareapi registration). Clears the pending flag and the boot-fail counter.
+// Call once the device has proven itself good. Clears the pending flag and the boot-fail counter.
+// noteHeartbeat() calls it on the first hardwareapi answer.
 void confirmGood();
+
+// Every hardwareapi response (registration, PoC, lease) comes through here. The first real HTTP
+// status of any class marks the running image valid (confirmGood() + the bootloader's
+// esp_ota_mark_app_valid_cancel_rollback() when PENDING_VERIFY); a 2xx refreshes the heartbeat
+// age. `http` <= 0 (transport error) is ignored.
+void noteHeartbeat(int http, const char* what);
+
+// Call every loop(), in every phase: rolls back a PENDING_VERIFY image that has had no hardwareapi
+// answer 20 min after boot (2 min in *_test builds). ESP32 family only; a no-op elsewhere.
+void loopGuard();
+
+// Seconds since the last 2xx heartbeat, -1 if none this boot.
+int32_t heartbeatAgeS();
+
+// "valid" | "pending" | "rolled_back" (PROTOCOL.md section 11).
+const char* imageStateName();
 
 // Fetches the manifest, compares versions, and downloads+verifies+applies an update if newer.
 // Returns true if an update was applied (in which case the device has already restarted and
