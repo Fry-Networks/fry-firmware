@@ -167,6 +167,7 @@ fry::KeyWriteVerdict setOwnerKey(const char* key, fry::KeyTransport transport, b
   bool stored_ok = false;
   for (int attempt = 0; attempt < 2 && !stored_ok; attempt++) {
     fry_config::setMinerKey(key);
+    yield();  // ESP8266's LittleFS store rewrites a whole file per write: feed the watchdog
     char readBack[40] = {0};
     stored_ok = fry_config::getMinerKey(readBack, sizeof(readBack)) && strcmp(readBack, key) == 0;
   }
@@ -178,6 +179,7 @@ fry::KeyWriteVerdict setOwnerKey(const char* key, fry::KeyTransport transport, b
   // peer all belong to the previous key on the server.
   fry_config::clearInstallation();
   fry_config::clearVpn();
+  yield();
   fry_config::setKeySrc("user");
   fry_config::setKeyOk(false);
   if (changed) *changed = true;

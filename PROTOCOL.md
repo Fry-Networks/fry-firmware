@@ -289,7 +289,10 @@ means protocol 1.
   `{"v":1,"proto":2,"caps":["key_write","error_reset","errs_v2"],"s":<state>,"e":<legacy>,"d":<detail>,"k":<0|1 key present>,"kc":<0|1 key confirmed>,"reg":<last registration HTTP status this boot, 0 if none, negative for a transport error>,"hb":<seconds since the last 2xx heartbeat, -1 if none>,"fw":"x.y.z","ota":"valid|pending|rolled_back"}`.
   `e` and `d` are 0 outside Error. It never carries the key, masked or not.
 - **Link lifetime.** The device never drops the link. The client keeps it until 5 s after it saw
-  state 3 Connected, then disconnects.
+  state 3 Connected, then disconnects. One exception: a commit that arrives while the board is
+  already running (joined earlier this boot, e.g. Wi-Fi-only over Improv) is persisted and the
+  board restarts to join with it, so the link drops after state 2; clients treat that as the
+  hand-off and follow the device through the dashboard.
 
 ### 11.4 Improv Serial vendor commands (USB, all chips)
 

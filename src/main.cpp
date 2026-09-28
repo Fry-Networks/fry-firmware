@@ -132,13 +132,17 @@ void attemptWifiConnect() {
 // A 0xF0 write over USB stored a different key. A board still provisioning simply registers with
 // it after the join; one that is already Ready restarts so every subsystem (registration, lease,
 // PoC, WireGuard) starts over under the new identity.
-void onOwnerKeyChanged() {
-  fry_identity::ensureMinerKey(s_minerKey, sizeof(s_minerKey));
-  if (s_phase != BootPhase::Ready) return;
-  Serial.println("[prov] miner key changed - restarting to register with the new key");
+void restartToApply(const char* why) {
+  Serial.println(why);
   Serial.flush();
   delay(300);
   ESP.restart();
+}
+
+void onOwnerKeyChanged() {
+  fry_identity::ensureMinerKey(s_minerKey, sizeof(s_minerKey));
+  if (s_phase != BootPhase::Ready) return;
+  restartToApply("[prov] miner key changed - restarting to register with the new key");
 }
 
 }  // namespace
@@ -221,6 +225,12 @@ void loop() {
       fry_wifi::maintain();
       fry_provisioning::loop();  // keep serving /status (ESP8266) until AP teardown fires
       fry_provisioning::tick();
+      // A transport committed new settings (and possibly a key) while the board was already
+      // running, e.g. the app after a Wi-Fi-only Improv setup. They are persisted; nothing in this
+      // phase would ever act on them, so boot into them.
+      if (fry_provisioning::readyToConnect()) {
+        restartToApply("[prov] new settings committed while running - restarting to join with them");
+      }
       fry_vpn::tick();  // ESP8266: pumps the SOCKS5 relay; ESP32: polls the WG handshake state
       fry_trigger_report_loop_tick();  // T5 overrides; weak default is a no-op
       emitHealthLogIfDue();
