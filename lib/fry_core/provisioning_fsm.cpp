@@ -2,8 +2,48 @@
 
 namespace fry {
 
+namespace {
+
+bool isRegDetail(ProvErr e) { return e >= ProvErr::Reg401 && e <= ProvErr::Unreachable; }
+
+// Errors raised after the Wi-Fi join worked: a later successful registration clears them.
+bool isApiClassErr(ProvErr e) {
+  return e == ProvErr::ApiFail || e == ProvErr::KeyRequired || isRegDetail(e);
+}
+
+ProvErr keyDetail(ProvErr e) { return e == ProvErr::KeyLocked ? ProvErr::KeyLocked : ProvErr::BadKey; }
+
+}  // namespace
+
+uint8_t legacyProvErr(ProvErr e) {
+  const uint8_t v = static_cast<uint8_t>(e);
+  return v < static_cast<uint8_t>(ProvErr::KeyRequired) ? v : static_cast<uint8_t>(ProvErr::ApiFail);
+}
+
+size_t encodeProvStatus(ProvState state, ProvErr err, uint8_t* out, size_t outCap) {
+  if (!out) return 0;
+  if (state != ProvState::Error) {
+    if (outCap < 1) return 0;
+    out[0] = static_cast<uint8_t>(state);
+    return 1;
+  }
+  if (outCap < 3) return 0;
+  out[0] = static_cast<uint8_t>(state);
+  out[1] = legacyProvErr(err);
+  out[2] = static_cast<uint8_t>(err);
+  return 3;
+}
+
 bool ProvisioningFsm::feed(ProvEvent ev, const ProvInputs& in) {
   const ProvState prev = _state;
+
+  // v1.1 error_reset: an SSID write in Error starts a fresh attempt, exactly as it would from
+  // Idle. Before this the only way out of Error was a reboot.
+  if (_state == ProvState::Error && ev == ProvEvent::SsidWritten) {
+    _state = ProvState::Idle;
+    _err = ProvErr::None;
+    _wifiUp = false;
+  }
 
   switch (_state) {
     case ProvState::Idle:
@@ -15,6 +55,9 @@ bool ProvisioningFsm::feed(ProvEvent ev, const ProvInputs& in) {
           _state = ProvState::Error;
           _err = ProvErr::BadSsid;
         }
+      } else if (ev == ProvEvent::KeyRejected) {
+        _state = ProvState::Error;  // a key write (09) may come before the SSID
+        _err = keyDetail(in.detail);
       }
       break;
 
@@ -43,6 +86,12 @@ bool ProvisioningFsm::feed(ProvEvent ev, const ProvInputs& in) {
           _state = ProvState::Error;
           _err = ProvErr::BadWallet;
         }
+      } else if (ev == ProvEvent::KeyMissing) {
+        _state = ProvState::Error;
+        _err = ProvErr::KeyRequired;
+      } else if (ev == ProvEvent::KeyRejected) {
+        _state = ProvState::Error;
+        _err = keyDetail(in.detail);
       }
       break;
 
@@ -62,7 +111,10 @@ bool ProvisioningFsm::feed(ProvEvent ev, const ProvInputs& in) {
         }
       } else if (ev == ProvEvent::ApiFail) {
         _state = ProvState::Error;
-        _err = ProvErr::ApiFail;
+        _err = isRegDetail(in.detail) ? in.detail : ProvErr::ApiFail;
+      } else if (ev == ProvEvent::KeyMissing) {
+        _state = ProvState::Error;
+        _err = ProvErr::KeyRequired;
       }
       break;
 
@@ -71,6 +123,19 @@ bool ProvisioningFsm::feed(ProvEvent ev, const ProvInputs& in) {
       break;
 
     case ProvState::Error:
+      // v1.1: Wi-Fi is up and only the API side failed. Registration keeps retrying on its own
+      // schedule, so its later success (or a different failure) must reach the status too.
+      if (_wifiUp && isApiClassErr(_err)) {
+        if (ev == ProvEvent::ApiOk) {
+          _state = ProvState::Connected;
+          _err = ProvErr::None;
+        } else if (ev == ProvEvent::ApiFail) {
+          _err = isRegDetail(in.detail) ? in.detail : ProvErr::ApiFail;
+        }
+      }
+      if (ev == ProvEvent::KeyRejected) {
+        _err = keyDetail(in.detail);
+      }
       break;
   }
 
