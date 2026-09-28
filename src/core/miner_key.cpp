@@ -157,8 +157,10 @@ fry::KeyWriteVerdict setOwnerKey(const char* key, fry::KeyTransport transport, b
   char masked[12];
   fry::maskMinerKey(key, masked, sizeof(masked));
   if (verdict != fry::KeyWriteVerdict::Accept) {
-    Serial.printf("[identity] owner key refused via %s: %s\n", transportName(transport),
-                  verdict == fry::KeyWriteVerdict::BadKey ? "bad_key" : "key_locked");
+    const char* why = verdict == fry::KeyWriteVerdict::BadKey          ? "bad_key"
+                      : verdict == fry::KeyWriteVerdict::NeedsSecureAp ? "key_needs_secure_ap"
+                                                                       : "key_locked";
+    Serial.printf("[identity] owner key refused via %s: %s\n", transportName(transport), why);
     return verdict;
   }
   if (same) return verdict;  // already the stored key: nothing to write, nothing to reset
