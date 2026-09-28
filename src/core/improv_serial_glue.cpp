@@ -15,7 +15,10 @@
 
 #include "fry_config.h"
 #include "improv_serial.h"
+#include "key_policy.h"
+#include "miner_key.h"
 #include "provisioning_transport.h"
+#include "status_snapshot.h"
 #include "wifi_station.h"
 
 #ifndef FRY_FIRMWARE_VERSION
@@ -41,8 +44,8 @@ using fry::improv::State;
 Parser s_parser;
 uint8_t s_out[fry::improv::kMaxPacket];
 char s_deviceName[32] = {0};
-char s_minerKey[40] = {0};
 bool s_awaitingWifi = false;  // a wifi-settings command is committed and the join is in flight
+bool s_keyChanged = false;    // a 0xF0 write stored a different key; see consumeKeyChanged()
 
 #if !defined(ARDUINO_ARCH_ESP8266)
 bool s_scanRunning = false;
@@ -106,6 +109,30 @@ void handleWifiSettings() {
   sendState(State::Provisioning);
 }
 
+// 0xF0 FrySetMinerKey: the same setOwnerKey() handler BLE characteristic 09 and the ESP8266
+// /provision key field end in, over the one transport that proves physical access.
+void handleSetMinerKey() {
+  char key[40] = {0};
+  if (!fry::improv::decodeKeyWrite(s_parser.data(), s_parser.dataLen(), key, sizeof(key))) {
+    sendError(Error::InvalidRpc);
+    return;
+  }
+  bool changed = false;
+  const fry::KeyWriteVerdict verdict =
+      fry_identity::setOwnerKey(key, fry::KeyTransport::Usb, &changed);
+  char masked[12];
+  fry::maskMinerKey(key, masked, sizeof(masked));
+  memset(key, 0, sizeof(key));
+  writePacket(fry::improv::encodeKeyWriteResult(verdict, masked, s_out, sizeof(s_out)));
+  if (verdict == fry::KeyWriteVerdict::Accept && changed) s_keyChanged = true;
+}
+
+void handleGetStatus() {
+  fry::DeviceStatus status;
+  fry_status::snapshot(status);
+  writePacket(fry::improv::encodeFryStatus(status, s_out, sizeof(s_out)));
+}
+
 void handleScanRequest() {
 #if defined(ARDUINO_ARCH_ESP8266)
   // On ESP8266 the provisioning transport IS a softAP: the radio is in WIFI_AP and a scan would
@@ -152,8 +179,16 @@ void pollWifiOutcome() {
   if (fry_wifi::isConnected()) {
     s_awaitingWifi = false;
     sendState(State::Provisioned);
+    // Read now, not at init(): an 0xF0 write may have set the key since. Without one the URL
+    // carries no #key= fragment rather than an empty one.
+    char key[40] = {0};
+    fry_identity::ensureMinerKey(key, sizeof(key));
     char url[128];
-    snprintf(url, sizeof(url), "%s#key=%s", IMPROV_DEVICE_URL_BASE, s_minerKey);
+    if (key[0]) {
+      snprintf(url, sizeof(url), "%s#key=%s", IMPROV_DEVICE_URL_BASE, key);
+    } else {
+      snprintf(url, sizeof(url), "%s", IMPROV_DEVICE_URL_BASE);
+    }
     const char* one[] = {url};
     sendResult(Command::WifiSettings, one, 1);
     return;
@@ -169,9 +204,13 @@ void pollWifiOutcome() {
   }
 }
 
-void dispatch() {
+void dispatch(bool transportRunning) {
   switch (static_cast<Command>(s_parser.command())) {
     case Command::WifiSettings:
+      if (!transportRunning) {
+        sendError(Error::NotAuthorized);  // Wi-Fi settings stay gated on the provisioning transport
+        break;
+      }
       handleWifiSettings();
       break;
     case Command::RequestState:
@@ -181,7 +220,17 @@ void dispatch() {
       sendDeviceInfo();
       break;
     case Command::RequestScannedWifi:
+      if (!transportRunning) {
+        sendError(Error::NotAuthorized);  // a scan would disturb the joined station
+        break;
+      }
       handleScanRequest();
+      break;
+    case Command::FrySetMinerKey:
+      handleSetMinerKey();
+      break;
+    case Command::FryGetStatus:
+      handleGetStatus();
       break;
     default:
       // Declined, not ignored: a client that gets silence cannot tell a busy device from one
@@ -195,18 +244,16 @@ void dispatch() {
 
 void init(const char* deviceName, const char* minerKey) {
   strncpy(s_deviceName, deviceName ? deviceName : "", sizeof(s_deviceName) - 1);
-  strncpy(s_minerKey, minerKey ? minerKey : "", sizeof(s_minerKey) - 1);
+  (void)minerKey;  // read fresh when needed: an 0xF0 write can change it at any time
 }
 
 void poll(bool transportRunning) {
-  if (!transportRunning) return;
-
   // Bounded: a flood on the UART must not starve the rest of loop() (the factory-reset button is
   // polled there). One wifi-settings packet is 26 bytes, so this drains any real burst.
   for (int budget = 0; budget < 256 && Serial.available(); budget++) {
     switch (s_parser.feed(static_cast<uint8_t>(Serial.read()))) {
       case Result::Rpc:
-        dispatch();
+        dispatch(transportRunning);
         break;
       case Result::BadChecksum:
       case Result::Malformed:
@@ -219,6 +266,12 @@ void poll(bool transportRunning) {
 
   pollScan();
   pollWifiOutcome();
+}
+
+bool consumeKeyChanged() {
+  const bool changed = s_keyChanged;
+  s_keyChanged = false;
+  return changed;
 }
 
 }  // namespace fry_improv

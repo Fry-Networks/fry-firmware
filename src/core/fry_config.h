@@ -32,6 +32,17 @@ String getDeviceToken();
 void setDeviceToken(const char* token);
 String getApiBase();  // falls back to the compiled HARDWAREAPI_BASE default if unset
 void setApiBase(const char* base);
+// v1.1 key ownership (PROTOCOL.md section 11.1). fry/keyOk: hardwareapi accepted the current key
+// with a 2xx registration. fry/keySrc: "user" once an owner wrote it, absent for a minted or
+// migrated key. fry/apCode: the ESP8266 WPA2 setup-AP passphrase. factoryReset() keeps all three.
+bool getKeyOk();
+void setKeyOk(bool ok);
+String getKeySrc();
+void setKeySrc(const char* src);
+String getApCode();
+void setApCode(const char* code);
+// Removes fry/installId and fry/deviceToken: a new key is a new installation.
+void clearInstallation();
 
 // ── fry_vpn ───────────────────────────────────────────────────────────────
 String getWgPriv();
@@ -92,6 +103,9 @@ void setOtaUrl(const char* url);
 uint8_t getOtaBootFails();
 void setOtaBootFails(uint8_t v);
 void clearOtaBootFails();
+// fry_ota/badver: a version this board rolled back from and will not install again.
+String getOtaBadVer();
+void setOtaBadVer(const char* version);
 
 // Wipes fry_wifi, fry/wallet, fry/provDone, fry/installId, fry/deviceToken, fry_vpn and fry_ota.
 // PRESERVES fry/salt and fry/minerKey so a re-provisioned board keeps one server identity

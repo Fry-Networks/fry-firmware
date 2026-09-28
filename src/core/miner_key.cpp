@@ -51,6 +51,31 @@ const char* chipTag() {
 #endif
 }
 
+bool s_waitLogged = false;
+
+const char* transportName(fry::KeyTransport t) {
+  switch (t) {
+    case fry::KeyTransport::Usb:
+      return "usb";
+    case fry::KeyTransport::Ble:
+      return "ble";
+    case fry::KeyTransport::SoftApSecure:
+      return "softap";
+    case fry::KeyTransport::SoftApOpen:
+      return "open-softap";
+  }
+  return "?";
+}
+
+// Policy inputs from the store: is a key there, is it the same one, has hardwareapi accepted it.
+fry::KeyWriteVerdict evaluate(const char* key, fry::KeyTransport transport, char* stored,
+                              size_t storedLen, bool* same) {
+  const bool hasKey = fry_config::getMinerKey(stored, storedLen) && stored[0];
+  *same = hasKey && key && strcmp(stored, key) == 0;
+  return fry::mayWriteKey(fry::kBuildKeyModel, transport, hasKey, hasKey && fry_config::getKeyOk(),
+                          fry::isAcceptableOwnerKey(key), *same);
+}
+
 }  // namespace
 
 void getMac6(uint8_t mac6[3]) {
@@ -62,10 +87,21 @@ void getMac6(uint8_t mac6[3]) {
 }
 
 void ensureMinerKey(char* outKey, size_t outKeyLen) {
-  if (fry_config::getMinerKey(outKey, outKeyLen)) {
-    if (fry::isValidMinerKey(outKey)) {
-      return;  // already generated — never regenerate (PROTOCOL.md section 4)
+  const bool present = fry_config::getMinerKey(outKey, outKeyLen);
+  const fry::BootKeyAction action = fry::decideBootKey(fry::kBuildKeyModel, present, outKey);
+  if (action == fry::BootKeyAction::Wait) {
+    if (outKey && outKeyLen) outKey[0] = 0;
+    if (!s_waitLogged) {
+      s_waitLogged = true;
+      Serial.println("[identity] no miner key - waiting for the owner's FEM- key (web setup page over "
+                     "USB, app >= 0.4, or the setup AP)");
     }
+    return;
+  }
+  if (action == fry::BootKeyAction::Keep) {
+    return;  // already stored - never regenerate or replace (PROTOCOL.md section 4)
+  }
+  if (action == fry::BootKeyAction::MigrateLegacy) {
     // A board flashed before the 2026-09-18 prefix change holds an "IOT-<hex>" key. Only the
     // namespace prefix moved, so rewrite it in place and keep the hex: same device, same
     // identity. A stored key that is neither valid nor legacy is left exactly as it is —
@@ -93,6 +129,7 @@ void ensureMinerKey(char* outKey, size_t outKeyLen) {
     return;
   }
 
+  // Mint: DEVICE_KEEPS builds only (decideBootKey never returns it for USER_SUPPLIED).
   uint8_t mac6[3];
   getMac6(mac6);
 
@@ -104,6 +141,48 @@ void ensureMinerKey(char* outKey, size_t outKeyLen) {
 
   fry::computeMinerKey(mac6, salt, outKey, outKeyLen);
   fry_config::setMinerKey(outKey);
+}
+
+fry::KeyWriteVerdict checkOwnerKey(const char* key, fry::KeyTransport transport) {
+  char stored[40] = {0};
+  bool same = false;
+  return evaluate(key, transport, stored, sizeof(stored), &same);
+}
+
+fry::KeyWriteVerdict setOwnerKey(const char* key, fry::KeyTransport transport, bool* changed) {
+  if (changed) *changed = false;
+  char stored[40] = {0};
+  bool same = false;
+  const fry::KeyWriteVerdict verdict = evaluate(key, transport, stored, sizeof(stored), &same);
+  char masked[12];
+  fry::maskMinerKey(key, masked, sizeof(masked));
+  if (verdict != fry::KeyWriteVerdict::Accept) {
+    Serial.printf("[identity] owner key refused via %s: %s\n", transportName(transport),
+                  verdict == fry::KeyWriteVerdict::BadKey ? "bad_key" : "key_locked");
+    return verdict;
+  }
+  if (same) return verdict;  // already the stored key: nothing to write, nothing to reset
+
+  // Same write-then-read-back-through-a-fresh-handle rule as the legacy migration above.
+  bool stored_ok = false;
+  for (int attempt = 0; attempt < 2 && !stored_ok; attempt++) {
+    fry_config::setMinerKey(key);
+    char readBack[40] = {0};
+    stored_ok = fry_config::getMinerKey(readBack, sizeof(readBack)) && strcmp(readBack, key) == 0;
+  }
+  if (!stored_ok) {
+    Serial.printf("[identity] owner key via %s could not be persisted\n", transportName(transport));
+    return fry::KeyWriteVerdict::StoreFailed;
+  }
+  // A different key is a different installation: the old install id, device token and WireGuard
+  // peer all belong to the previous key on the server.
+  fry_config::clearInstallation();
+  fry_config::clearVpn();
+  fry_config::setKeySrc("user");
+  fry_config::setKeyOk(false);
+  if (changed) *changed = true;
+  Serial.printf("[identity] owner key stored via %s (%s)\n", transportName(transport), masked);
+  return verdict;
 }
 
 void getDeviceName(char* outName, size_t outNameLen) {

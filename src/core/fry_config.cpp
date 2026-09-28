@@ -169,6 +169,59 @@ void setApiBase(const char* base) {
   p.end();
 }
 
+bool getKeyOk() {
+  KvStore p;
+  p.begin("fry", true);
+  bool ok = p.isKey("keyOk") && p.getBool("keyOk", false);
+  p.end();
+  return ok;
+}
+
+void setKeyOk(bool ok) {
+  KvStore p;
+  p.begin("fry", false);
+  p.putBool("keyOk", ok);
+  p.end();
+}
+
+String getKeySrc() {
+  KvStore p;
+  p.begin("fry", true);
+  String v = p.getString("keySrc", "");
+  p.end();
+  return v;
+}
+
+void setKeySrc(const char* src) {
+  KvStore p;
+  p.begin("fry", false);
+  p.putString("keySrc", src);
+  p.end();
+}
+
+String getApCode() {
+  KvStore p;
+  p.begin("fry", true);
+  String v = p.getString("apCode", "");
+  p.end();
+  return v;
+}
+
+void setApCode(const char* code) {
+  KvStore p;
+  p.begin("fry", false);
+  p.putString("apCode", code);
+  p.end();
+}
+
+void clearInstallation() {
+  KvStore p;
+  p.begin("fry", false);
+  p.remove("installId");
+  p.remove("deviceToken");
+  p.end();
+}
+
 // ── fry_vpn ───────────────────────────────────────────────────────────────
 
 String getWgPriv() {
@@ -418,6 +471,20 @@ void clearOtaBootFails() {
   KvStore p;
   p.begin("fry_ota", false);
   p.remove("bootfails");
+  p.end();
+}
+
+String getOtaBadVer() {
+  KvStore p;
+  p.begin("fry_ota", true);
+  String v = p.getString("badver", "");
+  p.end();
+  return v;
+}
+void setOtaBadVer(const char* version) {
+  KvStore p;
+  p.begin("fry_ota", false);
+  p.putString("badver", version);
   p.end();
 }
 

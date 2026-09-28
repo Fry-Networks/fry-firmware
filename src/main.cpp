@@ -19,6 +19,7 @@
 #include "core/vpn_relay.h"
 #include "core/wifi_station.h"
 #include "heap_gate.h"
+#include "key_policy.h"
 #include "reset_button.h"
 
 #ifndef FRY_FIRMWARE_VERSION
@@ -128,6 +129,18 @@ void attemptWifiConnect() {
   }
 }
 
+// A 0xF0 write over USB stored a different key. A board still provisioning simply registers with
+// it after the join; one that is already Ready restarts so every subsystem (registration, lease,
+// PoC, WireGuard) starts over under the new identity.
+void onOwnerKeyChanged() {
+  fry_identity::ensureMinerKey(s_minerKey, sizeof(s_minerKey));
+  if (s_phase != BootPhase::Ready) return;
+  Serial.println("[prov] miner key changed - restarting to register with the new key");
+  Serial.flush();
+  delay(300);
+  ESP.restart();
+}
+
 }  // namespace
 
 void setup() {
@@ -143,7 +156,7 @@ void setup() {
   fry_identity::getDeviceName(s_deviceName, sizeof(s_deviceName));
 
   Serial.printf("FRY boot v%s chip=%s mac=%s minerkey=%s\n", FRY_FIRMWARE_VERSION, FRY_CHIP, mac,
-                s_minerKey);
+                s_minerKey[0] ? s_minerKey : "NONE");
 
   fry_ota::init();  // may restart the device (manual rollback) — call before anything stateful
 
@@ -155,8 +168,16 @@ void setup() {
   // Previously provisioned boards skip straight to the join; the transport is started lazily by
   // setPhase() if and when that join fails. Starting it here unconditionally is NOT an option on
   // ESP8266, where the transport is a softAP and bringing it up switches the radio to WIFI_AP.
-  setPhase(fry::initialBootPhase(fry::hasBootCredentials(
-      fry_config::hasWifi(), fry_config::hasWallet(), fry_config::hasProvDone())));
+  //
+  // A USER_SUPPLIED board without a miner key stays provisionable even with Wi-Fi credentials
+  // stored: joining would get it nowhere, and the transport is how the owner writes the key.
+  const bool hasCredentials = fry::hasBootCredentials(
+      fry_config::hasWifi(), fry_config::hasWallet(), fry_config::hasProvDone());
+  const bool keyOk = fry::keyAllowsJoin(fry::kBuildKeyModel, s_minerKey[0] != 0);
+  if (hasCredentials && !keyOk) {
+    Serial.println("[boot] wifi credentials stored but no miner key - staying provisionable");
+  }
+  setPhase(fry::initialBootPhase(hasCredentials && keyOk));
 
   Serial.println("[boot] ready");
 }
@@ -165,9 +186,11 @@ void loop() {
 #ifdef FRY_SERIAL_PROVISION
   fry_serial_poll();
 #endif
-  // Improv Serial answers only while the provisioning transport is up — the same predicate the
-  // boot policy uses to decide the board is reachable for provisioning at all.
+  // Improv Serial answers its read-only commands and the 0xF0 key write in every phase; Wi-Fi
+  // settings only while the provisioning transport is up — the same predicate the boot policy
+  // uses to decide the board is reachable for provisioning at all.
   fry_improv::poll(s_bootPolicy.transportStarted());
+  if (fry_improv::consumeKeyChanged()) onOwnerKeyChanged();
 
   pollFactoryResetButton();  // every phase — a wedged board must still be recoverable
 

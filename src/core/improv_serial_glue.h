@@ -21,18 +21,26 @@ namespace fry_improv {
 
 #if FRY_HAS_IMPROV
 
-// Device name and miner key as src/main.cpp already computed them (the key may have just been
-// migrated from an IOT- prefix, so it must not be recomputed here).
+// Device name as src/main.cpp computed it. The miner key is no longer cached here: an 0xF0 write
+// can change it at any time, so it is read through fry_identity::ensureMinerKey() when needed.
 void init(const char* deviceName, const char* minerKey);
 
-// Call every loop(). `transportRunning` is fry::BootPolicy::transportStarted(): Improv answers
-// only on a board that is provisionable, never on one that booted straight into its network.
+// Call every loop(). The read-only commands (current state, device info, 0xF1 status) and the
+// 0xF0 key write are answered in every phase, so a web flasher sees a board it can UPDATE instead
+// of one it must erase (PROTOCOL.md section 11.4). `transportRunning` is
+// fry::BootPolicy::transportStarted(): Wi-Fi settings and the scan are still answered only on a
+// board that is provisionable, never on one that booted straight into its network.
 void poll(bool transportRunning);
+
+// True once after a 0xF0 write stored a key DIFFERENT from the previous one. src/main.cpp restarts
+// a board that is already Ready so it registers with the new key.
+bool consumeKeyChanged();
 
 #else
 
 inline void init(const char*, const char*) {}
 inline void poll(bool) {}
+inline bool consumeKeyChanged() { return false; }
 
 #endif
 
