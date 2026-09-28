@@ -164,5 +164,5 @@ range. If it keeps failing at the same step, factory reset first so the board st
 **Nothing on serial** — wrong baud rate (it is 115200), a charge-only USB cable, or a board that is
 not powered.
 
-Still stuck? Ask in **<https://discord.gg/frynetworks>** with your board type, the `FEM-` miner key,
+Still stuck? Ask in **<https://discord.frynetworks.com>** with your board type, the `FEM-` miner key,
 and the serial log around the failure.
