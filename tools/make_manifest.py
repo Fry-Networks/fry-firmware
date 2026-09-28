@@ -30,6 +30,13 @@ release path and the existing docs/flash/fw/manifest.json still use them.
 Offsets and flash settings below are not guesses — they were read back from the actual
 `pio run -t upload` command line for each environment, and every offset this tool writes is
 re-checked against the partition table in the build's own partitions.bin before it is emitted.
+
+Channels (PROTOCOL.md section 11.5). The manifest carries "channel" ("prod" by default, "test" for
+the ota-test prerelease), and firmware 0.4+ rejects a manifest of the other channel. By default the
+committed tools/ota_channels.json is applied: an env listed under the channel's exclude_from_builds
+is LEFT OUT of builds{}, so boards of that chip get no automatic update, while its images are still
+copied to --dist for manual flashing. --no-exclusions keeps every env (e.g. for the Pages flasher's
+docs/flash/fw/manifest.json, which is a download list, not an OTA source).
 """
 import argparse
 import hashlib
@@ -89,6 +96,9 @@ EWT_CHIP_FAMILY = {
 # comes from FACTORY above). Both are asserted against the build's partitions.bin.
 OTADATA_OFFSET = 0xE000
 APP_OFFSET = 0x10000
+
+CHANNELS = ("prod", "test")
+DEFAULT_CHANNELS_CONFIG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ota_channels.json")
 
 PIO_PACKAGES = os.path.join(os.path.expanduser("~"), ".platformio", "packages")
 DEFAULT_ESPTOOL = os.path.join(PIO_PACKAGES, "tool-esptoolpy", "esptool.py")
@@ -221,6 +231,20 @@ def merge_factory(env, build_dir, out_path, esptool, boot_app0, python):
     return out_path
 
 
+def load_exclusions(path, channel):
+    """Returns (envs to leave out of builds{}, reason) for `channel` from the committed config."""
+    with open(path, encoding="utf-8") as f:
+        cfg = json.load(f)
+    entry = cfg.get("channels", {}).get(channel)
+    if entry is None:
+        raise SystemExit("make_manifest: channel %r is not defined in %s" % (channel, path))
+    excluded = entry.get("exclude_from_builds", [])
+    unknown = [e for e in excluded if e not in ENVS]
+    if unknown:
+        raise SystemExit("make_manifest: %s excludes unknown env(s) %s" % (path, ", ".join(unknown)))
+    return excluded, entry.get("reason", "")
+
+
 def copy_file(src, dst):
     with open(src, "rb") as fsrc, open(dst, "wb") as fdst:
         fdst.write(fsrc.read())
@@ -308,6 +332,12 @@ def main():
     ap.add_argument("--only", default=None,
                     help="restrict to a single environment. CI builds one env per matrix job, "
                          "so the merge step there can only see its own binaries.")
+    ap.add_argument("--channel", choices=CHANNELS, default="prod",
+                    help="OTA channel written into the manifest (default: prod)")
+    ap.add_argument("--channels-config", default=DEFAULT_CHANNELS_CONFIG,
+                    help="exclusion config (default: tools/ota_channels.json)")
+    ap.add_argument("--no-exclusions", action="store_true",
+                    help="keep every env in builds{} (download lists such as the Pages flasher's)")
     a = ap.parse_args()
 
     envs = (a.only,) if a.only else ENVS
@@ -371,7 +401,14 @@ def main():
         write_ewt_manifest(envs, a.version, a.build_dir, dist, a.ewt_asset_base, a.boot_app0,
                            a.ewt_out)
 
-    manifest = {"firmware_version": a.version, "builds": builds}
+    # Applied last, to the OTA manifest only: the images above were still built, merged and copied.
+    if not a.no_exclusions:
+        excluded, reason = load_exclusions(a.channels_config, a.channel)
+        for env in excluded:
+            if builds.pop(env, None) is not None:
+                print("make_manifest: %s left out of builds{} for channel %s (%s)" % (env, a.channel, reason))
+
+    manifest = {"firmware_version": a.version, "channel": a.channel, "builds": builds}
 
     out_dir = os.path.dirname(a.out)
     if out_dir:
@@ -380,7 +417,8 @@ def main():
         json.dump(manifest, f, indent=2, sort_keys=True)
         f.write("\n")
 
-    print("make_manifest: wrote %s (version=%s, %d builds)" % (a.out, a.version, len(builds)))
+    print("make_manifest: wrote %s (version=%s, channel=%s, %d builds)"
+          % (a.out, a.version, a.channel, len(builds)))
 
 
 if __name__ == "__main__":
