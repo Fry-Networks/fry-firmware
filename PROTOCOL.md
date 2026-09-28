@@ -192,3 +192,206 @@ resource id such as `resource-id="prov_ssid"`, with no package prefix.
 `home_add_device_fab`, `scan_start`, `scan_result_<n>`, `scan_result_name_<n>`, `prov_ssid`,
 `prov_pass`, `prov_wallet`, `prov_submit`, `prov_status`, `prov_minerkey`, `device_minerkey`,
 `device_claim_link`, `settings_wallet`
+
+## 11. Protocol v1.1 (firmware 0.4.0 and later; append-only)
+
+Everything in sections 1 to 10 still holds; v1.1 only adds. A v1 client keeps working against a
+v1.1 device, with one deliberate exception: a USER_SUPPLIED device that holds no miner key refuses
+to commit provisioning until it is given one (11.3, 11.6). Capability detection: BLE characteristic
+`0A` present, or `"proto":2` in ESP8266 `GET /info`, or an answer to Improv `0xF1`. None of those
+means protocol 1.
+
+### 11.1 Miner key ownership
+
+- **Key model** (compile flag `FRY_KEY_MODEL`): `1` USER_SUPPLIED (default from 0.4.0) - the owner
+  writes the FEM- key they already hold (dashboard or FEM PC); a board without one never mints its
+  own and waits. `0` DEVICE_KEEPS - the v1 behaviour of section 4: minted once on first boot, every
+  write refused.
+- **Owner key format:** `^FEM-[A-Za-z0-9]{32}$`, exactly 36 ASCII bytes, byte-exact and
+  case-sensitive. The dashboard mints `FEM-<32 uppercase base36>`, FEM PC `FEM-<32 uppercase hex>`,
+  migrated legacy boards may hold `FEM-<32 lowercase hex>`; all three are valid. Clients trim
+  whitespace and zero-width characters before sending and never change case; the firmware never
+  trims or case-folds. An `IOT-` key is never accepted as input (legacy guidance: "IOT- keys are
+  now FEM- keys: use FEM- with the same 32 characters").
+- **Fielded boards keep their key.** An update never re-keys a board; a stored `IOT-<hex>` key is
+  still rewritten to `FEM-<same hex>` on boot.
+- **Who may write a key:**
+
+| Stored key | USB (Improv `0xF0`) | BLE `09` | ESP8266 WPA2 setup AP | ESP8266 open AP |
+|---|---|---|---|---|
+| none | accept | accept | accept | `key_needs_secure_ap` |
+| present, not yet confirmed | accept | accept | accept | `key_needs_secure_ap` |
+| confirmed by a 2xx registration | accept (replace) | `key_locked` (8) | `key_locked` (8) | `key_needs_secure_ap` |
+| any, DEVICE_KEEPS build | `key_locked` (8) | `key_locked` (8) | `key_locked` (8) | `key_needs_secure_ap` |
+
+  Re-writing exactly the stored key is a no-op that always succeeds (except over the open AP). A
+  malformed key is `bad_key` (7) everywhere.
+- **A new key is a new installation:** `fry/installId`, `fry/deviceToken` and all of `fry_vpn` are
+  cleared, `fry/keySrc` becomes `user` and `fry/keyOk` false. `fry/keyOk` turns true on the first 2xx
+  registration and is what "confirmed" means above. `factory_reset` keeps the key, `keyOk`,
+  `keySrc` and `fry/apCode`.
+- **Masking:** wherever a key is shown without authentication it is its first 6 characters followed
+  by U+2026 (UTF-8 `E2 80 A6`), e.g. `FEM-AB…`.
+- **A USER_SUPPLIED board without a key** logs `minerkey=NONE` in its boot banner, stays
+  provisionable even with Wi-Fi credentials stored, and skips registration, lease, PoC and
+  WireGuard provisioning (nothing is sent to an empty key path).
+
+### 11.2 Status and error codes v1.1
+
+| Error | Meaning |
+|---|---|
+| 6 | KeyRequired - commit attempted without a miner key (USER_SUPPLIED) |
+| 7 | BadKey - a key write that is not `^FEM-[A-Za-z0-9]{32}$` |
+| 8 | KeyLocked - key write refused by policy (11.1) |
+| 9 | registration answered 401 (key unknown to the server, or a legacy key) |
+| 10 | registration answered 403 |
+| 11 | registration answered 409 (key active on another install) |
+| 12 | registration answered another 4xx |
+| 13 | hardwareapi unreachable (transport error, 5xx or 429); the device keeps retrying |
+
+- **Legacy byte.** v1 clients read one error byte and know 0-5; every code from 6 up is reported
+  to them as 4 ("hardwareapi registration failed"), with the v1.1 code alongside as the detail.
+- **BLE characteristic 06** carries `[state]`, or in Error `[4][legacy][detail]` (3 bytes; a v1
+  client reads byte 1 as before). **ESP8266 `GET /status`** keeps `"err"` as the legacy byte and adds
+  `"detail"`.
+- **error_reset.** An SSID write while in Error (BLE `01`, `/provision`, Improv `0x01`) starts a
+  new attempt exactly as from Idle; before v1.1 Error lasted until a reboot.
+- **Late registration success.** When Wi-Fi joined and only the API side failed (4, 6, 9-13), a
+  later successful registration moves the state to 3 Connected, and a later failure replaces the
+  detail. Wi-Fi errors (1-3) and 5 are not changed by registration outcomes.
+- **Registration schedule.** A 2xx repeats hourly. A 4xx waits 3600 s. An outage gets one quick
+  retry (2 s), then 60 s, doubling per consecutive failure, capped at 3600 s. The serial line names
+  the HTTP status, the detail code and the server's own `detail`/`error` string (at most 120
+  characters, every key-shaped token masked).
+
+### 11.3 BLE additions (ESP32 / ESP32-S3 / ESP32-C3)
+
+| Characteristic | UUID | Props | Payload |
+|---|---|---|---|
+| Miner key        | `46525905-0001-4000-8000-4652594e4554` | read, **encrypted read** | the stored key; `""` when none |
+| Status           | `46525906-0001-4000-8000-4652594e4554` | read + notify | `[state]` or `[4][legacy][detail]` (11.2) |
+| Miner key write  | `46525909-0001-4000-8000-4652594e4554` | write, **encrypted write** | exactly 36 ASCII bytes (11.1) |
+| Device status    | `4652590a-0001-4000-8000-4652594e4554` | read + notify | JSON, at most 160 bytes, below |
+
+- **Security.** `05` and `09` require an encrypted link: LE Secure Connections, Just Works, no
+  bonding (`setSecurityAuth(bond=false, mitm=false, sc=true)`, IO capability NoInputNoOutput). No
+  other characteristic needs it, so a client that never touches those two is never asked to pair.
+- **Client order:** `09` key -> `01` SSID -> `02` password -> `03` wallet (commit).
+- **`09` write.** Validated at once and, if accepted, held in RAM only. It is persisted at the `03`
+  commit, before Wi-Fi and wallet, and only if the commit goes ahead. A refused write sets Error 7
+  or 8. Accepted in Idle, Provisioning and Error (in Error it is staged and the state is left alone
+  until the next `01`); ignored while Connecting or Connected.
+- **Commit without a key.** A USER_SUPPLIED board with no stored key and no staged `09` refuses the
+  `03` commit: nothing is persisted, status becomes `[4][4][6]`, and the serial log says
+  `[prov] refused: no miner key - set it with the web setup page (USB) or app>=0.4`. A v1 app hits
+  exactly this on a new board.
+- **`0A` device status.** Refreshed on every read and notified on every status change:
+  `{"v":1,"proto":2,"caps":["key_write","error_reset","errs_v2"],"s":<state>,"e":<legacy>,"d":<detail>,"k":<0|1 key present>,"kc":<0|1 key confirmed>,"reg":<last registration HTTP status this boot, 0 if none, negative for a transport error>,"hb":<seconds since the last 2xx heartbeat, -1 if none>,"fw":"x.y.z","ota":"valid|pending|rolled_back"}`.
+  `e` and `d` are 0 outside Error. It never carries the key, masked or not.
+- **Link lifetime.** The device never drops the link. The client keeps it until 5 s after it saw
+  state 3 Connected, then disconnects.
+
+### 11.4 Improv Serial vendor commands (USB, all chips)
+
+- **Phases.** Current state (`0x02`), device info (`0x03`) and `0xF1` are answered in EVERY phase, so
+  a web flasher connecting to a working board recognises it (and offers Update, not erase). `0x01`
+  Wi-Fi settings and `0x04` scan are still answered only while the provisioning transport is up;
+  otherwise the reply is Improv error `0x04`. `0xF0` is accepted in any phase. `0x42` and every
+  other unassigned command, the rest of `0xF0`-`0xFF` included, stay "unknown command".
+- **`0xF0` FrySetMinerKey.** RPC data `[36][key]`. A length byte that disagrees with the data, or a
+  value that cannot be buffered, is Improv error `0x01`; a well-framed key of the wrong length or
+  shape is `bad_key`. Result strings: `["ok","FEM-AB…"]` | `["err","7","bad_key"]` |
+  `["err","8","key_locked"]` | `["err","8","store_failed"]`. It runs the same handler as BLE `09` and
+  the `/provision` key field. When it stores a DIFFERENT key on a board that is already Ready, the
+  board restarts about 0.3 s after the result so it registers under the new key; a client reopens
+  the port (native-USB boards re-enumerate) and asks `0xF1` again.
+- **`0xF1` FryGetStatus.** RPC data empty. Result strings, all decimal or plain text:
+  `["1", state, legacy, detail, keySet 0|1, keyMasked or "", fw, lastRegHttp, hbAgeS, ota, apCode or ""]`,
+  `"1"` being this layout's version. `apCode` is the ESP8266 setup-AP code while the board has no key,
+  `""` otherwise. `state` is the provisioning session state: 0 on a board that booted straight into
+  its network.
+- **Wi-Fi settings result.** The `0x01` success URL carries `#key=<key>` only when a key is stored,
+  and no fragment otherwise. A USER_SUPPLIED board without a key still joins over `0x01` (so a
+  flasher's Wi-Fi step succeeds), then reports Error 4/6 and registers nothing until `0xF0` gives
+  it a key. Recommended order for a new board: `0xF0`, then `0x01`, then `0xF1`.
+- **Golden vectors** (synthetic key `FEM-TESTKEY0000000000000000000000001`; shared with
+  `test/test_improv_vendor` and `test/flash/improv_fry.test.mjs`):
+
+```
+kFryReqSetKey            494d50524f56010327f0252446454d2d544553544b45593030303030303030303030303030303030303030303030303120
+kFryReqGetStatus         494d50524f56010302f100d4
+kFrySetKeyOk             494d50524f5601040ff00d026f6b0946454d2d5445e280a679
+kFrySetKeyBadKey         494d50524f56010410f00e036572720137076261645f6b65794a
+kFrySetKeyLocked         494d50524f56010413f0110365727201380a6b65795f6c6f636b65649f
+kFryStatusConnected      494d50524f5601042af128013101330130013001310946454d2d5445e280a605302e342e30033230320231320576616c696400d4
+kFryStatusKeyRequired    494d50524f56010429f127013101340134013601300005302e342e300130022d310770656e64696e6708414243443233343579
+```
+
+  `kFryStatusConnected` is state 3, key set and confirmed, reg 202, hb 12 s, fw 0.4.0, valid;
+  `kFryStatusKeyRequired` is Error 4/6, no key, reg 0, hb -1, pending, setup code `ABCD2345`.
+
+### 11.5 OTA v1.1
+
+- **Manifest additions** (section 6 shape unchanged): optional `"channel":"prod"|"test"`; a missing
+  channel reads as `prod`. Firmware 0.4+ ignores a manifest whose channel is not its own.
+- **Left-out chips.** `builds` may omit an environment on purpose. The prod manifest omits the envs
+  listed in `tools/ota_channels.json` (from 0.4.0: `esp32s3`, `esp8266`). A board whose
+  `FRY_BUILD_ENV` has no entry does not update, and never takes another chip's image; v0.3.1 and
+  0.3.3 behave the same (`test/test_legacy_manifest_select`). Their images are still published for
+  manual flashing.
+- **Version order** is SemVer 2.0 precedence: `0.4.1-rc.1` < `0.4.1`, and never downward.
+- **Test channel.** Prerelease tag `ota-test`,
+  `https://github.com/Fry-Networks/fry-firmware/releases/download/ota-test/manifest.json`, read only
+  by the `*_test` builds (`-DFRY_OTA_TEST_CHANNEL=1`), which also expect `"channel":"test"`.
+- **Image verification (ESP32 family).** A freshly installed image stays PENDING_VERIFY until the
+  first hardwareapi response of ANY HTTP status (registration, PoC or lease) - a 401 still proves
+  the network path, so it is never grounds for rollback. A crash or reboot before that makes the
+  bootloader boot the previous image; no response 20 minutes after boot (2 minutes on the test
+  channel) rolls back too. The previous image records the version as bad and never installs it
+  again; a later version is taken normally. No manifest check runs while the image is pending.
+  ESP8266 has one slot: nothing can be rolled back there.
+- **`ota` status value:** `pending` (unverified image running), `rolled_back` (the other slot holds
+  an image the bootloader rolled back from), else `valid`.
+
+### 11.6 ESP8266 SoftAP v1.1
+
+- **AP security follows the key.** Board WITHOUT a key (USER_SUPPLIED): WPA2 AP `FRY-SETUP-<MAC6>`
+  whose passphrase is an 8-character setup code from `ABCDEFGHJKLMNPQRSTUVWXYZ23456789`, generated
+  once and kept in `fry/apCode`. It is shown ONLY over USB: the serial line
+  `AP started FRY-SETUP-<MAC6> ip=192.168.4.1 wpa2 setup-code=<code> (no miner key yet)` and Improv
+  `0xF1`. Board WITH a key: the open AP of section 3.
+- `GET /info` adds `"proto":2,"caps":["key_write","error_reset","errs_v2"],"keySet":<bool>`, and
+  `"minerKey"` is masked (11.1).
+- `GET /status` is `{"status","err"(legacy),"detail","minerKey"(masked),"keySet","reg","hb","fw","ota","ip"}`.
+- `POST /provision` takes `ssid`, `pass`, `wallet` and an optional `key`:
+
+| Response | When |
+|---|---|
+| `200 {"ok":true,"status":2}` | committed; the join starts |
+| `400 {"ok":false,"err":"bad_ssid"\|"bad_wallet"\|"bad_key","status":n}` | invalid field |
+| `403 {"ok":false,"err":"key_needs_secure_ap"\|"key_locked","status":n}` | key refused by policy (11.1) |
+| `409 {"ok":false,"err":"busy","status":n}` | a join is already running or done |
+| `422 {"ok":false,"err":"key_required","status":n}` | USER_SUPPLIED board without a key and no `key` field |
+
+  Nothing is persisted on any non-200 answer. A request in Error starts a new attempt (11.2).
+- **After a failed join** the AP comes back and a new `/provision` is accepted.
+
+### 11.7 Serial log lines added in v1.1
+
+```
+FRY boot v<ver> chip=<CHIP> mac=<MAC> minerkey=NONE
+[identity] no miner key - waiting for the owner's FEM- key (web setup page over USB, app >= 0.4, or the setup AP)
+[identity] owner key stored via <usb|ble|softap> (FEM-AB…)
+[boot] wifi credentials stored but no miner key - staying provisionable
+[prov] refused: no miner key - set it with the web setup page (USB) or app>=0.4
+[prov] miner key changed - restarting to register with the new key
+api: register rejected http=<code> detail=<9-12> (<text>) server="<detail>" next=<s>s
+api: registration failed install=<id> http=<code> detail=13 (<text>) next=<s>s
+ota: image <v> is pending verification - valid on the first hardwareapi answer, rolled back after <s>s without one
+ota: image <v> marked valid (first hardwareapi answer: <register|poc|lease> http=<code>)
+ota: no hardwareapi answer <s>s after booting pending image <v> - rolling back
+ota: <v> was rolled back - running <v>, <v> will not be installed again
+ota: not updating - <wrong_channel|bad_version|no_build> (manifest channel=<c>, ours=<c>)
+AP started FRY-SETUP-<MAC6> ip=192.168.4.1 wpa2 setup-code=<code> (no miner key yet)
+AP restarted FRY-SETUP-<MAC6> after the failed join - /provision accepts a new attempt
+```
