@@ -226,7 +226,7 @@ class ServerCallbacks : public NimBLEServerCallbacks {
     (void)server;
     (void)connInfo;
     (void)reason;
-    clearStagedKey();  // advertising restarts on its own (NimBLE advertiseOnDisconnect)
+    clearStagedKey();  // advertising restarts on its own (advertiseOnDisconnect, set in init)
   }
 };
 
@@ -248,6 +248,9 @@ void init(const char* deviceName, const char* minerKey) {
 
   NimBLEServer* server = NimBLEDevice::createServer();
   server->setCallbacks(&s_serverCallbacks);
+  // NimBLE-Arduino 2.x leaves this off: without it the board stopped advertising after its first
+  // BLE session and could not be found again until it rebooted.
+  server->advertiseOnDisconnect(true);
   NimBLEService* service = server->createService(kServiceUuid);
 
   s_chSsid = service->createCharacteristic(kUuidSsid, NIMBLE_PROPERTY::WRITE);

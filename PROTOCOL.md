@@ -491,6 +491,9 @@ of 0.4.0 refused every write, and Android then waited on a MITM pairing the boar
   connected and loses the link that way connects once more; that session pairs anew.
 - **Boards on 0.4.0** cannot take a key over BLE; set it over USB (Improv `0xF0`, the web setup
   page) or update the board first. Nothing else in 0.4.0's BLE service is affected.
+- **Advertising after a disconnect.** The board advertises again after every BLE disconnect. 0.3.x
+  and 0.4.0 did not (NimBLE-Arduino 2.x leaves it off): after one BLE session, finished or not, a
+  board could not be found again until it rebooted.
 - **Serial line added:**
 
 ```

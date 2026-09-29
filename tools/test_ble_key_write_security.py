@@ -4,12 +4,13 @@
 #   python3 tools/test_ble_key_write_security.py                  # check src/esp32/ble_provisioning.cpp
 #   python3 tools/test_ble_key_write_security.py <path-to-a-copy> # check a specific copy
 #
-# NimBLE glue cannot run on the host, so this pins the three facts the key write depends on:
+# NimBLE glue cannot run on the host, so this pins the facts BLE provisioning depends on:
 #   - 09 is a plain WRITE. In Secure Connections Only mode NimBLE answers every attribute that
 #     needs security with "insufficient authentication" unless the link is AUTHENTICATED (MITM);
 #     Just Works never is, so a WRITE_ENC 09 could not be written at all (fw 0.4.0).
 #   - the 09 handler refuses the key unless the link is encrypted, before copying it anywhere;
 #   - Secure Connections Only stays on, so an encrypted link is always an LE Secure Connections one.
+#   - the board advertises again after every disconnect (NimBLE-Arduino 2.x does not by default).
 #
 # Exit 0 = all pass, 1 = a failure.
 import os
@@ -59,6 +60,11 @@ check("... before the key is copied", enc is not None and copy != -1 and enc.sta
 
 check("Secure Connections Only stays on", re.search(r"ble_hs_cfg\.sm_sc_only\s*=\s*1\s*;", code) is not None)
 check("Secure Connections is requested", re.search(r"setSecurityAuth\([^)]*true\s*\)", code) is not None)
+
+# NimBLE-Arduino 2.x does not advertise again after a disconnect unless told to (its default is
+# off): without this a board was undiscoverable after any BLE session until it rebooted.
+check("advertising restarts after every disconnect",
+      re.search(r"server->advertiseOnDisconnect\(\s*true\s*\)\s*;", code) is not None)
 
 # Positive control: the checks above must fail on the 0.4.0 shape (09 WRITE_ENC, no refusal).
 bad = code.replace(props, " NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_ENC") if props else code
