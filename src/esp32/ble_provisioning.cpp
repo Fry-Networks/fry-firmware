@@ -2,6 +2,11 @@
 #include "../core/provisioning_transport.h"
 
 #include <NimBLEDevice.h>
+#ifdef USING_NIMBLE_ARDUINO_HEADERS
+#include "nimble/nimble/host/include/host/ble_hs.h"  // ble_hs_cfg.sm_sc_only
+#else
+#include "host/ble_hs.h"
+#endif
 
 #include <cstring>
 
@@ -74,6 +79,22 @@ void updateStatusChar() {
   }
 }
 
+// Round 2 F5: a key staged by one central must never be committed by the next (a stranger stages
+// a key, disconnects, and the owner's proto-1 app then commits Wi-Fi + wallet with it).
+void clearStagedKey() { memset(s_pendingKey, 0, sizeof(s_pendingKey)); }
+
+// Round 2 F7: a board running in an API-side Error is not re-provisioned over an unencrypted link
+// (the 0.3.x rule). Logged once per session so a noisy central cannot flood the serial line.
+bool s_loggedUntrusted = false;
+bool dropUntrusted(const NimBLEConnInfo& connInfo) {
+  if (connInfo.isEncrypted() || s_fsm.acceptsUntrustedWrites()) return false;
+  if (!s_loggedUntrusted) {
+    s_loggedUntrusted = true;
+    Serial.println("[prov] ignored: unencrypted write while running - pair (write the key) first");
+  }
+  return true;
+}
+
 void rejectKey(fry::KeyWriteVerdict verdict) {
   fry::ProvInputs in;
   in.detail = fry::keyVerdictProvErr(verdict);
@@ -106,7 +127,9 @@ class ProvCallbacks : public NimBLECharacteristicCallbacks {
   }
 
   void onWrite(NimBLECharacteristic* ch, NimBLEConnInfo& connInfo) override {
-    (void)connInfo;
+    if ((ch == s_chSsid || ch == s_chPass || ch == s_chWallet) && dropUntrusted(connInfo)) {
+      return;  // not even copied: a later trusted commit must not pick it up
+    }
     if (ch == s_chKeyWrite) {
       char key[40] = {0};
       size_t rawLen = 0;
@@ -134,6 +157,7 @@ class ProvCallbacks : public NimBLECharacteristicCallbacks {
       copyAttrValue(ch, s_pendingSsid, sizeof(s_pendingSsid), &rawLen);
       fry::ProvInputs in;
       in.ssidValid = (rawLen >= 1 && rawLen <= 32);
+      in.linkTrusted = connInfo.isEncrypted();
       s_fsm.feed(fry::ProvEvent::SsidWritten, in);
       updateStatusChar();
     } else if (ch == s_chPass) {
@@ -184,18 +208,40 @@ class ProvCallbacks : public NimBLECharacteristicCallbacks {
 
 ProvCallbacks s_callbacks;
 
+class ServerCallbacks : public NimBLEServerCallbacks {
+ public:
+  void onConnect(NimBLEServer* server, NimBLEConnInfo& connInfo) override {
+    (void)server;
+    (void)connInfo;
+    clearStagedKey();
+    s_loggedUntrusted = false;
+  }
+  void onDisconnect(NimBLEServer* server, NimBLEConnInfo& connInfo, int reason) override {
+    (void)server;
+    (void)connInfo;
+    (void)reason;
+    clearStagedKey();  // advertising restarts on its own (NimBLE advertiseOnDisconnect)
+  }
+};
+
+ServerCallbacks s_serverCallbacks;
+
 }  // namespace
 
 void init(const char* deviceName, const char* minerKey) {
   NimBLEDevice::init(deviceName);
   NimBLEDevice::setMTU(185);  // PROTOCOL.md section 1: the central requests MTU 185
-  // PROTOCOL.md section 11.3: 05 (read) and 09 (write) need an encrypted link - LE Secure
+  // PROTOCOL.md sections 11.3/11.8: the key write (09) needs an encrypted link - LE Secure
   // Connections, Just Works, no bonding. Nothing else on the service requires it, so an app that
-  // never touches those two characteristics is never asked to pair.
+  // never writes a key is never asked to pair.
   NimBLEDevice::setSecurityAuth(/*bonding=*/false, /*mitm=*/false, /*sc=*/true);
   NimBLEDevice::setSecurityIOCap(BLE_HS_IO_NO_INPUT_OUTPUT);
+  // sc=true only PREFERS Secure Connections; a central proposing legacy Just Works (TK = 0) would
+  // otherwise get a passively decryptable link. Refuse legacy pairing outright (round 2 F5).
+  ble_hs_cfg.sm_sc_only = 1;
 
   NimBLEServer* server = NimBLEDevice::createServer();
+  server->setCallbacks(&s_serverCallbacks);
   NimBLEService* service = server->createService(kServiceUuid);
 
   s_chSsid = service->createCharacteristic(kUuidSsid, NIMBLE_PROPERTY::WRITE);
@@ -211,8 +257,10 @@ void init(const char* deviceName, const char* minerKey) {
   NimBLECharacteristic* chName = service->createCharacteristic(kUuidDeviceName, NIMBLE_PROPERTY::READ);
   chName->setValue(deviceName);
 
-  s_chKey = service->createCharacteristic(kUuidMinerKey,
-                                         NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::READ_ENC);
+  // Round 2 F6 (PROTOCOL.md 11.8): plain READ with the full key, as in v1, so app 0.3.x - which
+  // reads 05 first with a 5 s timeout - is never stopped by a pairing prompt. The key WRITE (09)
+  // stays encrypted.
+  s_chKey = service->createCharacteristic(kUuidMinerKey, NIMBLE_PROPERTY::READ);
   s_chKey->setValue(minerKey ? minerKey : "");  // "" without a key; refreshed on every read
   s_chKey->setCallbacks(&s_callbacks);
 

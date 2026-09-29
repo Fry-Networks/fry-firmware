@@ -166,6 +166,12 @@ void handleProvision() {
     sendProvisionError(409, "busy");
     return;
   }
+  // Round 2 F7: a board that joined this boot and only failed on the API side is not
+  // re-provisioned over the OPEN AP (the 0.3.x rule); the WPA2 setup AP stays trusted.
+  if (!s_apSecure && !s_fsm.acceptsUntrustedWrites()) {
+    sendProvisionError(409, "busy");
+    return;
+  }
 
   String ssid = s_server.arg("ssid");
   String pass = s_server.arg("pass");
@@ -174,6 +180,7 @@ void handleProvision() {
 
   fry::ProvInputs ssidIn;
   ssidIn.ssidValid = (ssid.length() >= 1 && ssid.length() <= 32);
+  ssidIn.linkTrusted = s_apSecure;
   s_fsm.feed(fry::ProvEvent::SsidWritten, ssidIn);
   if (!ssidIn.ssidValid) {
     sendProvisionError(400, "bad_ssid");
