@@ -69,31 +69,50 @@ believes the loop is stopped.
 that is a 1–2 min cycle with a slot erase each time), a hardwareapi outage is rolling the fleet
 back, or anything else that needs "nobody installs anything now".
 
+Rehearsed live on Fry-Networks/fry-firmware (2026-09-29 02:18Z): with `--latest`, the API's
+`releases/latest` became the hold **immediately**, and `latest/download/manifest.json` served the
+hold's bytes (sha `01f0bd98…`) at once — even with `--target` pointing at an *older* commit, so
+the commit date does not matter when `--latest` is given. A hold therefore reaches boards within
+about 1–2 min (a board's next check).
+
 ```sh
 HOLD=fw-hold-$(date -u +%Y%m%dT%H%M%SZ)
-gh release create "$HOLD" tools/fw-hold/manifest.json --repo $REPO --latest --title fw-hold \
+# --target: any commit, an older one is fine (the rehearsal used one); --latest is what makes it latest.
+gh release create "$HOLD" tools/fw-hold/manifest.json --repo $REPO --target <any commit> --latest \
+  --title fw-hold \
   --notes "Kill switch: an empty manifest so no board updates. See docs/RELEASE-RUNBOOK.md section 2."
 # verify - all three must hold before you tell anyone the loop is stopped
-latest_tag                          # == $HOLD
+latest_tag                          # == $HOLD (immediate)
 latest_manifest_location            # under releases/download/$HOLD/
-latest_manifest_sha                 # == 01f0bd98846e33c25d15d739215e385dccd7ba70df5bbdcdc690044b0099bedc
+latest_manifest_sha                 # == 01f0bd98846e33c25d15d739215e385dccd7ba70df5bbdcdc690044b0099bedc (immediate)
 ```
-The tag is created on the checked-out commit; any commit will do (`fw-hold-*` matches neither
-`fw-v*` nor `v*`, so no workflow fires). Do **not** use `--prerelease` (a prerelease is never
-latest). Do **not** delete or un-publish fw-v0.4.0 instead: latest would fall back to the v0.3.1
-release, whose manifest lists esp32s3 and esp8266 and whose images mint IOT- keys.
+`fw-hold-*` matches no workflow trigger (build.yml `v*`, release-fw.yml `fw-v*`), so nothing
+builds or publishes on its own. Do **not** use `--prerelease` (a prerelease is never latest). Do
+**not** delete or un-publish fw-v0.4.0 instead: latest would fall back to the v0.3.1 release,
+whose manifest lists esp32s3 and esp8266 and whose images mint IOT- keys.
 
 Effect on boards: a 0.3.x board stops at its next check (about 30 s after the reboot that follows
 a rollback, otherwise within 6 h); a 0.4.x board sees `not_newer`. Strikes: `0.0.0` is "a
 different latest", so 0.4.x boards **clear** the strikes they held (section 4).
 
-### Lifting the hold — publish the fix first, delete the hold last
+### Lifting the hold — publish the fix first, delete the hold last, then wait ~2 min
 
 Deleting the hold while it is latest makes latest fall back to fw-v0.4.0 and the loop resumes.
-1. Publish the fixed release per section 1 with `--latest` and verify `latest_tag` prints
-   **fw-vX.Y.Z** (not the hold) and the manifest sha matches the new asset.
-2. Only then remove the hold (housekeeping; it is no longer latest):
-   `gh release delete "$HOLD" --repo $REPO --yes --cleanup-tag`, and re-run `latest_tag` once more.
+Rehearsed: `gh release delete … --cleanup-tag` flipped the API's latest back **at once**, but the
+`latest/download/…` **redirect stayed cached on the deleted release for ~70 s**, so boards that
+checked in that window got a 404 = no update (harmless). Allow ~2 min before counting boards.
+
+```sh
+# 1. the fix, per section 1, made latest explicitly - and proven before the hold is touched
+gh release edit fw-vX.Y.Z --repo $REPO --draft=false --latest
+latest_tag                          # == fw-vX.Y.Z, NOT the hold
+latest_manifest_sha                 # == sha256sum of the fw-vX.Y.Z manifest.json asset
+# 2. only then the hold (housekeeping: it is no longer latest)
+gh release delete "$HOLD" --repo $REPO --cleanup-tag -y
+latest_tag                          # still fw-vX.Y.Z (immediate)
+sleep 120; latest_manifest_location # under releases/download/fw-vX.Y.Z/ once the ~70 s redirect cache has expired
+latest_manifest_sha                 # == the fw-vX.Y.Z manifest sha; a 404 inside the first ~70 s is the cache, retry
+```
 
 ## 3. A3 revert (branch `iv1/fw-revert-a3`, version 0.4.90) and the ≥ 0.4.91 rule
 
