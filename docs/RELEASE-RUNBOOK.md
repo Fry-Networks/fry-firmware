@@ -16,7 +16,8 @@ REPO=Fry-Networks/fry-firmware
 LATEST_URL=https://github.com/$REPO/releases/latest/download/manifest.json
 latest_tag() { gh api "repos/$REPO/releases/latest" --jq .tag_name; }
 latest_manifest_sha() { curl -sL "$LATEST_URL" | sha256sum | cut -d' ' -f1; }
-latest_manifest_location() { curl -sIL "$LATEST_URL" | grep -i '^location:' | tail -1; }
+# the FIRST redirect (no -L): it must point under releases/download/<tag>/ of the release you expect
+latest_manifest_location() { curl -sI "$LATEST_URL" | grep -i '^location:' | head -1; }
 ```
 
 ## 1. Publish fw-v0.4.x (draft → canary → publish with --latest)
@@ -33,7 +34,8 @@ latest_manifest_location() { curl -sIL "$LATEST_URL" | grep -i '^location:' | ta
    `manifest.json` (`builds` = esp32, esp32c3 only; `channel: prod`). A draft never resolves at
    `releases/latest`, so nothing has shipped yet. ESP32-S3 and ESP8266 are held: not built, not
    attached, not in the manifest (`tools/ota_channels.json`).
-3. **Canary.** From the same commit: `gh workflow run test-channel.yml --ref <commit> -f fault=0`
+3. **Canary.** From the tag (`--ref` takes a branch or tag, not a SHA; the dispatch only works once
+   test-channel.yml is on the default branch): `gh workflow run test-channel.yml --repo $REPO --ref fw-vX.Y.Z -f fault=0`
    (the `ota-test` prerelease must exist and stay a prerelease; the job refuses if
    `releases/latest` is `ota-test`). Bench boards run the `*_test` images and read only `ota-test`.
    Run the canary journeys (a fresh flash, an OTA from 0.3.x, a rollback with `fault=1`/`2`/`3`).
@@ -154,10 +156,13 @@ move to 0.4.x while ESP32-S3 and ESP8266 keep their 0.3.3 parts under `docs/flas
 `flasher-assets` job only runs on the *next* `fw-v*` tag), so gate it locally and paste the output
 into the commit message.
 
-1. Build the tagged commit locally (`pio run -e esp32 -e esp32c3`, token unset) and confirm each
-   `.pio/build/<env>/firmware.bin` sha256 equals the published `firmware-<env>.bin` asset (the
-   builds are reproducible; a mismatch means you are not on the tagged commit).
-2. Lay the outputs out as the release job does (`manifest_input/<env>/firmware.bin`, `bootloader.bin`,
+1. Take the **published** `firmware-<env>.bin` assets (`gh release download fw-vX.Y.Z --repo $REPO -p 'firmware-*.bin'`)
+   and confirm each sha256 equals the `builds.<env>.sha256` in the release's `manifest.json` — the asset
+   plus the manifest is what boards install, so that is the comparison. Build the tagged commit locally
+   (`pio run -e esp32 -e esp32c3`, token unset) only for the `bootloader.bin` / `partitions.bin` parts the
+   flasher needs. Same-machine rebuilds were byte-identical in the release evidence, but a CI build may
+   differ from a local one, so do not gate on a local `firmware.bin` matching the asset.
+2. Lay them out as the release job does (the published asset as `manifest_input/<env>/firmware.bin`, the local `bootloader.bin`,
    `partitions.bin`) and write the flasher manifests, carrying the held chips over unchanged:
    ```sh
    python3 tools/make_manifest.py --version X.Y.Z --channel prod --envs esp32,esp32c3 \
