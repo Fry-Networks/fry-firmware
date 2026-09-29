@@ -1,0 +1,43 @@
+{
+  "name": "Fry Firmware",
+  "version": "0.3.3",
+  "new_install_prompt_erase": true,
+  "new_install_improv_wait_time": 20,
+  "builds": [
+    {
+      "chipFamily": "ESP8266",
+      "parts": [
+        {
+          "path": "fw/hold/firmware-esp8266.bin",
+          "offset": 0,
+          "sha256": "3f0c56c910bc16bd00ee6c08f6da3ed595b4d3ebe2e6cd7359bfb34aafe8f123"
+        }
+      ]
+    },
+    {
+      "chipFamily": "ESP32-S3",
+      "parts": [
+        {
+          "path": "fw/hold/bootloader-esp32s3.bin",
+          "offset": 0,
+          "sha256": "e01a2300de23c8d601e9f2a37684b5dbc83ae37132d5a8833e23520afd895f92"
+        },
+        {
+          "path": "fw/hold/partitions-esp32s3.bin",
+          "offset": 32768,
+          "sha256": "0a8b5720e7b77ff11f1462458c3a509dee79224e5279898f26d6a2e3ae0517b7"
+        },
+        {
+          "path": "fw/hold/boot_app0-esp32s3.bin",
+          "offset": 57344,
+          "sha256": "f94c5d786a7a8fab06ac5d10e33bf37711a6697636dc037559ea19cc410a17f0"
+        },
+        {
+          "path": "fw/hold/firmware-esp32s3.bin",
+          "offset": 65536,
+          "sha256": "a261156246f790e3bcd2a8133c7c72aa7cb3c0f267112a3b8511d8f41945cc83"
+        }
+      ]
+    }
+  ]
+}

@@ -181,6 +181,17 @@
     <span slot="not-allowed" class="unsupported-msg">Flashing needs a secure context — open this page over HTTPS.</span>
   </esp-web-install-button>
 
+  <!-- Firmware 0.4 is held back for ESP32-S3 and ESP8266 until a real board of each has passed.
+       Their 0.3.3 parts live in fw/hold/ with their own manifest (manifest-hold.json), which no
+       release tooling ever rewrites; manifest.json above lists the same parts for those chips. -->
+  <p class="note"><strong>ESP32-S3 or ESP8266?</strong> Firmware 0.4 is not out for these chips
+  yet. This button always installs their last release, 0.3.3.</p>
+  <esp-web-install-button manifest="manifest-hold.json">
+    <button slot="activate" class="primary-btn" type="button">Connect &amp; Flash 0.3.3 (ESP32-S3 / ESP8266)</button>
+    <span slot="unsupported" class="unsupported-msg">Web Serial requires Chrome or Edge on desktop</span>
+    <span slot="not-allowed" class="unsupported-msg">Flashing needs a secure context — open this page over HTTPS.</span>
+  </esp-web-install-button>
+
   <p class="note">No Android? After flashing choose <strong>Connect to Wi-Fi</strong>, then
   <strong>Visit Device</strong> to register your miner key.</p>
 
