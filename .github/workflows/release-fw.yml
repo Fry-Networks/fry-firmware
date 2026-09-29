@@ -4,10 +4,14 @@ name: release-fw
 # file fires for them, nor they for these.
 #
 # Every image is built with NO bootstrap token in its environment, and tools/check_no_token.py
-# fails the job if one got compiled in anyway. The OTA manifest leaves out the envs listed in
-# tools/ota_channels.json (their images are still attached for manual flashing). The result is a
-# DRAFT release: field boards follow releases/latest, which never points at a draft, so nothing
-# ships until a person publishes it after the canary.
+# fails the job if one got compiled in anyway. The result is a DRAFT release: field boards follow
+# releases/latest, which never points at a draft, so nothing ships until a person publishes it
+# after the canary.
+#
+# Round 2 (R5): this release holds ESP32-S3 and ESP8266 back ENTIRELY - they are not built, not
+# attached and not in the manifest; the Pages flasher keeps serving their 0.3.3 parts from
+# docs/flash/fw/hold/. The flasher moves ESP32/ESP32-C3 to the new version only after the canary,
+# so the tagged commit's flasher is checked for consistency and for the hold, not for the version.
 
 on:
   push:
@@ -22,7 +26,7 @@ jobs:
     strategy:
       fail-fast: true
       matrix:
-        env: [esp8266, esp32, esp32s3, esp32c3]
+        env: [esp32, esp32c3]
     steps:
       - uses: actions/checkout@v4
 
@@ -38,6 +42,9 @@ jobs:
 
       - name: No token compiled in
         run: python3 tools/check_no_token.py
+
+      - name: Prod image does not carry the test OTA channel
+        run: python3 tools/check_prod_channel.py ".pio/build/${{ matrix.env }}/firmware.bin"
 
       - name: Name the artifact
         run: |
@@ -70,6 +77,26 @@ jobs:
             firmware-${{ matrix.env }}-factory.bin
           if-no-files-found: error
 
+  # Positive control for the channel guard above: the same check MUST catch a *_test build, or a
+  # clean result on the prod images proves nothing.
+  channel-guard-control:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install PlatformIO
+        run: pip install platformio==6.2.0
+
+      - name: Build esp32_test (token-free)
+        run: pio run -e esp32_test
+
+      - name: The guard catches a test-channel image
+        run: python3 tools/check_prod_channel.py --expect-test .pio/build/esp32_test/firmware.bin
+
   test-native:
     runs-on: ubuntu-latest
     steps:
@@ -89,7 +116,9 @@ jobs:
         run: |
           set -eu
           python3 tools/test_make_manifest_exclude.py
+          python3 tools/test_make_manifest_envs.py
           python3 tools/test_check_no_token.py
+          python3 tools/test_check_prod_channel.py
 
   flasher-assets:
     runs-on: ubuntu-latest
@@ -100,11 +129,30 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Flasher assets match the tag
-        run: python3 tools/check_flasher_assets.py --expect-version "${GITHUB_REF_NAME#fw-}"
+      - name: Flasher assets are consistent and the held chips stay on their held parts
+        run: |
+          set -eu
+          served=$(python3 -c "import json; print(json.load(open('docs/flash/manifest.json'))['version'])")
+          python3 tools/check_flasher_assets.py --expect-version "$served"
+          python3 - <<'EOF'
+          import hashlib, json, os
+          main = json.load(open("docs/flash/manifest.json"))
+          hold = json.load(open("docs/flash/manifest-hold.json"))
+          held = {b["chipFamily"]: b["parts"] for b in hold["builds"]}
+          assert sorted(held) == ["ESP32-S3", "ESP8266"], sorted(held)
+          for b in main["builds"]:
+              if b["chipFamily"] in held:
+                  assert b["parts"] == held[b["chipFamily"]], b["chipFamily"]
+          for parts in held.values():
+              for p in parts:
+                  assert p["path"].startswith("fw/hold/"), p["path"]
+                  data = open(os.path.join("docs/flash", p["path"]), "rb").read()
+                  assert hashlib.sha256(data).hexdigest() == p["sha256"], p["path"]
+          print("held:", sorted(held), "at", hold["version"], "- served:", main["version"])
+          EOF
 
   release:
-    needs: [build, test-native, flasher-assets]
+    needs: [build, channel-guard-control, test-native, flasher-assets]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -131,7 +179,7 @@ jobs:
         run: |
           set -eu
           mkdir -p release
-          for env in esp8266 esp32 esp32s3 esp32c3; do
+          for env in esp32 esp32c3; do
             mkdir -p "manifest_input/$env"
             cp "artifacts/fw-$env/firmware-$env.bin" "release/firmware-$env.bin"
             cp "artifacts/fw-$env/firmware-$env.bin" "manifest_input/$env/firmware.bin"
@@ -147,29 +195,29 @@ jobs:
         run: |
           set -eu
           python3 tools/make_manifest.py --version "${GITHUB_REF_NAME#fw-v}" --channel prod \
-            --release-base "https://github.com/${{ github.repository }}/releases/download/${GITHUB_REF_NAME}" \
+            --envs esp32,esp32c3 --release-base "https://github.com/${{ github.repository }}/releases/download/${GITHUB_REF_NAME}" \
             --build-dir manifest_input --out ota/manifest.json --dist release
           python3 - <<'EOF'
           import json
           m = json.load(open("ota/manifest.json"))
           cfg = json.load(open("tools/ota_channels.json"))
           excluded = set(cfg["channels"]["prod"]["exclude_from_builds"])
-          want = {"esp8266", "esp32", "esp32s3", "esp32c3"} - excluded
+          want = {"esp32", "esp32c3"} - excluded  # R5: the held chips are not even built
           assert m["channel"] == "prod", m
           assert set(m["builds"]) == want, (sorted(m["builds"]), sorted(want))
           print("manifest builds:", sorted(m["builds"]), "excluded:", sorted(excluded))
           EOF
 
       - name: Create the DRAFT GitHub release
-        uses: softprops/action-gh-release@v2
+        # Pinned to the commit behind the v2 tag at review time (round 2 R1): this job holds
+        # contents:write and the OTA trusts the release assets alone, so a moved tag must not be able
+        # to swap in a different uploader.
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65  # v2
         with:
           draft: true
           files: |
-            release/firmware-esp8266.bin
             release/firmware-esp32.bin
-            release/firmware-esp32s3.bin
             release/firmware-esp32c3.bin
             release/firmware-esp32-factory.bin
-            release/firmware-esp32s3-factory.bin
             release/firmware-esp32c3-factory.bin
             ota/manifest.json

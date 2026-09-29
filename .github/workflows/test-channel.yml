@@ -33,13 +33,28 @@ jobs:
             exit 1
           fi
 
+      # Round 2 (R3): fielded v0.3.x boards read releases/latest with no channel check. If that ever
+      # resolved to ota-test, every one of them would install test (possibly fault) images.
+      - name: releases/latest must not be ota-test
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          latest=$(gh api "repos/${{ github.repository }}/releases/latest" --jq .tag_name)
+          if [ "$latest" = "ota-test" ]; then
+            echo "::error::releases/latest resolves to ota-test - refusing to publish"
+            exit 1
+          fi
+          echo "releases/latest is $latest"
+
   build:
     needs: guard
     runs-on: ubuntu-latest
     strategy:
       fail-fast: true
       matrix:
-        env: [esp8266_test, esp32_test, esp32s3_test, esp32c3_test]
+        # Round 2 (R5): ESP32-S3 and ESP8266 0.4 are held back entirely, test channel included.
+        env: [esp32_test, esp32c3_test]
     steps:
       - uses: actions/checkout@v4
 
@@ -55,8 +70,7 @@ jobs:
           FAULT: ${{ inputs.fault }}
         run: |
           set -eu
-          # ESP8266 has one slot and cannot roll a fault back; tools/fry_prebuild.py refuses it there.
-          if [ "$FAULT" != "0" ] && [ "${{ matrix.env }}" != "esp8266_test" ]; then
+          if [ "$FAULT" != "0" ]; then
             export FRY_TEST_FAULT="$FAULT"
           fi
           pio run -e ${{ matrix.env }}
@@ -99,11 +113,12 @@ jobs:
           set -eu
           VERSION=$(python3 -c "import re; print(re.search(r\"FRY_FIRMWARE_VERSION='\\\"([^\\\"]+)\\\"'\", open('platformio.ini').read()).group(1))")
           mkdir -p release
-          for env in esp8266 esp32 esp32s3 esp32c3; do
+          for env in esp32 esp32c3; do
             mkdir -p "manifest_input/$env"
             cp "artifacts/fwtest-${env}_test/firmware-$env.bin" "manifest_input/$env/firmware.bin"
           done
           python3 tools/make_manifest.py --version "$VERSION" --channel test --no-factory \
+            --envs esp32,esp32c3 \
             --release-base "https://github.com/${{ github.repository }}/releases/download/ota-test" \
             --build-dir manifest_input --out ota/manifest.json --dist release
           cat ota/manifest.json
@@ -119,5 +134,4 @@ jobs:
             exit 1
           fi
           gh release upload ota-test --repo "${{ github.repository }}" --clobber \
-            release/firmware-esp8266.bin release/firmware-esp32.bin \
-            release/firmware-esp32s3.bin release/firmware-esp32c3.bin ota/manifest.json
+            release/firmware-esp32.bin release/firmware-esp32c3.bin ota/manifest.json
