@@ -251,10 +251,13 @@ def copy_file(src, dst):
     return dst
 
 
-def write_ewt_manifest(envs, version, build_dir, dist, asset_base, boot_app0, out_path):
+def write_ewt_manifest(envs, version, build_dir, dist, asset_base, boot_app0, out_path,
+                       merge_from=None):
     """Writes the ESP Web Tools manifest, copying each part into `dist` next to the images.
 
-    Parts, deliberately, not the merged factory image - see the module docstring.
+    Parts, deliberately, not the merged factory image - see the module docstring. `merge_from`
+    (round 2, R5): an existing EWT manifest whose builds for chip families NOT built here are
+    carried over unchanged - how held chips keep their previous parts in the one flasher manifest.
     """
     builds = []
     for env in envs:
@@ -291,6 +294,16 @@ def write_ewt_manifest(envs, version, build_dir, dist, asset_base, boot_app0, ou
                 "sha256": sha256_of(path),
             } for offset, path in parts],
         })
+
+    if merge_from:
+        with open(merge_from, encoding="utf-8") as f:
+            held = json.load(f)
+        have = {b["chipFamily"] for b in builds}
+        for build in held.get("builds", []):
+            if build.get("chipFamily") not in have:
+                builds.append(build)
+                print("make_manifest: %s carried over unchanged from %s"
+                      % (build.get("chipFamily"), merge_from))
 
     manifest = {
         "name": IMPROV_FIRMWARE_NAME,
@@ -338,11 +351,22 @@ def main():
                     help="exclusion config (default: tools/ota_channels.json)")
     ap.add_argument("--no-exclusions", action="store_true",
                     help="keep every env in builds{} (download lists such as the Pages flasher's)")
+    ap.add_argument("--envs", default=None,
+                    help="comma-separated subset of envs to build the manifest from (round 2: a "
+                         "release that holds some chips back, e.g. esp32,esp32c3)")
+    ap.add_argument("--ewt-merge", default=None,
+                    help="with --ewt-out: carry over this EWT manifest's builds for chip families "
+                         "not built here (held chips keep their previous parts)")
     a = ap.parse_args()
 
-    envs = (a.only,) if a.only else ENVS
-    if a.only and a.only not in ENVS:
-        raise SystemExit("make_manifest: unknown env %s" % a.only)
+    if a.only and a.envs:
+        raise SystemExit("make_manifest: --only and --envs are mutually exclusive")
+    envs = (a.only,) if a.only else (tuple(a.envs.split(",")) if a.envs else ENVS)
+    for env in envs:
+        if env not in ENVS:
+            raise SystemExit("make_manifest: unknown env %s" % env)
+    if a.ewt_merge and not a.ewt_out:
+        raise SystemExit("make_manifest: --ewt-merge needs --ewt-out")
 
     dist = a.dist or (os.path.dirname(a.out) or ".")
     os.makedirs(dist, exist_ok=True)
@@ -399,7 +423,7 @@ def main():
             # right bytes at the right offset, and it is cheap. Refuse rather than skip it quietly.
             raise SystemExit("make_manifest: --ewt-out needs the factory images (drop --no-factory)")
         write_ewt_manifest(envs, a.version, a.build_dir, dist, a.ewt_asset_base, a.boot_app0,
-                           a.ewt_out)
+                           a.ewt_out, a.ewt_merge)
 
     # Applied last, to the OTA manifest only: the images above were still built, merged and copied.
     if not a.no_exclusions:
