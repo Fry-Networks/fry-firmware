@@ -62,6 +62,11 @@ struct ProvInputs {
   // v1.1. The specific cause carried by ApiFail (Reg401..Unreachable) and KeyRejected (BadKey,
   // KeyLocked). None keeps the generic code.
   ProvErr detail = ProvErr::None;
+  // Round 2 (PROTOCOL.md 11.8). False for a write that arrived over an UNENCRYPTED BLE link or the
+  // OPEN ESP8266 AP. Such a write cannot re-provision a board that is running (Wi-Fi joined this
+  // boot) and only in an API-side Error; see acceptsUntrustedWrites(). USB, an encrypted BLE link
+  // and the WPA2 setup AP are trusted, and so is every caller that does not say otherwise.
+  bool linkTrusted = true;
 };
 
 // The error byte a pre-v1.1 client understands: 0-5 unchanged, 6 and up reported as 4.
@@ -84,7 +89,14 @@ class ProvisioningFsm {
   // True exactly while state() == Connecting — the caller's cue to start the WiFi join.
   bool readyToConnect() const { return _state == ProvState::Connecting; }
 
+  // False while the board is in Error with Wi-Fi joined this boot and only the API side failed
+  // (4, 6, 9-13, or a key refusal raised after the join): the 0.3.x rule that such a board is not
+  // re-provisioned by a stranger in radio range. Transports drop untrusted writes while it holds;
+  // Wi-Fi-class errors still accept them, so a failed join never needs a reboot.
+  bool acceptsUntrustedWrites() const { return !runningError(); }
+
  private:
+  bool runningError() const;
   ProvState _state = ProvState::Idle;
   ProvErr _err = ProvErr::None;
   bool _wifiUp = false;

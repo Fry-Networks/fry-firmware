@@ -13,7 +13,15 @@ bool isApiClassErr(ProvErr e) {
 
 ProvErr keyDetail(ProvErr e) { return e == ProvErr::KeyLocked ? ProvErr::KeyLocked : ProvErr::BadKey; }
 
+bool isKeyErr(ProvErr e) { return e == ProvErr::BadKey || e == ProvErr::KeyLocked; }
+
 }  // namespace
+
+bool ProvisioningFsm::runningError() const {
+  // A key refusal can only coexist with the Wi-Fi latch when it was raised after the join (every
+  // path back to Provisioning clears the latch), so it belongs to the running case as well.
+  return _state == ProvState::Error && _wifiUp && (isApiClassErr(_err) || isKeyErr(_err));
+}
 
 uint8_t legacyProvErr(ProvErr e) {
   const uint8_t v = static_cast<uint8_t>(e);
@@ -39,7 +47,9 @@ bool ProvisioningFsm::feed(ProvEvent ev, const ProvInputs& in) {
 
   // v1.1 error_reset: an SSID write in Error starts a fresh attempt, exactly as it would from
   // Idle. Before this the only way out of Error was a reboot.
-  if (_state == ProvState::Error && ev == ProvEvent::SsidWritten) {
+  // Round 2: not from an untrusted link while the board is running (acceptsUntrustedWrites()).
+  if (_state == ProvState::Error && ev == ProvEvent::SsidWritten &&
+      (in.linkTrusted || !runningError())) {
     _state = ProvState::Idle;
     _err = ProvErr::None;
     _wifiUp = false;
@@ -125,7 +135,8 @@ bool ProvisioningFsm::feed(ProvEvent ev, const ProvInputs& in) {
     case ProvState::Error:
       // v1.1: Wi-Fi is up and only the API side failed. Registration keeps retrying on its own
       // schedule, so its later success (or a different failure) must reach the status too.
-      if (_wifiUp && isApiClassErr(_err)) {
+      // A key refusal raised meanwhile (round 2) does not take that away: runningError().
+      if (runningError()) {
         if (ev == ProvEvent::ApiOk) {
           _state = ProvState::Connected;
           _err = ProvErr::None;
