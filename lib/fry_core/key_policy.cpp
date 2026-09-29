@@ -33,6 +33,15 @@ BootKeyAction decideBootKey(KeyModel model, bool present, const char* stored) {
   return model == KeyModel::DeviceKeeps ? BootKeyAction::Mint : BootKeyAction::Wait;
 }
 
+BootKeyAction decideBootKey(KeyModel model, bool present, const char* stored, bool saltPresent,
+                            bool keySrcUser) {
+  const BootKeyAction action = decideBootKey(model, present, stored);
+  if ((action == BootKeyAction::Wait || action == BootKeyAction::Mint) && saltPresent && !keySrcUser) {
+    return BootKeyAction::Recover;
+  }
+  return action;
+}
+
 bool keyAllowsJoin(KeyModel model, bool hasKey) {
   return model == KeyModel::DeviceKeeps || hasKey;
 }

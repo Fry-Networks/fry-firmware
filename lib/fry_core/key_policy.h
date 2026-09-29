@@ -39,11 +39,19 @@ enum class BootKeyAction : uint8_t {
   MigrateLegacy,  // IOT-<hex> -> FEM-<same hex>, then keep
   Mint,           // DEVICE_KEEPS only: generate and persist a key
   Wait,           // USER_SUPPLIED only: no key until the owner writes one
+  Recover,        // round 2: re-derive the key this board minted, from its surviving salt
 };
 
 // What the boot sequence does with the stored key. `present` is whether one is stored at all; an
 // empty stored value counts as none. A stored key is never replaced, whatever its shape.
 BootKeyAction decideBootKey(KeyModel model, bool present, const char* stored);
+
+// Round 2 (PROTOCOL.md 11.8): the same, plus recovery. A board that lost fry/minerKey but still
+// holds fry/salt, and whose key was never written by its owner (keySrc != "user"), minted that key
+// as SHA256(mac6 || salt): Recover derives the SAME key again (0.3.x did the same on every boot).
+// It never mints a new one and never touches an owner's key.
+BootKeyAction decideBootKey(KeyModel model, bool present, const char* stored, bool saltPresent,
+                            bool keySrcUser);
 
 // Whether the boot sequence may leave provisioning and join Wi-Fi. A USER_SUPPLIED board without a
 // key stays provisionable so the owner can still write one.
