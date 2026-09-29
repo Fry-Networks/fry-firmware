@@ -131,6 +131,12 @@ class ProvCallbacks : public NimBLECharacteristicCallbacks {
       return;  // not even copied: a later trusted commit must not pick it up
     }
     if (ch == s_chKeyWrite) {
+      // PROTOCOL.md 11.9: 09 carries no ATT security flag, so the encryption check is ours. With
+      // Secure Connections Only an encrypted link is always an LE Secure Connections one.
+      if (!connInfo.isEncrypted()) {
+        Serial.println("[prov] key write ignored: link not encrypted - pair first (LE Secure Connections)");
+        return;  // not even copied
+      }
       char key[40] = {0};
       size_t rawLen = 0;
       copyAttrValue(ch, key, sizeof(key), &rawLen);
@@ -231,9 +237,9 @@ ServerCallbacks s_serverCallbacks;
 void init(const char* deviceName, const char* minerKey) {
   NimBLEDevice::init(deviceName);
   NimBLEDevice::setMTU(185);  // PROTOCOL.md section 1: the central requests MTU 185
-  // PROTOCOL.md sections 11.3/11.8: the key write (09) needs an encrypted link - LE Secure
-  // Connections, Just Works, no bonding. Nothing else on the service requires it, so an app that
-  // never writes a key is never asked to pair.
+  // PROTOCOL.md sections 11.3/11.8/11.9: the key write (09) needs an encrypted link - LE Secure
+  // Connections, Just Works, no bonding - which the client sets up by pairing before it writes 09.
+  // Nothing else on the service requires it, so an app that never writes a key is never asked to pair.
   NimBLEDevice::setSecurityAuth(/*bonding=*/false, /*mitm=*/false, /*sc=*/true);
   NimBLEDevice::setSecurityIOCap(BLE_HS_IO_NO_INPUT_OUTPUT);
   // sc=true only PREFERS Secure Connections; a central proposing legacy Just Works (TK = 0) would
@@ -273,9 +279,11 @@ void init(const char* deviceName, const char* minerKey) {
   NimBLECharacteristic* chChip = service->createCharacteristic(kUuidChip, NIMBLE_PROPERTY::READ);
   chChip->setValue(FRY_CHIP);
 
-  // v1.1, appended after the v1 characteristics so their order is unchanged.
-  s_chKeyWrite = service->createCharacteristic(kUuidKeyWrite,
-                                               NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_ENC);
+  // v1.1, appended after the v1 characteristics so their order is unchanged. Plain WRITE (11.9):
+  // in Secure Connections Only mode NimBLE refuses any attribute that needs security unless the
+  // link is authenticated (MITM), which Just Works never is, so a WRITE_ENC 09 could not be
+  // written at all. onWrite refuses the key on an unencrypted link instead.
+  s_chKeyWrite = service->createCharacteristic(kUuidKeyWrite, NIMBLE_PROPERTY::WRITE);
   s_chKeyWrite->setCallbacks(&s_callbacks);
   s_chDevStatus = service->createCharacteristic(kUuidDevStatus,
                                                 NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::NOTIFY);

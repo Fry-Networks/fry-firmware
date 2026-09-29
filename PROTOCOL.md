@@ -469,3 +469,30 @@ ota: not updating - <wrong_channel|bad_version|no_build> (manifest channel=<c>, 
 [identity] miner key missing - re-deriving it from the stored salt (recovery, not a new key)
 [prov] ignored: unencrypted write while running - pair (write the key) first
 ```
+
+### 11.9 Round-3 amendment: the key write on real phones (firmware 0.4.1, app 0.4.1)
+
+Found on hardware (Galaxy S22, Android 16, ESP32-C3 on 0.4.0): no phone could write `09`. In Secure
+Connections Only mode NimBLE answers every attribute that needs security with "insufficient
+authentication" unless the link is authenticated (MITM); Just Works never is, so the WRITE_ENC `09`
+of 0.4.0 refused every write, and Android then waited on a MITM pairing the board cannot offer.
+
+- **`09` is a plain WRITE; the board checks the encryption.** A `09` write over an unencrypted link
+  is ignored (not copied, no status change). Secure Connections Only stays on, so legacy pairing is
+  still refused and any encrypted link is an LE Secure Connections one. This replaces "write,
+  encrypted write" in the 11.3 table and the "`09` stays WRITE_ENC" sentence in 11.8.
+- **The client pairs before it writes `09`.** A client with an owner key starts pairing itself
+  (Android: `createBond()`, then waits for BONDED; the system consent dialog may appear) and writes
+  `09` only on the encrypted link, so the key never goes out in the clear. A client that writes `09`
+  first has sent the key unencrypted and the board ignores it.
+- **Android keeps a bond the board does not.** The board still pairs without bonding. Android
+  stores the pairing anyway, encrypts the next connection with it, the board has no key for it, and
+  Android drops the link (HCI "key missing") and forgets the bond. A client that was bonded when it
+  connected and loses the link that way connects once more; that session pairs anew.
+- **Boards on 0.4.0** cannot take a key over BLE; set it over USB (Improv `0xF0`, the web setup
+  page) or update the board first. Nothing else in 0.4.0's BLE service is affected.
+- **Serial line added:**
+
+```
+[prov] key write ignored: link not encrypted - pair first (LE Secure Connections)
+```
