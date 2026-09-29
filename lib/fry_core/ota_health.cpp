@@ -40,6 +40,36 @@ bool shouldRecordBadVersion(const char* pending, const char* running, bool lastI
   return running == nullptr || strcmp(pending, running) != 0;
 }
 
+bool decideMarkValid(bool pending, bool heartbeatSeen, uint32_t uptimeMs, uint32_t settleMs) {
+  return pending && heartbeatSeen && uptimeMs >= settleMs;
+}
+
+uint32_t accrueVerifyMs(uint32_t accruedMs, uint32_t elapsedMs, bool staConnected) {
+  if (!staConnected) return accruedMs;
+  return elapsedMs > 0xFFFFFFFFu - accruedMs ? 0xFFFFFFFFu : accruedMs + elapsedMs;
+}
+
+uint8_t nextStrikeCount(const char* badver, uint8_t badn, const char* rolledBackFrom,
+                        bool plannedRestart, bool* changed) {
+  if (changed) *changed = false;
+  if (empty(rolledBackFrom) || plannedRestart) return badn;
+  if (changed) *changed = true;
+  if (!empty(badver) && strcmp(badver, rolledBackFrom) == 0) {
+    return badn < 255 ? static_cast<uint8_t>(badn + 1) : badn;
+  }
+  return 1;
+}
+
+bool skipBadVersion(const char* latest, const char* badver, uint8_t badn, bool firstCheckAfterRollback) {
+  if (!isSkippedBadVersion(latest, badver)) return false;
+  return badn >= kOtaPermanentStrikes || firstCheckAfterRollback;
+}
+
+bool strikesReset(const char* latest, const char* badver) {
+  if (empty(latest) || empty(badver)) return false;
+  return strcmp(latest, badver) != 0;
+}
+
 OtaImageState otaImageState(bool pendingVerify, bool rolledBackBefore) {
   if (pendingVerify) return OtaImageState::Pending;
   return rolledBackBefore ? OtaImageState::RolledBack : OtaImageState::Valid;

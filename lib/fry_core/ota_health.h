@@ -51,6 +51,32 @@ GuardAction decideRollbackGuard(bool pendingVerify, bool heartbeatSeen, uint32_t
 // is a different one AND the bootloader reports an invalid (rolled-back) OTA partition.
 bool shouldRecordBadVersion(const char* pending, const char* running, bool lastInvalidPartition);
 
+// ---- round 2 (PROTOCOL.md 11.8) -----------------------------------------------------------------
+
+// Mark a pending image valid only once hardwareapi answered AND it has run for `settleMs`
+// (ota_client.cpp: POC_INTERVAL_MS + 60 s), so the VPN start, the first PoC/lease cycle and
+// telemetry have all run on it. An image that crashes inside the window is still rolled back.
+bool decideMarkValid(bool pending, bool heartbeatSeen, uint32_t uptimeMs, uint32_t settleMs);
+
+// The verify deadline counts only time the station spent associated with an IP: a router or ISP
+// outage right after an update is not the image's fault. Saturates instead of wrapping.
+uint32_t accrueVerifyMs(uint32_t accruedMs, uint32_t elapsedMs, bool staConnected);
+
+// Bad-version STRIKES. The previous image's boot check is the only writer: each rollback from
+// `rolledBackFrom` adds one strike to the same version, or restarts the count at 1 for a different
+// one; a planned restart (restartToApply, a USB re-key) while pending is not a strike, nor is a
+// boot without rollback evidence (`rolledBackFrom` empty). *changed says whether to persist.
+const uint8_t kOtaPermanentStrikes = 3;
+uint8_t nextStrikeCount(const char* badver, uint8_t badn, const char* rolledBackFrom,
+                        bool plannedRestart, bool* changed);
+
+// Whether a manifest check skips `latest`: for good at kOtaPermanentStrikes, otherwise only on the
+// first check after the rollback boot, so the next 6-hour check tries it again.
+bool skipBadVersion(const char* latest, const char* badver, uint8_t badn, bool firstCheckAfterRollback);
+
+// A manifest naming a different version than the one holding strikes clears them.
+bool strikesReset(const char* latest, const char* badver);
+
 enum class OtaImageState : uint8_t { Valid, Pending, RolledBack };
 OtaImageState otaImageState(bool pendingVerify, bool rolledBackBefore);
 const char* otaImageStateName(OtaImageState s);  // "valid" | "pending" | "rolled_back"
