@@ -163,10 +163,14 @@ into the commit message.
    flasher needs. Same-machine rebuilds were byte-identical in the release evidence, but a CI build may
    differ from a local one, so do not gate on a local `firmware.bin` matching the asset.
 2. Lay them out as the release job does (the published asset as `manifest_input/<env>/firmware.bin`, the local `bootloader.bin`,
-   `partitions.bin`) and write the flasher manifests, carrying the held chips over unchanged:
+   `partitions.bin`), copy the published `firmware-<env>-factory.bin` into `docs/flash/fw/` first (the tool
+   reuses a factory image that is already there instead of re-merging, and verifies every part against
+   it), then write the flasher manifests with `--release-base fw` — the page resolves `fw/manifest.json`
+   urls against `docs/flash`, so they must be relative, never the release URL — carrying the held chips
+   over unchanged:
    ```sh
    python3 tools/make_manifest.py --version X.Y.Z --channel prod --envs esp32,esp32c3 \
-     --release-base "https://github.com/$REPO/releases/download/fw-vX.Y.Z" \
+     --release-base fw \
      --build-dir manifest_input --out docs/flash/fw/manifest.json --dist docs/flash/fw \
      --ewt-out docs/flash/manifest.json --ewt-merge docs/flash/manifest-hold.json
    ```
