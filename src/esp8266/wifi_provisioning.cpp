@@ -297,11 +297,10 @@ void init(const char* deviceName, const char* minerKey) {
 
 bool commitWifiOnlyCredentials(const char* ssid, const char* pass) {
   if (!ssid) return false;
-  // See the ESP32 transport: an Improv client may retry after a failed join, so clear an Error
-  // parked by the previous attempt. The captive portal's own path is untouched.
-  if (s_fsm.state() == fry::ProvState::Error) {
-    s_fsm.feed(fry::ProvEvent::Reset, {});
-  }
+  // See the ESP32 transport: an Improv client may retry after a failed join, or change the Wi-Fi
+  // of a board already running on this boot's commit (round 2 F8), so start over from anything
+  // past Provisioning. The captive portal's own path is untouched.
+  fry::resetForWifiOnlyCommit(s_fsm);
 
   const size_t ssidLen = strlen(ssid);
   fry::ProvInputs in;

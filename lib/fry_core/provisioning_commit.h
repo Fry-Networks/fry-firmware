@@ -31,4 +31,16 @@ bool commitWifiOnly(ProvisioningFsm& fsm, Persist persist) {
   return fsm.feed(ProvEvent::WifiOnlyCommit, ProvInputs{});
 }
 
+// Improv 0x01 is accepted in every phase (PROTOCOL.md section 11.8, round 2 F8): before its SSID is
+// fed, a board that is past Provisioning - in Error, or Connected / Connecting on settings committed
+// earlier this boot - starts over, as an explicit Reset would. Idle and Provisioning need none: the
+// SSID write is already valid there. The join itself never overlaps an Improv command (it blocks the
+// loop that polls the UART), so nothing in flight is cut short.
+inline void resetForWifiOnlyCommit(ProvisioningFsm& fsm) {
+  const ProvState st = fsm.state();
+  if (st != ProvState::Idle && st != ProvState::Provisioning) {
+    fsm.feed(ProvEvent::Reset, ProvInputs{});
+  }
+}
+
 }  // namespace fry

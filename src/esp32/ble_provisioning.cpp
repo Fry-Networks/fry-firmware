@@ -305,12 +305,10 @@ void init(const char* deviceName, const char* minerKey) {
 
 bool commitWifiOnlyCredentials(const char* ssid, const char* pass) {
   if (!ssid) return false;
-  // A previous join failed and parked the FSM in Error. The BLE/SoftAP paths have no recovery
-  // from there short of a reboot; an Improv client can simply try again, so reset first. Only
-  // this entry point does it — the app-facing paths behave exactly as before.
-  if (s_fsm.state() == fry::ProvState::Error) {
-    s_fsm.feed(fry::ProvEvent::Reset, {});
-  }
+  // A previous join failed and parked the FSM in Error, or the board is already running on settings
+  // committed earlier this boot (Connected / Connecting): an Improv client starts over either way
+  // (round 2 F8). Only this entry point does it — the app-facing paths behave exactly as before.
+  fry::resetForWifiOnlyCommit(s_fsm);
 
   const size_t ssidLen = strlen(ssid);
   fry::ProvInputs in;
