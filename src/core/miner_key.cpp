@@ -88,7 +88,15 @@ void getMac6(uint8_t mac6[3]) {
 
 void ensureMinerKey(char* outKey, size_t outKeyLen) {
   const bool present = fry_config::getMinerKey(outKey, outKeyLen);
-  const fry::BootKeyAction action = fry::decideBootKey(fry::kBuildKeyModel, present, outKey);
+  fry::BootKeyAction action = fry::decideBootKey(fry::kBuildKeyModel, present, outKey);
+  if (action == fry::BootKeyAction::Wait || action == fry::BootKeyAction::Mint) {
+    // Round 2 F11: no key stored. If this board once minted one (the salt is still there) and its
+    // owner never wrote one, the lost key is re-derived - the same key, not a new one.
+    uint8_t salt[16];
+    const bool haveSalt = fry_config::getSalt(salt);
+    action = fry::decideBootKey(fry::kBuildKeyModel, present, outKey, haveSalt,
+                                fry_config::getKeySrc() == "user");
+  }
   if (action == fry::BootKeyAction::Wait) {
     if (outKey && outKeyLen) outKey[0] = 0;
     if (!s_waitLogged) {
@@ -129,7 +137,12 @@ void ensureMinerKey(char* outKey, size_t outKeyLen) {
     return;
   }
 
-  // Mint: DEVICE_KEEPS builds only (decideBootKey never returns it for USER_SUPPLIED).
+  // Mint (DEVICE_KEEPS builds only) and Recover (any build, salt present) share the derivation;
+  // Recover never generates a salt, so it can only ever reproduce the key this board minted.
+  if (action == fry::BootKeyAction::Recover) {
+    Serial.println("[identity] miner key missing - re-deriving it from the stored salt "
+                   "(recovery, not a new key)");
+  }
   uint8_t mac6[3];
   getMac6(mac6);
 

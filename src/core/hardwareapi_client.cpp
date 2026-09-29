@@ -55,7 +55,9 @@ const uint32_t kQuickRetryMs = 2000;
 void readServerDetail(HTTPClient& http, const char* minerKey, char* out, size_t outLen) {
   out[0] = 0;
   const int size = http.getSize();
-  if (size > 2048) return;  // not a JSON error body; do not buffer it
+  // Not a JSON error body; do not buffer it. -1 is a chunked body of unknown length: getString()
+  // would buffer all of it, so it counts as too big too (round 2 F10).
+  if (size < 0 || size > 2048) return;
   JsonDocument rdoc;
   if (deserializeJson(rdoc, http.getString())) return;
   const char* d = rdoc["detail"].is<const char*>() ? rdoc["detail"].as<const char*>()
