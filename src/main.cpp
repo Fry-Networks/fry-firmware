@@ -134,6 +134,9 @@ void attemptWifiConnect() {
 // PoC, WireGuard) starts over under the new identity.
 void restartToApply(const char* why) {
   Serial.println(why);
+  // Not a failure: if this image is still pending, the bootloader rolls it back on this restart,
+  // and the previous image must not count that as a strike against it (PROTOCOL.md 11.8).
+  fry_ota::notePlannedRestart();
   Serial.flush();
   delay(300);
   ESP.restart();

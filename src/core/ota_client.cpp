@@ -15,10 +15,13 @@
 #include "heap_gate_wait.h"
 #include "semver.h"
 #include "http_tls.h"
+#include "key_policy.h"
+#include "miner_key.h"
 #include "ota_boot_counter.h"
 #include "ota_health.h"
 #include "sha256.h"
 #include "trigger_hooks.h"
+#include "wifi_station.h"
 
 #if !defined(ARDUINO_ARCH_ESP8266)
 #include <esp_ota_ops.h>
@@ -54,9 +57,24 @@ namespace fry_ota {
 namespace {
 
 fry::HeartbeatTracker s_heartbeat;
+// Round 2 (PROTOCOL.md 11.8): the image is marked valid only once hardwareapi answered AND it ran
+// through the first PoC/lease cycle - a crash in the VPN start, telemetry or the first PoC must
+// still roll it back.
+const uint32_t kMarkValidSettleMs = POC_INTERVAL_MS + 60000UL;
+// This boot runs an image that still has to prove itself: PENDING_VERIFY in otadata (ESP32 family)
+// and/or fry_ota.pending naming this version (the NVS boot counter, both chips). Cached so the
+// per-loop guard never touches the store.
+bool s_confirmPending = false;
+bool s_markAttempted = false;  // loopGuard's one attempt at the settle mark; answers retry after it
+bool s_firstCheckAfterRollback = false;  // a strike was counted this boot (skip that version once)
+bool s_loggedKeyless = false;
 #if !defined(ARDUINO_ARCH_ESP8266)
-bool s_pendingVerify = false;  // the running image is PENDING_VERIFY in otadata
-bool s_rolledBack = false;     // the other slot holds an image the bootloader rolled back from
+bool s_pendingVerify = false;   // the running image is PENDING_VERIFY in otadata
+bool s_rolledBack = false;      // the other slot holds an image the bootloader rolled back from
+bool s_rollbackFailed = false;  // nothing to roll back to: stay, and keep reporting "pending"
+bool s_markFailLogged = false;
+uint32_t s_verifyMs = 0;        // time with the station associated + an IP, since boot
+unsigned long s_lastGuardMs = 0;
 #else
 const bool s_rolledBack = false;  // one slot: nothing to roll back to
 #endif
@@ -71,27 +89,55 @@ unsigned long s_lastCheckMs = 0;
 // after boot. This flag forces exactly one check on the first tick after WiFi comes up.
 bool s_firstCheckDone = false;
 
-// Manual rollback: boot into whichever OTA slot is NOT currently running. This does not depend
-// on esp_ota_mark_app_valid_cancel_rollback()/Update.rollBack() at all, since those rely on the
-// hardware rollback machinery this bootloader was built without.
+// Boot-counter rollback: boot into whichever OTA slot is NOT currently running. The second line
+// behind the bootloader's own app rollback (see ota_client.h), for boards whose bootloader - from
+// their first flash - lacks it. fry_ota.pending is left naming this version and fry_ota.rbk is
+// set, so the previous image's init() counts the strike: it is the only writer of the strikes.
 void manualRollback() {
-  fry_config::setOtaBadVer(FRY_FIRMWARE_VERSION);  // do not come back to this one
 #if defined(ARDUINO_ARCH_ESP8266)
   Serial.println("ota: boot-fail limit reached - ROLLBACK IMPOSSIBLE on ESP8266 (one slot)");
+  fry_config::clearOtaPending();
 #else
   const esp_partition_t* running = esp_ota_get_running_partition();
   const esp_partition_t* other = esp_ota_get_next_update_partition(nullptr);
   if (other && running && other->address != running->address) {
     Serial.println("ota: boot-fail limit reached - booting the other OTA slot");
+    fry_config::setOtaRolledBack(true);
     esp_ota_set_boot_partition(other);
   } else {
     Serial.println("ota: boot-fail limit reached but no other OTA slot found - staying");
+    fry_config::clearOtaPending();
   }
 #endif
-  fry_config::clearOtaPending();
   fry_config::clearOtaBootFails();
   delay(200);
   ESP.restart();
+}
+
+// Marks the running image valid once decideMarkValid() says so; a failure is retried on the next
+// hardwareapi answer (noteHeartbeat) and the image keeps reporting "pending" meanwhile.
+void tryMarkValid(const char* why) {
+  if (!s_confirmPending) return;
+  if (!fry::decideMarkValid(true, s_heartbeat.anyResponse(), millis(), kMarkValidSettleMs)) return;
+#if !defined(ARDUINO_ARCH_ESP8266)
+  if (s_pendingVerify) {
+    const esp_err_t err = esp_ota_mark_app_valid_cancel_rollback();
+    if (err != ESP_OK) {
+      if (!s_markFailLogged) {
+        s_markFailLogged = true;
+        Serial.printf("ota: marking %s valid FAILED (err=%d) - retried on the next hardwareapi answer\n",
+                      FRY_FIRMWARE_VERSION, static_cast<int>(err));
+      }
+      return;
+    }
+    s_pendingVerify = false;
+  }
+#endif
+  confirmGood();  // fry_ota.pending + the boot counter
+  s_confirmPending = false;
+  s_firstCheckDone = false;  // the manifest check a pending image skips runs on the next tick
+  Serial.printf("ota: image %s marked valid after %lus (hardwareapi answered, last http=%d; %s)\n",
+                FRY_FIRMWARE_VERSION, millis() / 1000UL, s_heartbeat.lastHttp(), why ? why : "?");
 }
 
 bool otaBeginUrl(HTTPClient& http, WiFiClientSecure& sec, WiFiClient& plain, const String& url) {
@@ -249,15 +295,24 @@ void init() {
   s_pendingVerify = esp_ota_get_state_partition(esp_ota_get_running_partition(), &state) == ESP_OK &&
                     state == ESP_OTA_IMG_PENDING_VERIFY;
   if (s_pendingVerify) {
-    Serial.printf("ota: image %s is pending verification - valid on the first hardwareapi answer, "
-                  "rolled back after %lus without one\n",
-                  FRY_FIRMWARE_VERSION, static_cast<unsigned long>(FRY_OTA_VERIFY_DEADLINE_MS / 1000));
+    s_confirmPending = true;
+    Serial.printf("ota: image %s is pending verification - valid once hardwareapi answered and it "
+                  "ran %lus, rolled back after %lus of Wi-Fi without an answer\n",
+                  FRY_FIRMWARE_VERSION, static_cast<unsigned long>(kMarkValidSettleMs / 1000),
+                  static_cast<unsigned long>(FRY_OTA_VERIFY_DEADLINE_MS / 1000));
   }
 #endif
+  // One-boot markers for the strike bookkeeping below; consumed whichever image reads them.
+  const bool plannedRestart = fry_config::getOtaPlannedRestart();
+  if (plannedRestart) fry_config::setOtaPlannedRestart(false);
+  const bool counterRolledBack = fry_config::getOtaRolledBack();
+  if (counterRolledBack) fry_config::setOtaRolledBack(false);
+
   String pending = fry_config::getOtaPending();
   if (pending.length() == 0) return;
 
   if (pending == FRY_FIRMWARE_VERSION) {
+    s_confirmPending = true;
     uint8_t fails = fry_config::getOtaBootFails();
     fry::OtaBootCounter counter(fails);
     counter.increment();
@@ -268,11 +323,24 @@ void init() {
     Serial.printf("ota: first boot %s - awaiting confirmation (%u/%u attempts)\n",
                   FRY_FIRMWARE_VERSION, counter.count(), OTA_BOOT_FAIL_LIMIT);
   } else {
-    if (fry::shouldRecordBadVersion(pending.c_str(), FRY_FIRMWARE_VERSION, s_rolledBack)) {
-      // The image we installed did not survive and the bootloader brought us back here.
-      fry_config::setOtaBadVer(pending.c_str());
-      Serial.printf("ota: %s was rolled back - running %s, %s will not be installed again\n",
-                    pending.c_str(), FRY_FIRMWARE_VERSION, pending.c_str());
+    if (fry::shouldRecordBadVersion(pending.c_str(), FRY_FIRMWARE_VERSION,
+                                    s_rolledBack || counterRolledBack)) {
+      // The image we installed did not survive and we are back on this one. The single writer of
+      // the strikes (PROTOCOL.md 11.8): one per rollback, none for a planned restart.
+      const String badver = fry_config::getOtaBadVer();
+      bool changed = false;
+      const uint8_t strikes = fry::nextStrikeCount(badver.c_str(), fry_config::getOtaBadN(),
+                                                   pending.c_str(), plannedRestart, &changed);
+      if (changed) {
+        fry_config::setOtaStrikes(pending.c_str(), strikes);
+        s_firstCheckAfterRollback = true;
+        Serial.printf("ota: %s was rolled back - running %s, strike %u/%u for %s%s\n", pending.c_str(),
+                      FRY_FIRMWARE_VERSION, strikes, fry::kOtaPermanentStrikes, pending.c_str(),
+                      strikes >= fry::kOtaPermanentStrikes ? " - it will not be installed again"
+                                                           : " - retried after the next 6 h check");
+      } else if (plannedRestart) {
+        Serial.printf("ota: %s was rolled back by a planned restart - not counted\n", pending.c_str());
+      }
     }
     Serial.printf("ota: boot %s with pending=%s - flag cleared\n", FRY_FIRMWARE_VERSION, pending.c_str());
     fry_config::clearOtaPending();
@@ -286,43 +354,58 @@ void noteHeartbeat(int http, const char* what) {
   (void)what;
   return;  // test fault: this image never proves itself, so loopGuard() must roll it back
 #else
-  if (!s_heartbeat.note(http, millis())) return;
-  // First hardwareapi answer this boot, whatever its status: the network path works.
-  confirmGood();
-#if !defined(ARDUINO_ARCH_ESP8266)
-  if (s_pendingVerify) {
-    const esp_err_t err = esp_ota_mark_app_valid_cancel_rollback();
-    if (err == ESP_OK) s_pendingVerify = false;
-    Serial.printf("ota: image %s marked valid (first hardwareapi answer: %s http=%d)%s\n",
-                  FRY_FIRMWARE_VERSION, what ? what : "?", http, err == ESP_OK ? "" : " - FAILED");
-  }
-#endif
+  const bool first = s_heartbeat.note(http, millis());
 #if defined(FRY_TEST_FAULT) && FRY_TEST_FAULT == 3
-  s_faultCrashAtMs = millis() + 60000UL;
-  if (s_faultCrashAtMs == 0) s_faultCrashAtMs = 1;
+  if (first) {
+    s_faultCrashAtMs = millis() + 60000UL;  // inside the settle window: must roll back
+    if (s_faultCrashAtMs == 0) s_faultCrashAtMs = 1;
+  }
+#else
+  (void)first;
 #endif
+  if (http > 0) tryMarkValid(what);  // every answer while pending retries a failed mark
 #endif
 }
 
+void notePlannedRestart() {
+  if (s_confirmPending) fry_config::setOtaPlannedRestart(true);
+}
+
 void loopGuard() {
+  const unsigned long now = millis();
 #if defined(FRY_TEST_FAULT) && FRY_TEST_FAULT == 3
-  if (s_faultCrashAtMs && static_cast<long>(millis() - s_faultCrashAtMs) >= 0) {
+  if (s_faultCrashAtMs && static_cast<long>(now - s_faultCrashAtMs) >= 0) {
     Serial.println("[fault] FRY_TEST_FAULT=3 - crashing 60 s after the first heartbeat");
     Serial.flush();
     abort();
   }
 #endif
+  // The settle window can end between answers: one attempt here, later ones ride on answers.
+  if (s_confirmPending && !s_markAttempted &&
+      fry::decideMarkValid(true, s_heartbeat.anyResponse(), now, kMarkValidSettleMs)) {
+    s_markAttempted = true;
+    tryMarkValid("settle window");
+  }
 #if !defined(ARDUINO_ARCH_ESP8266)
-  if (fry::decideRollbackGuard(s_pendingVerify, s_heartbeat.anyResponse(), millis(),
+  // Only time with the station associated and holding an IP counts toward the deadline: an
+  // outage right after the update is not the image's fault (round 2 F2).
+  s_verifyMs = fry::accrueVerifyMs(s_verifyMs, static_cast<uint32_t>(now - s_lastGuardMs),
+                                   fry_wifi::isConnected());
+  s_lastGuardMs = now;
+  if (s_rollbackFailed ||
+      fry::decideRollbackGuard(s_pendingVerify, s_heartbeat.anyResponse(), s_verifyMs,
                                FRY_OTA_VERIFY_DEADLINE_MS) != fry::GuardAction::Rollback) {
     return;
   }
-  Serial.printf("ota: no hardwareapi answer %lus after booting pending image %s - rolling back\n",
-                static_cast<unsigned long>(FRY_OTA_VERIFY_DEADLINE_MS / 1000), FRY_FIRMWARE_VERSION);
-  fry_config::setOtaBadVer(FRY_FIRMWARE_VERSION);
+  Serial.printf("ota: no hardwareapi answer after %lus of Wi-Fi on pending image %s - rolling back\n",
+                static_cast<unsigned long>(s_verifyMs / 1000), FRY_FIRMWARE_VERSION);
   Serial.flush();
   esp_ota_mark_app_invalid_rollback_and_reboot();
-  s_pendingVerify = false;  // only reached if there was nothing to roll back to
+  // Only reached when there is nothing to roll back to. Stay, keep reporting "pending", and let a
+  // later answer mark the image valid (tryMarkValid) so a forward fix can still arrive.
+  s_rollbackFailed = true;
+  Serial.printf("ota: rollback impossible (no other valid image) - staying on pending %s\n",
+                FRY_FIRMWARE_VERSION);
 #endif
 }
 
@@ -330,8 +413,7 @@ int32_t heartbeatAgeS() { return s_heartbeat.ageS(millis()); }
 
 const char* imageStateName() {
 #if defined(ARDUINO_ARCH_ESP8266)
-  const bool pending = fry_config::getOtaPending() == FRY_FIRMWARE_VERSION;
-  return fry::otaImageStateName(fry::otaImageState(pending, false));
+  return fry::otaImageStateName(fry::otaImageState(s_confirmPending, false));
 #else
   return fry::otaImageStateName(fry::otaImageState(s_pendingVerify, s_rolledBack));
 #endif
@@ -353,6 +435,19 @@ bool checkNow() {
     return false;
   }
 #endif
+  // Round 2 F4: a keyless USER_SUPPLIED board makes no hardwareapi call at all, so a new image
+  // could never verify - it would only roll back. Update once the owner has written the key.
+  {
+    char key[40] = {0};
+    fry_identity::ensureMinerKey(key, sizeof(key));
+    if (!fry::keyAllowsJoin(fry::kBuildKeyModel, key[0] != 0)) {
+      if (!s_loggedKeyless) {
+        s_loggedKeyless = true;
+        Serial.println("ota: manifest check skipped - no miner key yet");
+      }
+      return false;
+    }
+  }
   String manifestUrl = fry_config::getOtaUrl();
   if (manifestUrl.length() == 0) manifestUrl = FRY_OTA_DEFAULT_MANIFEST;
   if (manifestUrl.length() == 0) return false;
@@ -414,18 +509,29 @@ bool checkNow() {
   // which updated in either direction, so a device running a newer build than the published
   // manifest downgraded itself (observed on the bench: cur=0.1.1 latest=0.1.0 action=update).
   // Deliberate rollback is slot-based, not manifest-driven. A manifest for the other channel, the
-  // version this board already rolled back from, or a manifest without this env's build (a chip
-  // left out on purpose) never updates.
-  const String badver = fry_config::getOtaBadVer();
-  const fry::OtaDecision decision = fry::decideOtaUpdate(channel, FRY_OTA_CHANNEL, latest,
-                                                         FRY_FIRMWARE_VERSION, badver.c_str(), url, sha);
+  // version this board is holding strikes for (skipped on the first check after a rollback, for
+  // good at 3 - PROTOCOL.md 11.8), or a manifest without this env's build (a chip left out on
+  // purpose) never updates.
+  String badver = fry_config::getOtaBadVer();
+  uint8_t badn = badver.length() ? fry_config::getOtaBadN() : 0;
+  if (fry::strikesReset(latest, badver.c_str())) {
+    fry_config::setOtaStrikes("", 0);
+    Serial.printf("ota: manifest names %s - strikes for %s cleared\n", latest, badver.c_str());
+    badver = "";
+    badn = 0;
+  }
+  const bool skip = fry::skipBadVersion(latest, badver.c_str(), badn, s_firstCheckAfterRollback);
+  s_firstCheckAfterRollback = false;
+  const fry::OtaDecision decision = fry::decideOtaUpdate(
+      channel, FRY_OTA_CHANNEL, latest, FRY_FIRMWARE_VERSION, skip ? badver.c_str() : "", url, sha);
   const bool willUpdate = decision == fry::OtaDecision::Update;
   Serial.printf("ota: manifest check cur=%s latest=%s action=%s\n", FRY_FIRMWARE_VERSION,
                 strlen(latest) ? latest : "?", willUpdate ? "update" : "none");
   if (!willUpdate) {
     if (decision != fry::OtaDecision::NotNewer) {
-      Serial.printf("ota: not updating - %s (manifest channel=%s, ours=%s)\n",
-                    fry::otaDecisionName(decision), strlen(channel) ? channel : "prod", FRY_OTA_CHANNEL);
+      Serial.printf("ota: not updating - %s (manifest channel=%s, ours=%s, strikes=%u)\n",
+                    fry::otaDecisionName(decision), strlen(channel) ? channel : "prod", FRY_OTA_CHANNEL,
+                    static_cast<unsigned>(badn));
     }
     return false;
   }

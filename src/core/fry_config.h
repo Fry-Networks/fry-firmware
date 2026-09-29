@@ -103,9 +103,19 @@ void setOtaUrl(const char* url);
 uint8_t getOtaBootFails();
 void setOtaBootFails(uint8_t v);
 void clearOtaBootFails();
-// fry_ota/badver: a version this board rolled back from and will not install again.
+// Round 2 (PROTOCOL.md 11.8): fry_ota/badver + fry_ota/badn are the bad-version STRIKES. They are
+// only ever written together, through setOtaStrikes() ("" clears both).
 String getOtaBadVer();
-void setOtaBadVer(const char* version);
+uint8_t getOtaBadN();
+void setOtaStrikes(const char* version, uint8_t strikes);
+// fry_ota/planrst: a restart that is not a failure (restartToApply, a USB re-key) while the image is
+// still pending, so the previous image does not count the rollback it causes as a strike.
+bool getOtaPlannedRestart();
+void setOtaPlannedRestart(bool planned);
+// fry_ota/rbk: the boot counter rolled back (manualRollback); rollback evidence for the previous
+// image where the bootloader left none.
+bool getOtaRolledBack();
+void setOtaRolledBack(bool rolledBack);
 
 // Wipes fry_wifi, fry/wallet, fry/provDone, fry/installId, fry/deviceToken, fry_vpn and fry_ota.
 // PRESERVES fry/salt and fry/minerKey so a re-provisioned board keeps one server identity

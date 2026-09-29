@@ -481,10 +481,59 @@ String getOtaBadVer() {
   p.end();
   return v;
 }
-void setOtaBadVer(const char* version) {
+uint8_t getOtaBadN() {
+  KvStore p;
+  p.begin("fry_ota", true);
+  uint8_t v = p.getUChar("badn", 0);
+  p.end();
+  return v;
+}
+void setOtaStrikes(const char* version, uint8_t strikes) {
   KvStore p;
   p.begin("fry_ota", false);
-  p.putString("badver", version);
+  if (version && version[0]) {
+    p.putString("badver", version);
+    p.putUChar("badn", strikes);
+  } else {
+    p.remove("badver");
+    p.remove("badn");
+  }
+  p.end();
+}
+
+bool getOtaPlannedRestart() {
+  KvStore p;
+  p.begin("fry_ota", true);
+  bool v = p.isKey("planrst") && p.getBool("planrst", false);
+  p.end();
+  return v;
+}
+void setOtaPlannedRestart(bool planned) {
+  KvStore p;
+  p.begin("fry_ota", false);
+  if (planned) {
+    p.putBool("planrst", true);
+  } else {
+    p.remove("planrst");
+  }
+  p.end();
+}
+
+bool getOtaRolledBack() {
+  KvStore p;
+  p.begin("fry_ota", true);
+  bool v = p.isKey("rbk") && p.getBool("rbk", false);
+  p.end();
+  return v;
+}
+void setOtaRolledBack(bool rolledBack) {
+  KvStore p;
+  p.begin("fry_ota", false);
+  if (rolledBack) {
+    p.putBool("rbk", true);
+  } else {
+    p.remove("rbk");
+  }
   p.end();
 }
 
