@@ -398,3 +398,74 @@ ota: not updating - <wrong_channel|bad_version|no_build> (manifest channel=<c>, 
 AP started FRY-SETUP-<MAC6> ip=192.168.4.1 wpa2 setup-code=<code> (no miner key yet)
 AP restarted FRY-SETUP-<MAC6> after the failed join - /provision accepts a new attempt
 ```
+
+### 11.8 Round-2 amendments (supersede the parts of 11.1-11.7 named here; nothing above is removed)
+
+- **Characteristic 05 is plain READ again** and returns the full stored key (`""` without one), as in
+  v1, so app 0.3.x - which reads 05 before writing, with a 5 s timeout - never meets a pairing
+  prompt. This replaces "read, encrypted read" in the 11.3 table and in its Security bullet. `09`
+  stays WRITE_ENC. Residual, as in 0.3.x: while a board is provisionable, anyone in BLE range can
+  read its key.
+- **Secure Connections only.** Legacy pairing (TK = 0, passively decryptable) is refused
+  (`ble_hs_cfg.sm_sc_only = 1`); a central must pair with LE Secure Connections to write `09`.
+- **A staged key never outlives its link.** The key held in RAM after a `09` write is dropped on
+  every BLE connect and disconnect, so only the central that staged it can commit it at `03`.
+- **A running board keeps the 0.3.x rule.** While the board is in Error with Wi-Fi joined this boot
+  and only the API side failed (4, 6, 9-13, or 7/8 raised after the join), SSID/password/wallet
+  writes (`01`/`02`/`03`) over an UNENCRYPTED BLE link are ignored, and ESP8266 `POST /provision`
+  over the OPEN AP answers `409 {"err":"busy"}`. An encrypted link (a client that wrote `09` is
+  paired), USB and the WPA2 setup AP still start a new attempt. Wi-Fi errors (1-3) and errors raised
+  before any join still reset on any SSID write, as in 11.2.
+- **Late registration success, continued.** A key refusal (7/8) raised while running does not stop a
+  later successful registration from moving the state to 3 Connected.
+- **Improv `0x01` in every phase.** Wi-Fi settings over USB are accepted on a running board too (USB
+  is physical access, the same trust as `0xF0`): they are persisted and the board restarts into
+  them; no Provisioned state or URL is reported for the connection it is leaving. A board that
+  was provisioned earlier this boot (state 2 Connecting or 3 Connected) starts over the same way;
+  a board in Error starts over too, whatever the error. `0x04` scan is
+  still answered only while the provisioning transport is up. The restart after an `0xF0` key change
+  waits for 3 s without another Improv command; a `0x01` sent within that window restarts the board
+  anyway. This replaces the 11.4 rule that `0x01` is gated on the provisioning transport.
+- **Golden vectors** now live in `test/fixtures/improv_fry_vectors.json` (ASCII-only JSON with each
+  vector's inputs); the hex lines in 11.4 are the same bytes.
+- **Image verification (replaces the 11.5 bullet).** A pending image is marked valid only once
+  hardwareapi has answered (any HTTP status) AND the image has run for `POC_INTERVAL_MS` + 60 s
+  (11 minutes), so a crash in the VPN start, telemetry or the first PoC/lease cycle still rolls it
+  back. A failed mark is retried on every later answer; a rollback that is impossible (no other
+  valid image) leaves the image running and reported as `pending`. The no-answer deadline (20 min;
+  2 min on the test channel) counts only time with the station associated and holding an IP. The
+  manifest check a pending image skipped runs right after it is marked valid.
+- **Strikes (replaces "never installs it again").** The previous image counts one strike per rollback
+  from a version (`fry_ota/badver` + `fry_ota/badn`, written together by that image's boot check
+  only). With fewer than 3 strikes the version is skipped on the first check after the rollback and
+  retried at the next 6-hour check; at 3 it is skipped for good. A manifest naming a different
+  version clears the strikes. A restart that is not a failure while the image is pending
+  (restartToApply, a USB re-key) sets `fry_ota/planrst`, and the rollback it causes is not counted.
+- **Keyless boards do not update.** A USER_SUPPLIED board without a key skips the manifest check: it
+  makes no hardwareapi call at all, so a new image could never verify.
+- **Kill switch.** A normal (non-prerelease) release whose manifest is exactly
+  `{"firmware_version":"0.0.0","channel":"prod","builds":{}}` (`tools/fw-hold/manifest.json`) stops
+  every client: v0.3.1/0.3.3 get no URL on any chip, 0.4.x see nothing newer (`test/test_fw_hold`).
+- **Key recovery.** A board that lost `fry/minerKey` but kept `fry/salt`, and whose key was never
+  written by its owner (`keySrc` is not `user`), re-derives the same `SHA256(mac6 || salt)` key at
+  boot. It never mints a new key and never re-derives an owner's key.
+- **Held chips.** 0.4.0 is not released for ESP32-S3 and ESP8266: not in any manifest and not
+  attached to any release; the web flasher keeps their 0.3.3 parts in `docs/flash/fw/hold/`
+  (`manifest-hold.json`).
+- **Serial lines added or changed:**
+
+```
+ota: image <v> is pending verification - valid once hardwareapi answered and it ran <s>s, rolled back after <s>s of Wi-Fi without an answer
+ota: image <v> marked valid after <s>s (hardwareapi answered, last http=<code>; <register|poc|lease|settle window>)
+ota: marking <v> valid FAILED (err=<n>) - retried on the next hardwareapi answer
+ota: no hardwareapi answer after <s>s of Wi-Fi on pending image <v> - rolling back
+ota: rollback impossible (no other valid image) - staying on pending <v>
+ota: <v> was rolled back - running <v>, strike <n>/3 for <v> - retried after the next 6 h check
+ota: <v> was rolled back - running <v>, strike 3/3 for <v> - it will not be installed again
+ota: <v> was rolled back by a planned restart - not counted
+ota: manifest names <v> - strikes for <v> cleared
+ota: manifest check skipped - no miner key yet
+ota: not updating - <wrong_channel|bad_version|no_build> (manifest channel=<c>, ours=<c>, strikes=<n>)
+[identity] miner key missing - re-deriving it from the stored salt (recovery, not a new key)
+[prov] ignored: unencrypted write while running - pair (write the key) first
+```

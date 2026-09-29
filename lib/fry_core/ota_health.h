@@ -6,9 +6,11 @@
 // Life of an OTA image on the ESP32 family (the bootloader is built with app rollback):
 //   1. the old image writes the new one and reboots into it; the bootloader boots it PENDING_VERIFY
 //   2. the new image keeps it pending (verifyRollbackLater() returns true, src/esp32/ota_rollback.cpp)
-//   3. the first hardwareapi HTTP response of ANY status marks it valid (HeartbeatTracker::note)
-//   4. a crash or reboot before that, or no response by the deadline, rolls back to the old image,
-//      which then records the version it rolled away from and never installs it again
+//   3. it is marked valid once a hardwareapi HTTP response of ANY status was seen AND it has run
+//      for the settle window (decideMarkValid; PROTOCOL.md 11.8)
+//   4. a crash or reboot before that, or no response by the deadline (time with an IP only), rolls
+//      back to the old image, which then records one STRIKE against that version and retries it at
+//      the next check; three strikes skip it for good (nextStrikeCount / skipBadVersion)
 // ESP8266 has one slot and no bootloader rollback; there only the NVS boot counter logs.
 #include <cstdint>
 
