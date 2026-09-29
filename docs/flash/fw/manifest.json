@@ -2,21 +2,21 @@
   "builds": {
     "esp32": {
       "factory": {
-        "sha256": "e4540f3fd029789ea295b5353ea69c4076a1c25963c3c9066d50af9d1464b7c0",
+        "sha256": "55ba9d8df4b57e0ae36bf8ec2dba9e895a2c7edf96c87a616da3fade74d46eab",
         "url": "fw/firmware-esp32-factory.bin"
       },
-      "sha256": "f8773922e0f8ce4ce3247ab523c324db587c09bfde8c1044ca9e9bbad87d84c9",
+      "sha256": "950e171fce12171ec39c222216a3228afb58c094653677bdff9f7911001cf755",
       "url": "fw/firmware-esp32.bin"
     },
     "esp32c3": {
       "factory": {
-        "sha256": "e658ae5894ffa281b0095c60f24cd4c51e2d4739663046b0e677957ee20892ed",
+        "sha256": "0a56c086f3d674af0bd66a04e74b391a6547c57b156132c76ab541c05693570b",
         "url": "fw/firmware-esp32c3-factory.bin"
       },
-      "sha256": "54608af67b1ff1a60e7ce30290d1881b1584b7c992857059a08dc40653e36dc7",
+      "sha256": "d0a7139cea0b81213aef7375963092c4521ed82e6b2fddabb27edf409d9d09a3",
       "url": "fw/firmware-esp32c3.bin"
     }
   },
   "channel": "prod",
-  "firmware_version": "0.4.0"
+  "firmware_version": "0.4.1"
 }
