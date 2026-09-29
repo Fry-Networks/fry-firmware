@@ -46,6 +46,10 @@ uint8_t s_out[fry::improv::kMaxPacket];
 char s_deviceName[32] = {0};
 bool s_awaitingWifi = false;  // a wifi-settings command is committed and the join is in flight
 bool s_keyChanged = false;    // a 0xF0 write stored a different key; see consumeKeyChanged()
+unsigned long s_lastRpcMs = 0;  // when the last complete RPC arrived
+// Round 2 F8: a client usually follows 0xF0 with 0x01 at once. The key-change restart waits for
+// this much Improv silence, so it never cuts that 0x01 off (a following 0x01 restarts anyway).
+const unsigned long kKeyRestartIdleMs = 3000;
 
 #if !defined(ARDUINO_ARCH_ESP8266)
 bool s_scanRunning = false;
@@ -101,11 +105,15 @@ void handleWifiSettings() {
 
   // The transport owns the FSM and the persist-before-Connecting ordering; main.cpp's loop sees
   // readyToConnect() and performs the join exactly as it does for a BLE or portal commit.
+  // Round 2 F8: accepted in every phase - USB is physical access, the same trust as 0xF0. On a
+  // board that is already on Wi-Fi the commit makes src/main.cpp restart into the new settings, so
+  // the outcome is not awaited here: the old connection must not be reported as the new one.
+  const bool running = fry_wifi::isConnected();
   if (!fry_provisioning::commitWifiOnlyCredentials(ssid, pass)) {
     sendError(Error::InvalidRpc);
     return;
   }
-  s_awaitingWifi = true;
+  s_awaitingWifi = !running;
   sendState(State::Provisioning);
 }
 
@@ -207,11 +215,7 @@ void pollWifiOutcome() {
 void dispatch(bool transportRunning) {
   switch (static_cast<Command>(s_parser.command())) {
     case Command::WifiSettings:
-      if (!transportRunning) {
-        sendError(Error::NotAuthorized);  // Wi-Fi settings stay gated on the provisioning transport
-        break;
-      }
-      handleWifiSettings();
+      handleWifiSettings();  // every phase since round 2 (PROTOCOL.md 11.8)
       break;
     case Command::RequestState:
       sendState(currentState());
@@ -253,6 +257,7 @@ void poll(bool transportRunning) {
   for (int budget = 0; budget < 256 && Serial.available(); budget++) {
     switch (s_parser.feed(static_cast<uint8_t>(Serial.read()))) {
       case Result::Rpc:
+        s_lastRpcMs = millis();
         dispatch(transportRunning);
         break;
       case Result::BadChecksum:
@@ -269,9 +274,9 @@ void poll(bool transportRunning) {
 }
 
 bool consumeKeyChanged() {
-  const bool changed = s_keyChanged;
+  if (!s_keyChanged || millis() - s_lastRpcMs < kKeyRestartIdleMs) return false;
   s_keyChanged = false;
-  return changed;
+  return true;
 }
 
 }  // namespace fry_improv
