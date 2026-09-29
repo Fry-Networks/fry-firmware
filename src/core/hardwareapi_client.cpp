@@ -54,10 +54,9 @@ const uint32_t kQuickRetryMs = 2000;
 // every key-shaped token masked (fry::sanitizeServerDetail). Never logs the body wholesale.
 void readServerDetail(HTTPClient& http, const char* minerKey, char* out, size_t outLen) {
   out[0] = 0;
-  const int size = http.getSize();
-  // Not a JSON error body; do not buffer it. -1 is a chunked body of unknown length: getString()
-  // would buffer all of it, so it counts as too big too (round 2 F10).
-  if (size < 0 || size > 2048) return;
+  // Not a JSON error body (or a chunked one of unknown length): do not buffer it. The rule is
+  // fry::tooBigForServerDetail, pinned by test_server_detail_size (round 2 F10).
+  if (fry::tooBigForServerDetail(http.getSize())) return;
   JsonDocument rdoc;
   if (deserializeJson(rdoc, http.getString())) return;
   const char* d = rdoc["detail"].is<const char*>() ? rdoc["detail"].as<const char*>()

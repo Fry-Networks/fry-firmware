@@ -41,4 +41,11 @@ const char* regClassText(RegClass c);
 // "...". Always NUL-terminates; returns the length written.
 size_t sanitizeServerDetail(const char* in, const char* minerKey, char* out, size_t outCap);
 
+// Whether a 4xx body of `contentLength` bytes (HTTPClient::getSize()) is buffered to quote its
+// "detail"/"error" at all: anything over 2048 bytes is not, and neither is a negative size - -1 is
+// a chunked body of unknown length, which getString() would buffer in full (round 2 F10).
+inline bool tooBigForServerDetail(int contentLength) {
+  return contentLength < 0 || contentLength > 2048;
+}
+
 }  // namespace fry
