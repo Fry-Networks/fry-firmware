@@ -92,3 +92,34 @@ test("0x42 is still not a vendor command", () => {
     if (name.startsWith("kFryReq")) assert.notEqual(bytes[9], 0x42);
   }
 });
+
+// ---- the shared fixture (round 2): test/fixtures/improv_fry_vectors.json ------------------------
+// The single source the dashboard vendors byte-identical and the native suite test_improv_fixture
+// reads. Every vector there must equal the C++ golden, the independent JS encoding above, and
+// PROTOCOL.md - and must say how it was built (its strings / request data), not just its bytes.
+const fixture = JSON.parse(readFileSync(
+  path.resolve(here, "../fixtures/improv_fry_vectors.json"), "utf8"));
+
+test("the fixture carries exactly the seven vectors", () => {
+  assert.equal(fixture.schema, 1);
+  assert.deepEqual(fixture.vectors.map((v) => v.name).sort(), Object.keys(expected).sort());
+});
+
+for (const v of fixture.vectors) {
+  test(`${v.name}: fixture hex = C++ golden = JS encoding`, () => {
+    assert.equal(v.hex, hex(expected[v.name]));
+    assert.equal(v.hex, hex(goldens().get(v.name)));
+  });
+
+  test(`${v.name}: the fixture's own inputs rebuild its bytes`, () => {
+    const rebuilt = v.kind === "rpc_request"
+      ? rpcRequest(v.command, [...Buffer.from(v.data_hex, "hex")])
+      : rpcResult(v.command, v.strings);
+    assert.equal(hex(rebuilt), v.hex);
+  });
+}
+
+test("the fixture file is ASCII-only, so vendored copies stay byte-identical", () => {
+  const raw = readFileSync(path.resolve(here, "../fixtures/improv_fry_vectors.json"));
+  assert.ok([...raw].every((b) => b < 0x80));
+});
