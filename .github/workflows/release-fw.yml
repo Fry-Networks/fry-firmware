@@ -119,6 +119,7 @@ jobs:
           python3 tools/test_make_manifest_envs.py
           python3 tools/test_check_no_token.py
           python3 tools/test_check_prod_channel.py
+          python3 tools/test_ble_key_write_security.py
 
   flasher-assets:
     runs-on: ubuntu-latest

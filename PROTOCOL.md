@@ -478,22 +478,33 @@ authentication" unless the link is authenticated (MITM); Just Works never is, so
 of 0.4.0 refused every write, and Android then waited on a MITM pairing the board cannot offer.
 
 - **`09` is a plain WRITE; the board checks the encryption.** A `09` write over an unencrypted link
-  is ignored (not copied, no status change). Secure Connections Only stays on, so legacy pairing is
+  is ignored: its value is cleared from the attribute before anything reads it, and nothing
+  changes (the write still succeeds at ATT level). An accepted or refused key is cleared from the
+  attribute too. Secure Connections Only stays on, so legacy pairing is
   still refused and any encrypted link is an LE Secure Connections one. This replaces "write,
   encrypted write" in the 11.3 table and the "`09` stays WRITE_ENC" sentence in 11.8.
+- **`0A` reports the link: `"enc":0|1`**, appended as the last member, for the link of the
+  central that reads it (a notification reports the one connected central's link). Boards before
+  0.4.1 send no `"enc"`; they cannot take a key over BLE at all (below).
 - **The client pairs before it writes `09`.** A client with an owner key starts pairing itself
-  (Android: `createBond()`, then waits for BONDED; the system consent dialog may appear) and writes
-  `09` only on the encrypted link, so the key never goes out in the clear. A client that writes `09`
-  first has sent the key unencrypted and the board ignores it.
+  (Android: `createBond()`, then waits for BONDED; the system consent dialog may appear), reads `0A`
+  again and writes `09` only when it reports `"enc":1`, so the key never goes out in the clear. A
+  client that writes `09` first has sent the key unencrypted and the board ignores it. "A client that
+  wrote `09` is paired" in 11.8 now reads "a client that paired".
 - **Android keeps a bond the board does not.** The board still pairs without bonding. Android
   stores the pairing anyway, encrypts the next connection with it, the board has no key for it, and
   Android drops the link (HCI "key missing") and forgets the bond. A client that was bonded when it
   connected and loses the link that way connects once more; that session pairs anew.
 - **Boards on 0.4.0** cannot take a key over BLE; set it over USB (Improv `0xF0`, the web setup
   page) or update the board first. Nothing else in 0.4.0's BLE service is affected.
-- **Advertising after a disconnect.** The board advertises again after every BLE disconnect. 0.3.x
-  and 0.4.0 did not (NimBLE-Arduino 2.x leaves it off): after one BLE session, finished or not, a
-  board could not be found again until it rebooted.
+- **Advertising after a disconnect.** After a BLE disconnect the board advertises again unless it
+  is Connected (3), and it stops advertising when it reaches Connected with no central connected
+  (after a handoff). 0.3.x and 0.4.0 never advertised again (NimBLE-Arduino 2.x does not by itself):
+  after one BLE session that did not end Connected - a dropped link, a wrong password, a user who
+  backed out - the board could not be found again until it rebooted. A Connected board stays quiet
+  as before, since `05` is readable. Residual: while a board is in Error (including a running board
+  in an API-side error, 11.8) it advertises, and any central in range can pair Just Works, read `05`
+  and start a new attempt.
 - **Serial line added:**
 
 ```

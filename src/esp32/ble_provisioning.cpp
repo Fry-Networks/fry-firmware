@@ -57,12 +57,24 @@ char s_pendingPass[65] = {0};
 // Characteristic 09: held in RAM only, persisted together with Wi-Fi at the wallet commit.
 char s_pendingKey[37] = {0};
 
-void setDevStatusValue() {
+// PROTOCOL.md 11.9: 0A also says whether the reader's link is encrypted ("enc"), so a client can
+// prove the link before it writes the key to 09. enc < 0: the one connected central's link, if any.
+void setDevStatusValue(int enc = -1) {
   if (!s_chDevStatus) return;
+  if (enc < 0) {
+    NimBLEServer* server = NimBLEDevice::getServer();
+    enc = (server && server->getConnectedCount() > 0 && server->getPeerInfo(0).isEncrypted()) ? 1 : 0;
+  }
   fry::DeviceStatus status;
   fry_status::snapshot(status);
-  char json[fry::kStatusJsonMax + 1];
-  const size_t n = fry::buildStatusJson(status, json, sizeof(json));
+  char json[fry::kStatusJsonMax + 16];
+  size_t n = fry::buildStatusJson(status, json, fry::kStatusJsonMax + 1);
+  static const char kEnc[] = ",\"enc\":0}";
+  if (n >= 2 && json[n - 1] == '}' && n - 1 + sizeof(kEnc) <= sizeof(json)) {
+    memcpy(json + n - 1, kEnc, sizeof(kEnc));  // replaces the closing brace, adds the NUL
+    json[n - 1 + 7] = enc ? '1' : '0';
+    n += sizeof(kEnc) - 2;
+  }
   s_chDevStatus->setValue(reinterpret_cast<const uint8_t*>(json), n);
 }
 
@@ -115,14 +127,13 @@ class ProvCallbacks : public NimBLECharacteristicCallbacks {
  public:
   // 05 and 0A are read fresh: the key can change over USB while the link is up.
   void onRead(NimBLECharacteristic* ch, NimBLEConnInfo& connInfo) override {
-    (void)connInfo;
     if (ch == s_chKey) {
       char key[40] = {0};
       fry_identity::ensureMinerKey(key, sizeof(key));
       // As a C string: the array overload would publish all 40 bytes, trailing NULs included.
       ch->setValue(static_cast<const char*>(key));
     } else if (ch == s_chDevStatus) {
-      setDevStatusValue();
+      setDevStatusValue(connInfo.isEncrypted() ? 1 : 0);
     }
   }
 
@@ -134,8 +145,9 @@ class ProvCallbacks : public NimBLECharacteristicCallbacks {
       // PROTOCOL.md 11.9: 09 carries no ATT security flag, so the encryption check is ours. With
       // Secure Connections Only an encrypted link is always an LE Secure Connections one.
       if (!connInfo.isEncrypted()) {
+        ch->setValue("");  // NimBLE stored the value before this callback: do not keep it
         Serial.println("[prov] key write ignored: link not encrypted - pair first (LE Secure Connections)");
-        return;  // not even copied
+        return;  // not copied
       }
       char key[40] = {0};
       size_t rawLen = 0;
@@ -157,6 +169,7 @@ class ProvCallbacks : public NimBLECharacteristicCallbacks {
                       verdict == fry::KeyWriteVerdict::BadKey ? "bad_key" : "key_locked");
       }
       memset(key, 0, sizeof(key));
+      ch->setValue("");  // the attribute buffer held the key too
       updateStatusChar();
     } else if (ch == s_chSsid) {
       size_t rawLen = 0;
@@ -226,7 +239,10 @@ class ServerCallbacks : public NimBLEServerCallbacks {
     (void)server;
     (void)connInfo;
     (void)reason;
-    clearStagedKey();  // advertising restarts on its own (advertiseOnDisconnect, set in init)
+    clearStagedKey();
+    // NimBLE-Arduino 2.x does not advertise again by itself. Advertise again only while the board
+    // can still be provisioned: a Connected board stays quiet, as before, since 05 is readable.
+    if (s_fsm.state() != fry::ProvState::Connected) NimBLEDevice::startAdvertising();
   }
 };
 
@@ -248,9 +264,6 @@ void init(const char* deviceName, const char* minerKey) {
 
   NimBLEServer* server = NimBLEDevice::createServer();
   server->setCallbacks(&s_serverCallbacks);
-  // NimBLE-Arduino 2.x leaves this off: without it the board stopped advertising after its first
-  // BLE session and could not be found again until it rebooted.
-  server->advertiseOnDisconnect(true);
   NimBLEService* service = server->createService(kServiceUuid);
 
   s_chSsid = service->createCharacteristic(kUuidSsid, NIMBLE_PROPERTY::WRITE);
@@ -361,6 +374,11 @@ void notifyWifiNoIp() {
 void notifyApiOk() {
   s_fsm.feed(fry::ProvEvent::ApiOk, {});
   updateStatusChar();
+  // Advertising restarted after a handoff disconnect (onDisconnect) ends once the board is Connected.
+  NimBLEServer* server = NimBLEDevice::getServer();
+  if (s_fsm.state() == fry::ProvState::Connected && server && server->getConnectedCount() == 0) {
+    NimBLEDevice::stopAdvertising();
+  }
 }
 void notifyApiFail(fry::ProvErr detail) {
   fry::ProvInputs in;
