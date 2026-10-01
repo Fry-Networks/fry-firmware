@@ -87,7 +87,7 @@ is wrong instead of just showing an empty list.
 is online and earning will still be invisible on the dashboard until you claim its miner key,
 because the dashboard lists devices belonging to your account, not every device on the network.
 
-1. Sign in at **<https://dashboard.frynetworks.com>** and connect your wallet (Pera, Defly, Lute
+1. Sign in at **<https://fry.farm/dashboard>** and connect your wallet (Pera, Defly, Lute
    and Kibisis are supported).
 2. Register the `FEM-...` miner key from step 4 to your account.
 3. The device appears under **Devices**.
@@ -100,7 +100,7 @@ it is not a live link to the board.
 
 ## 6. Monitor it
 
-**Dashboard** — <https://dashboard.frynetworks.com> is the source of truth for status and rewards.
+**Dashboard** — <https://fry.farm/dashboard> is the source of truth for status and rewards.
 A device's standing comes from its Proof of Connectivity record: 144 ten-minute slots per day.
 Rewards are always claimed manually; nothing is auto-sent.
 

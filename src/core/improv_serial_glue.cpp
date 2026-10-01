@@ -28,7 +28,7 @@
 #define FRY_CHIP "UNKNOWN"
 #endif
 #ifndef IMPROV_DEVICE_URL_BASE
-#define IMPROV_DEVICE_URL_BASE "https://dashboard.frynetworks.com/new_registration"
+#define IMPROV_DEVICE_URL_BASE "https://fry.farm/dashboard/new_registration"
 #endif
 
 namespace fry_improv {
