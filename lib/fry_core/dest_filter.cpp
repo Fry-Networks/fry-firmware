@@ -166,6 +166,10 @@ bool destIsBlockedV6(const uint8_t ip[16], const DestCtx& ctx) {
     if (ip[i] != 0) { allZeroButLast = false; break; }
   }
   if (allZeroButLast && ip[15] <= 1) return true;      // :: and ::1
+  {
+    static const uint8_t kZero12[12] = {0};
+    if (std::memcmp(ip, kZero12, 12) == 0) return destIsBlockedV4(be32(ip + 12), ctx);  // ::/96 IPv4-compatible
+  }
   if ((ip[0] & 0xFE) == 0xFC) return true;             // fc00::/7
   if (ip[0] == 0xFE && (ip[1] & 0xC0) == 0x80) return true;  // fe80::/10
   if (ip[0] == 0xFF) return true;                      // ff00::/8

@@ -75,7 +75,7 @@ void test_v6_table() {
   a[15] = 1;
   TEST_ASSERT_TRUE(fry::destIsBlockedV6(a));
   a[15] = 2;
-  TEST_ASSERT_FALSE(fry::destIsBlockedV6(a));  // ::2 is not special here
+  TEST_ASSERT_TRUE(fry::destIsBlockedV6(a));  // ::2 = ::0.0.0.2, inside 0.0.0.0/8 (::/96 follows the v4 rules)
   // fc00::/7 covers fc and fd
   { const uint8_t h[] = {0xfc, 0x00}; v6(a, h, 2); TEST_ASSERT_TRUE(fry::destIsBlockedV6(a)); }
   { const uint8_t h[] = {0xfd, 0xff}; v6(a, h, 2); TEST_ASSERT_TRUE(fry::destIsBlockedV6(a)); }
@@ -173,8 +173,27 @@ void test_embedded_v4_uses_ctx_nat64_6to4() {
   TEST_ASSERT_TRUE(lit);
 }
 
+// C2 review: IPv4-COMPATIBLE IPv6 (::/96 with an embedded v4) follows the v4 rules, with the ctx.
+void test_v4_compatible_v6_follows_v4_rules() {
+  uint8_t a[16] = {0};
+  a[12] = 127; a[15] = 1;                       // ::127.0.0.1
+  TEST_ASSERT_TRUE(fry::destIsBlockedV6(a));
+  a[12] = 10; a[13] = 0; a[14] = 0; a[15] = 1;  // ::10.0.0.1
+  TEST_ASSERT_TRUE(fry::destIsBlockedV6(a));
+  a[12] = 192; a[13] = 168; a[14] = 1; a[15] = 1;
+  TEST_ASSERT_TRUE(fry::destIsBlockedV6(a));
+  a[12] = 8; a[13] = 8; a[14] = 8; a[15] = 8;   // ::8.8.8.8 public embedded v4
+  TEST_ASSERT_FALSE(fry::destIsBlockedV6(a));
+  TEST_ASSERT_TRUE(fry::destIsBlockedV6(a, DestCtx{ip4(8, 8, 8, 1), ip4(255, 255, 255, 0), 0}));  // own LAN
+  bool lit = false;
+  TEST_ASSERT_FALSE(fry::destFilterText("::127.0.0.1", noCtx(), &lit));
+  TEST_ASSERT_TRUE(lit);
+  TEST_ASSERT_FALSE(fry::destFilterText("::10.0.0.1", noCtx(), &lit));
+}
+
 int main() {
   UNITY_BEGIN();
+  RUN_TEST(test_v4_compatible_v6_follows_v4_rules);
   RUN_TEST(test_noncanonical_literals_are_blocked);
   RUN_TEST(test_embedded_v4_uses_ctx_nat64_6to4);
   RUN_TEST(test_v4_blocked_ranges_edges);
