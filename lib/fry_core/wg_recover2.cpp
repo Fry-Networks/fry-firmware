@@ -134,7 +134,7 @@ WgMigrationAction wgMigrationDecide(const WgMigrationInput& in) {
 }
 
 bool wgPeerHealthy(bool libSaysUp, bool haveHandshake, uint32_t handshakeAgeS) {
-  return libSaysUp && haveHandshake && handshakeAgeS < kWg2DeadAfterS;
+  return libSaysUp && haveHandshake && handshakeAgeS < kWgHandshakeDeadS;
 }
 
 }  // namespace fry

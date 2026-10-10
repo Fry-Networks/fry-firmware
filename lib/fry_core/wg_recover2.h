@@ -51,9 +51,9 @@ constexpr uint32_t kWgRetryAfterMaxS = 3600 / kWg2TimerDiv;
 // INF-1: the library's esp_wireguard_peer_is_up() stays OK while the PREVIOUS keypair is valid,
 // and that keypair is never expired once the current one is destroyed (~180 s) - so a session
 // that rekeyed before the hub dropped the peer reads "up" forever. Health is therefore judged
-// from the age of the latest handshake against kWg2DeadAfterS (the same constant decide() uses).
-//   healthy  <=>  libSaysUp && haveHandshake && handshakeAgeS < kWg2DeadAfterS
-// Boundary: age == kWg2DeadAfterS is NOT healthy (decide() calls the tunnel dead at >= 180 s).
+// from the age of the latest handshake against kWgHandshakeDeadS (real-time T1, 180 s in every build).
+//   healthy  <=>  libSaysUp && haveHandshake && handshakeAgeS < kWgHandshakeDeadS
+// Boundary: age == kWgHandshakeDeadS is NOT healthy (T1: dead at >= 180 s without a handshake).
 // libSaysUp == false is never healthy; haveHandshake == false (no handshake time) is not healthy.
 bool wgPeerHealthy(bool libSaysUp, bool haveHandshake, uint32_t handshakeAgeS);
 
