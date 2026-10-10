@@ -11,6 +11,8 @@
 // Run the QA timer variant with: PLATFORMIO_BUILD_FLAGS=-DFRY_QA_COMPRESSED_TIMERS=1
 #include <unity.h>
 
+#include <cstdio>
+
 #include "wg_recover2.h"
 
 using fry::WgRecover2;
@@ -22,7 +24,12 @@ void tearDown() {}
 
 namespace {
 
-constexpr uint32_t kThr = fry::kWg2DeadAfterS;
+// Real-time handshake-age threshold (180 s in EVERY build): the WireGuard protocol timers are
+// not compressed in the QA build, so the age limit must not be either.
+constexpr uint32_t kThr = fry::kWgHandshakeDeadS;
+// A healthy board's handshake age routinely reaches this: the library's REKEY_AFTER_TIME (120 s)
+// plus its keepalive (25 s). Must be healthy in release and QA builds alike.
+constexpr uint32_t kRealisticRekeyAgeS = 120 + 25;
 
 // Simulated board whose last handshake happened at t=0 and whose hub removed the peer: no new
 // handshake ever arrives. The lib verdict is "up" the whole time (stale prev keypair still valid).
@@ -32,7 +39,7 @@ struct Fired { WgRecoverAction a = WgRecoverAction::None; uint32_t atS = 0; };
 Fired walkAgedSession(bool useHelper, uint32_t sessionAgeAtStartS, uint32_t untilS) {
   WgRecover2 r;
   Fired f;
-  const uint32_t step = 5 / fry::kWg2TimerDiv ? 5 / fry::kWg2TimerDiv : 1;
+  const uint32_t step = 5;  // real seconds: WireGuard handshake ages are never compressed
   for (uint32_t t = 0; t <= untilS; t += step) {
     const bool libSaysUp = true;
     const uint32_t age = sessionAgeAtStartS + t;
@@ -74,7 +81,17 @@ void test_boundary_follows_dead_after_constant() {
   TEST_ASSERT_TRUE(fry::wgPeerHealthy(true, true, kThr - 1));
   TEST_ASSERT_FALSE(fry::wgPeerHealthy(true, true, kThr));
   TEST_ASSERT_FALSE(fry::wgPeerHealthy(true, true, kThr + 1));
-  TEST_ASSERT_EQUAL_UINT32(180 / fry::kWg2TimerDiv, kThr);  // 180 release, 18 QA
+  TEST_ASSERT_EQUAL_UINT32(180, kThr);  // 180 s real time in release AND QA builds
+  TEST_ASSERT_EQUAL_UINT32(fry::kWg2DeadAfterS * fry::kWg2TimerDiv, kThr);
+}
+
+// A healthy board at a realistic rekey cadence (145 s) is healthy in every build; the boundary
+// is kWgHandshakeDeadS, never the compressed decide() window.
+void test_realistic_rekey_age_is_healthy_in_every_build() {
+  TEST_ASSERT_TRUE(kRealisticRekeyAgeS < fry::kWgHandshakeDeadS);
+  TEST_ASSERT_TRUE(fry::wgPeerHealthy(true, true, kRealisticRekeyAgeS));
+  TEST_ASSERT_TRUE(fry::wgPeerHealthy(true, true, fry::kWgHandshakeDeadS - 1));
+  TEST_ASSERT_FALSE(fry::wgPeerHealthy(true, true, fry::kWgHandshakeDeadS));
 }
 
 // (d) lib says down: never healthy, whatever the age; no handshake time: not healthy.
@@ -89,14 +106,15 @@ void test_lib_down_or_no_handshake_is_not_healthy() {
 // Aged session, hub removed the peer: the fixed check feeds decide() up=false once the handshake
 // is >= kWg2DeadAfterS old, and decide() reaches a recover action; the pre-fix check never does.
 void test_aged_session_reaches_recover_action() {
-  const uint32_t horizon = 420 / fry::kWg2TimerDiv;  // the hardware observation window
-  // Session already 150 s (QA: 15 s) old when the peer is removed.
-  const uint32_t startAge = 150 / fry::kWg2TimerDiv;
+  const uint32_t horizon = 420;   // real seconds: the hardware observation window
+  const uint32_t startAge = 150;  // session already 150 s old when the peer is removed
   Fired pre = walkAgedSession(false, startAge, horizon);
   TEST_ASSERT_TRUE(pre.a == WgRecoverAction::None);  // pre-fix behaviour: stuck "up" forever
   Fired post = walkAgedSession(true, startAge, horizon);
   TEST_ASSERT_TRUE(post.a != WgRecoverAction::None);
   TEST_ASSERT_TRUE(post.atS <= horizon);
+  printf("INF1 time-to-recover-action: %u s (kWg2TimerDiv=%u)\n", (unsigned)post.atS,
+         (unsigned)fry::kWg2TimerDiv);
 }
 
 // A healthy board that keeps handshaking never recovers.
@@ -120,6 +138,7 @@ int main() {
   RUN_TEST(test_bug_case_stale_prev_keypair_is_not_healthy);
   RUN_TEST(test_recent_handshake_is_healthy);
   RUN_TEST(test_boundary_follows_dead_after_constant);
+  RUN_TEST(test_realistic_rekey_age_is_healthy_in_every_build);
   RUN_TEST(test_lib_down_or_no_handshake_is_not_healthy);
   RUN_TEST(test_aged_session_reaches_recover_action);
   RUN_TEST(test_young_sessions_never_recover);

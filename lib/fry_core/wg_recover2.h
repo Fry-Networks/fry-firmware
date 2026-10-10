@@ -31,6 +31,11 @@ constexpr uint32_t kWg2TimerDiv = 1;
 #endif
 
 constexpr uint32_t kWg2DeadAfterS = 180 / kWg2TimerDiv;      // T1
+// Handshake-age limit for wgPeerHealthy: REAL-TIME T1 (180 s) in every build. WireGuard's own
+// protocol timers (rekey ~120 s, keepalive 25 s) are NOT compressed in the QA build, so a healthy
+// board's handshake age legitimately reaches 120-145 s there too; only decide()'s dead window
+// (kWg2DeadAfterS) is compressed.
+constexpr uint32_t kWgHandshakeDeadS = kWg2DeadAfterS * kWg2TimerDiv;
 constexpr uint32_t kWg2StageAWindowS = 60 / kWg2TimerDiv;    // a re-resolved tunnel's grace
 constexpr uint32_t kWg2JitterMaxS = 60 / kWg2TimerDiv;       // per-device delay of stage B
 constexpr uint32_t kWg2StageBFloorS = 60 / kWg2TimerDiv;     // persisted anti-reboot-loop floor
