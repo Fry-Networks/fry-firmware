@@ -58,6 +58,17 @@ bool s_wasUp = false;
 bool s_relayStarted = false;  // the SOCKS5 task must start once; bringUp() can now run again
 volatile uint32_t s_relayedBytes = 0;
 
+// INF-1: esp_wireguard_peer_is_up() also accepts the PREVIOUS keypair, which the library never
+// expires, so an aged session reads "up" forever. Judge health by the latest handshake's age.
+bool peerHealthy() {
+  const bool libUp = esp_wireguard_peer_is_up(&s_wgCtx) == ESP_OK;
+  time_t hs = 0;
+  const bool haveHs = esp_wireguard_latest_handshake(&s_wgCtx, &hs) == ESP_OK;
+  time_t now = time(nullptr);
+  const uint32_t ageS = (haveHs && now > hs) ? static_cast<uint32_t>(now - hs) : 0;
+  return fry::wgPeerHealthy(libUp, haveHs, ageS);
+}
+
 // Config strings must outlive the wireguard_config_t (esp_wireguard keeps the pointers, does
 // not copy them), so these are file-scope statics rather than locals in init().
 String s_priv, s_pub, s_psk, s_addr, s_netmask, s_endpoint;
@@ -504,7 +515,7 @@ void recoverTick() {
   lastMs = nowMs;
 
   const bool up =
-      s_initialized && s_wgCtx.netif != nullptr && esp_wireguard_peer_is_up(&s_wgCtx) == ESP_OK;
+      s_initialized && s_wgCtx.netif != nullptr && peerHealthy();
   if (up) s_recovering = false;
 
   // T3: a refreshed config runs as a trial. It is persisted only after it handshakes; if it never
@@ -697,7 +708,7 @@ void tick() {
     bringUp();
     return;
   }
-  bool up = (s_wgCtx.netif != nullptr && esp_wireguard_peer_is_up(&s_wgCtx) == ESP_OK);
+  bool up = (s_wgCtx.netif != nullptr && peerHealthy());
   if (up && !s_wasUp) {
     char pub8[9] = {0};
     strncpy(pub8, s_wgConfig.public_key, 8);
