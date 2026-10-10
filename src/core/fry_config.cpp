@@ -13,23 +13,43 @@
 
 namespace fry_config {
 
+namespace {
+// Does the NVS namespace exist? Probed with a raw read-only nvs_open: it neither logs (Preferences::
+// begin(ns, true) logs an [E] nvs_open NOT_FOUND on every call for a namespace never written) nor
+// writes flash (a read-write open would create the namespace). A positive answer is cached per name:
+// a namespace is never removed (clearVpn()/factoryReset() clear its keys only). Every read-only
+// getter below goes through this plus the kv_guard.h templates, so an expected state (a namespace or
+// an optional key that was never written) produces no [E] line (T8).
+bool nsExists(const char* ns) {
+#ifdef ESP8266
+  (void)ns;
+  return true;
+#else
+  static char seen[8][12];
+  static int nseen = 0;
+  for (int i = 0; i < nseen; i++) {
+    if (std::strcmp(seen[i], ns) == 0) return true;
+  }
+  nvs_handle_t h;
+  if (nvs_open(ns, NVS_READONLY, &h) != ESP_OK) return false;
+  nvs_close(h);
+  if (nseen < 8 && std::strlen(ns) < sizeof(seen[0])) std::strcpy(seen[nseen++], ns);
+  return true;
+#endif
+}
+}  // namespace
+
 // ── fry_wifi ──────────────────────────────────────────────────────────────
 
 bool hasWifi() {
   KvStore p;
-  p.begin("fry_wifi", true);
-  bool has = p.isKey("ssid");
-  p.end();
-  return has;
+  return fry::kvReadGuarded<bool>(nsExists, p, "fry_wifi", "ssid", false, [](KvStore&) { return true; });
 }
 
 bool getWifi(char* ssid, size_t ssidLen, char* pass, size_t passLen) {
   KvStore p;
-  p.begin("fry_wifi", true);
-  bool has = p.isKey("ssid");
-  p.getString("ssid", ssid, ssidLen);
-  p.getString("pass", pass, passLen);
-  p.end();
+  const bool has = fry::kvGetCStringGuarded(nsExists, p, "fry_wifi", "ssid", ssid, ssidLen);
+  if (has) fry::kvGetCStringGuarded(nsExists, p, "fry_wifi", "pass", pass, passLen);
   return has;
 }
 
@@ -52,10 +72,7 @@ void clearWifi() {
 
 String getWallet() {
   KvStore p;
-  p.begin("fry", true);
-  String v = p.getString("wallet", "");
-  p.end();
-  return v;
+  return fry::kvGetStringGuarded<String>(nsExists, p, "fry", "wallet");  // T8: no [E] for a missing namespace/key
 }
 
 void setWallet(const char* wallet) {
@@ -67,19 +84,12 @@ void setWallet(const char* wallet) {
 
 bool hasWallet() {
   KvStore p;
-  p.begin("fry", true);
-  bool has = p.isKey("wallet");
-  p.end();
-  return has;
+  return fry::kvReadGuarded<bool>(nsExists, p, "fry", "wallet", false, [](KvStore&) { return true; });
 }
 
 bool getMinerKey(char* out, size_t outLen) {
   KvStore p;
-  p.begin("fry", true);
-  bool has = p.isKey("minerKey");
-  p.getString("minerKey", out, outLen);
-  p.end();
-  return has;
+  return fry::kvGetCStringGuarded(nsExists, p, "fry", "minerKey", out, outLen);
 }
 
 void setMinerKey(const char* key) {
@@ -90,6 +100,7 @@ void setMinerKey(const char* key) {
 }
 
 bool getSalt(uint8_t out[16]) {
+  if (!nsExists("fry")) return false;
   KvStore p;
   p.begin("fry", true);
   bool has = p.isKey("salt") && p.getBytesLength("salt") == 16;
@@ -107,10 +118,7 @@ void setSalt(const uint8_t salt[16]) {
 
 bool hasProvDone() {
   KvStore p;
-  p.begin("fry", true);
-  bool has = p.isKey("provDone") && p.getBool("provDone", false);
-  p.end();
-  return has;
+  return fry::kvReadGuarded<bool>(nsExists, p, "fry", "provDone", false, [](KvStore& s) { return s.getBool("provDone", false); });
 }
 
 void setProvDone() {
@@ -122,10 +130,7 @@ void setProvDone() {
 
 String getInstallId() {
   KvStore p;
-  p.begin("fry", true);
-  String v = p.getString("installId", "");
-  p.end();
-  return v;
+  return fry::kvGetStringGuarded<String>(nsExists, p, "fry", "installId");  // T8: no [E] for a missing namespace/key
 }
 
 void setInstallId(const char* id) {
@@ -137,18 +142,12 @@ void setInstallId(const char* id) {
 
 bool hasInstallId() {
   KvStore p;
-  p.begin("fry", true);
-  bool has = p.isKey("installId");
-  p.end();
-  return has;
+  return fry::kvReadGuarded<bool>(nsExists, p, "fry", "installId", false, [](KvStore&) { return true; });
 }
 
 String getDeviceToken() {
   KvStore p;
-  p.begin("fry", true);
-  String v = p.getString("deviceToken", "");
-  p.end();
-  return v;
+  return fry::kvGetStringGuarded<String>(nsExists, p, "fry", "deviceToken");  // T8: no [E] for a missing namespace/key
 }
 
 void setDeviceToken(const char* token) {
@@ -160,9 +159,7 @@ void setDeviceToken(const char* token) {
 
 String getApiBase() {
   KvStore p;
-  p.begin("fry", true);
-  String v = p.getString("apiBase", "");
-  p.end();
+  String v = fry::kvGetStringGuarded<String>(nsExists, p, "fry", "apiBase");  // optional override; T8: no [E] when absent
   if (v.length() == 0) return String(HARDWAREAPI_BASE);
   return v;
 }
@@ -176,10 +173,7 @@ void setApiBase(const char* base) {
 
 bool getKeyOk() {
   KvStore p;
-  p.begin("fry", true);
-  bool ok = p.isKey("keyOk") && p.getBool("keyOk", false);
-  p.end();
-  return ok;
+  return fry::kvReadGuarded<bool>(nsExists, p, "fry", "keyOk", false, [](KvStore& s) { return s.getBool("keyOk", false); });
 }
 
 void setKeyOk(bool ok) {
@@ -191,10 +185,7 @@ void setKeyOk(bool ok) {
 
 String getKeySrc() {
   KvStore p;
-  p.begin("fry", true);
-  String v = p.getString("keySrc", "");
-  p.end();
-  return v;
+  return fry::kvGetStringGuarded<String>(nsExists, p, "fry", "keySrc");  // T8: no [E] for a missing namespace/key
 }
 
 void setKeySrc(const char* src) {
@@ -206,10 +197,7 @@ void setKeySrc(const char* src) {
 
 String getApCode() {
   KvStore p;
-  p.begin("fry", true);
-  String v = p.getString("apCode", "");
-  p.end();
-  return v;
+  return fry::kvGetStringGuarded<String>(nsExists, p, "fry", "apCode");  // T8: no [E] for a missing namespace/key
 }
 
 void setApCode(const char* code) {
@@ -229,27 +217,6 @@ void clearInstallation() {
 
 // ── fry_vpn ───────────────────────────────────────────────────────────────
 
-namespace {
-// Does the NVS namespace exist? Probed with a raw read-only nvs_open: it neither logs (Preferences::
-// begin(ns, true) logs an [E] nvs_open NOT_FOUND on every call for a namespace never written, which
-// is every board with no VPN config) nor writes flash. A positive answer is cached: a namespace is
-// never removed (clearVpn() clears its keys only).
-bool nsExists(const char* ns) {
-#ifdef ESP8266
-  (void)ns;
-  return true;
-#else
-  static bool vpnSeen = false;
-  const bool isVpn = std::strcmp(ns, "fry_vpn") == 0;
-  if (isVpn && vpnSeen) return true;
-  nvs_handle_t h;
-  if (nvs_open(ns, NVS_READONLY, &h) != ESP_OK) return false;
-  nvs_close(h);
-  if (isVpn) vpnSeen = true;
-  return true;
-#endif
-}
-}  // namespace
 
 String getWgPriv() {
   KvStore p;
@@ -448,10 +415,7 @@ void setWgProvisioned(const char* peerPub, const char* psk, const char* endpoint
 #ifndef ESP8266
 uint32_t getWgRecoverAt() {
   KvStore p;
-  p.begin("fry_wgrec", true);
-  uint32_t v = p.getUInt("at", 0);
-  p.end();
-  return v;
+  return fry::kvReadGuarded<uint32_t>(nsExists, p, "fry_wgrec", "at", 0, [](KvStore& s) { return s.getUInt("at", 0); });
 }
 void setWgRecoverAt(uint32_t epochS) {
   KvStore p;
@@ -461,13 +425,8 @@ void setWgRecoverAt(uint32_t epochS) {
 }
 bool getWgPendingKeypair(char priv[45], char pub[45]) {
   KvStore p;
-  p.begin("fry_wgrec", true);
-  bool has = p.isKey("pPriv") && p.isKey("pPub");
-  if (has) {
-    p.getString("pPriv", priv, 45);
-    p.getString("pPub", pub, 45);
-  }
-  p.end();
+  const bool has = fry::kvGetCStringGuarded(nsExists, p, "fry_wgrec", "pPriv", priv, 45) &&
+                   fry::kvGetCStringGuarded(nsExists, p, "fry_wgrec", "pPub", pub, 45);
   return has && strlen(priv) == 44 && strlen(pub) == 44;
 }
 void setWgPendingKeypair(const char* priv, const char* pub) {
@@ -488,10 +447,8 @@ void clearWgPendingKeypair() {
 // a namespace that was never written logs an [E] nvs_open NOT_FOUND on every board's first boot.
 void getWgMigVer(char* out, size_t outLen) {
   KvStore p;
-  p.begin("fry_wgmig", false);
   out[0] = 0;
-  if (p.isKey("ver")) p.getString("ver", out, outLen);
-  p.end();
+  fry::kvGetCStringGuarded(nsExists, p, "fry_wgmig", "ver", out, outLen);
 }
 void setWgMigVer(const char* version) {
   KvStore p;
@@ -501,10 +458,7 @@ void setWgMigVer(const char* version) {
 }
 uint32_t getWgMigTries() {
   KvStore p;
-  p.begin("fry_wgmig", false);
-  uint32_t v = p.isKey("tries") ? p.getUInt("tries", 0) : 0;
-  p.end();
-  return v;
+  return fry::kvReadGuarded<uint32_t>(nsExists, p, "fry_wgmig", "tries", 0, [](KvStore& s) { return s.getUInt("tries", 0); });
 }
 void setWgMigTries(uint32_t n) {
   KvStore p;
@@ -534,10 +488,7 @@ void clearVpn() {
 
 String getOtaPending() {
   KvStore p;
-  p.begin("fry_ota", true);
-  String v = p.getString("pending", "");
-  p.end();
-  return v;
+  return fry::kvGetStringGuarded<String>(nsExists, p, "fry_ota", "pending");  // T8: no [E] for a missing namespace/key
 }
 void setOtaPending(const char* version) {
   KvStore p;
@@ -554,10 +505,7 @@ void clearOtaPending() {
 
 String getOtaUrl() {
   KvStore p;
-  p.begin("fry_ota", true);
-  String v = p.getString("url", "");
-  p.end();
-  return v;
+  return fry::kvGetStringGuarded<String>(nsExists, p, "fry_ota", "url");  // T8: no [E] for a missing namespace/key
 }
 void setOtaUrl(const char* url) {
   KvStore p;
@@ -572,10 +520,7 @@ void setOtaUrl(const char* url) {
 
 uint8_t getOtaBootFails() {
   KvStore p;
-  p.begin("fry_ota", true);
-  uint8_t v = p.getUChar("bootfails", 0);
-  p.end();
-  return v;
+  return fry::kvReadGuarded<uint8_t>(nsExists, p, "fry_ota", "bootfails", 0, [](KvStore& s) { return s.getUChar("bootfails", 0); });
 }
 void setOtaBootFails(uint8_t v) {
   KvStore p;
@@ -592,17 +537,11 @@ void clearOtaBootFails() {
 
 String getOtaBadVer() {
   KvStore p;
-  p.begin("fry_ota", true);
-  String v = p.getString("badver", "");
-  p.end();
-  return v;
+  return fry::kvGetStringGuarded<String>(nsExists, p, "fry_ota", "badver");  // T8: no [E] for a missing namespace/key
 }
 uint8_t getOtaBadN() {
   KvStore p;
-  p.begin("fry_ota", true);
-  uint8_t v = p.getUChar("badn", 0);
-  p.end();
-  return v;
+  return fry::kvReadGuarded<uint8_t>(nsExists, p, "fry_ota", "badn", 0, [](KvStore& s) { return s.getUChar("badn", 0); });
 }
 void setOtaStrikes(const char* version, uint8_t strikes) {
   KvStore p;
@@ -619,10 +558,7 @@ void setOtaStrikes(const char* version, uint8_t strikes) {
 
 bool getOtaPlannedRestart() {
   KvStore p;
-  p.begin("fry_ota", true);
-  bool v = p.isKey("planrst") && p.getBool("planrst", false);
-  p.end();
-  return v;
+  return fry::kvReadGuarded<bool>(nsExists, p, "fry_ota", "planrst", false, [](KvStore& s) { return s.getBool("planrst", false); });
 }
 void setOtaPlannedRestart(bool planned) {
   KvStore p;
@@ -637,10 +573,7 @@ void setOtaPlannedRestart(bool planned) {
 
 bool getOtaRolledBack() {
   KvStore p;
-  p.begin("fry_ota", true);
-  bool v = p.isKey("rbk") && p.getBool("rbk", false);
-  p.end();
-  return v;
+  return fry::kvReadGuarded<bool>(nsExists, p, "fry_ota", "rbk", false, [](KvStore& s) { return s.getBool("rbk", false); });
 }
 void setOtaRolledBack(bool rolledBack) {
   KvStore p;

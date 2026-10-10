@@ -325,6 +325,45 @@ void test_t8_missing_namespace_is_never_opened_and_logs_once() {
   TEST_ASSERT_EQUAL_INT(1, st.begins);
 }
 
+// T8, every optional read on the boot/OTA/API path (apiBase, fry_ota url, wifi, miner key, flags, counters).
+struct FakeKv {
+  int begins = 0, getStr = 0, getU = 0;
+  bool hasKey = false;
+  void begin(const char*, bool) { begins++; }
+  void end() {}
+  bool isKey(const char*) { return hasKey; }
+  std::string getString(const char*, const char*) { getStr++; return hasKey ? "v" : ""; }
+  size_t getString(const char*, char* out, size_t n) { getStr++; if (n > 1) { out[0] = 'v'; out[1] = 0; } return 1; }
+  uint32_t getUInt(const char*, uint32_t d) { getU++; return hasKey ? 7 : d; }
+  bool getBool(const char*, bool d) { getU++; return hasKey ? true : d; }
+};
+void test_t8_optional_reads_never_touch_a_missing_namespace_or_key() {
+  auto noNs = [](const char*) { return false; };
+  auto hasNs = [](const char*) { return true; };
+  char buf[8] = "x";
+  FakeKv a;  // namespace never written (fresh board): nothing is opened, nothing is read
+  TEST_ASSERT_EQUAL_STRING("", fry::kvGetStringGuarded<std::string>(noNs, a, "fry", "apiBase").c_str());
+  TEST_ASSERT_FALSE(fry::kvGetCStringGuarded(noNs, a, "fry", "minerKey", buf, sizeof(buf)));
+  TEST_ASSERT_EQUAL_UINT32(5, fry::kvReadGuarded<uint32_t>(noNs, a, "fry_ota", "bootfails", 5, [](FakeKv& s) { return s.getUInt("bootfails", 5); }));
+  TEST_ASSERT_FALSE(fry::kvReadGuarded<bool>(noNs, a, "fry_ota", "rbk", false, [](FakeKv& s) { return s.getBool("rbk", false); }));
+  TEST_ASSERT_EQUAL_INT(0, a.begins);
+  TEST_ASSERT_EQUAL_INT(0, a.getStr);
+  TEST_ASSERT_EQUAL_INT(0, a.getU);
+  FakeKv b;  // namespace exists but the optional key does not (apiBase/url/ssid/flags never set): opened, never read
+  TEST_ASSERT_EQUAL_STRING("", fry::kvGetStringGuarded<std::string>(hasNs, b, "fry", "apiBase").c_str());
+  TEST_ASSERT_FALSE(fry::kvGetCStringGuarded(hasNs, b, "fry", "minerKey", buf, sizeof(buf)));
+  TEST_ASSERT_EQUAL_UINT32(5, fry::kvReadGuarded<uint32_t>(hasNs, b, "fry_ota", "bootfails", 5, [](FakeKv& s) { return s.getUInt("bootfails", 5); }));
+  TEST_ASSERT_EQUAL_INT(0, b.getStr);
+  TEST_ASSERT_EQUAL_INT(0, b.getU);
+  TEST_ASSERT_EQUAL_STRING("x", buf);  // an absent key leaves the caller's buffer alone
+  FakeKv c;  // present: read normally
+  c.hasKey = true;
+  TEST_ASSERT_EQUAL_STRING("v", fry::kvGetStringGuarded<std::string>(hasNs, c, "fry", "apiBase").c_str());
+  TEST_ASSERT_TRUE(fry::kvGetCStringGuarded(hasNs, c, "fry", "minerKey", buf, sizeof(buf)));
+  TEST_ASSERT_EQUAL_STRING("v", buf);
+  TEST_ASSERT_EQUAL_UINT32(7, fry::kvReadGuarded<uint32_t>(hasNs, c, "fry_ota", "bootfails", 5, [](FakeKv& s) { return s.getUInt("bootfails", 5); }));
+}
+
 // T9: the PoC software block, in the shape the hwapi version gate reads.
 void test_t9_poc_software_block() {
   JsonDocument doc;
@@ -396,6 +435,7 @@ int main() {
   RUN_TEST(test_t7_gives_up_after_24_tries);
   RUN_TEST(test_t8_missing_key_is_not_read);
   RUN_TEST(test_t8_missing_namespace_is_never_opened_and_logs_once);
+  RUN_TEST(test_t8_optional_reads_never_touch_a_missing_namespace_or_key);
   RUN_TEST(test_t9_poc_software_block);
   RUN_TEST(test_lease_never_acquired_null_holder_is_neutral);
   RUN_TEST(test_lease_other_holder_is_denied);
