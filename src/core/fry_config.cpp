@@ -169,6 +169,59 @@ void setApiBase(const char* base) {
   p.end();
 }
 
+bool getKeyOk() {
+  KvStore p;
+  p.begin("fry", true);
+  bool ok = p.isKey("keyOk") && p.getBool("keyOk", false);
+  p.end();
+  return ok;
+}
+
+void setKeyOk(bool ok) {
+  KvStore p;
+  p.begin("fry", false);
+  p.putBool("keyOk", ok);
+  p.end();
+}
+
+String getKeySrc() {
+  KvStore p;
+  p.begin("fry", true);
+  String v = p.getString("keySrc", "");
+  p.end();
+  return v;
+}
+
+void setKeySrc(const char* src) {
+  KvStore p;
+  p.begin("fry", false);
+  p.putString("keySrc", src);
+  p.end();
+}
+
+String getApCode() {
+  KvStore p;
+  p.begin("fry", true);
+  String v = p.getString("apCode", "");
+  p.end();
+  return v;
+}
+
+void setApCode(const char* code) {
+  KvStore p;
+  p.begin("fry", false);
+  p.putString("apCode", code);
+  p.end();
+}
+
+void clearInstallation() {
+  KvStore p;
+  p.begin("fry", false);
+  p.remove("installId");
+  p.remove("deviceToken");
+  p.end();
+}
+
 // ── fry_vpn ───────────────────────────────────────────────────────────────
 
 String getWgPriv() {
@@ -346,6 +399,47 @@ void setWgProvisioned(const char* peerPub, const char* psk, const char* endpoint
   setWgProvAt(static_cast<uint32_t>(time(nullptr)));  // the new production-trust gate, written LAST
 }
 
+#ifndef ESP8266
+uint32_t getWgRecoverAt() {
+  KvStore p;
+  p.begin("fry_wgrec", true);
+  uint32_t v = p.getUInt("at", 0);
+  p.end();
+  return v;
+}
+void setWgRecoverAt(uint32_t epochS) {
+  KvStore p;
+  p.begin("fry_wgrec", false);
+  p.putUInt("at", epochS);
+  p.end();
+}
+bool getWgPendingKeypair(char priv[45], char pub[45]) {
+  KvStore p;
+  p.begin("fry_wgrec", true);
+  bool has = p.isKey("pPriv") && p.isKey("pPub");
+  if (has) {
+    p.getString("pPriv", priv, 45);
+    p.getString("pPub", pub, 45);
+  }
+  p.end();
+  return has && strlen(priv) == 44 && strlen(pub) == 44;
+}
+void setWgPendingKeypair(const char* priv, const char* pub) {
+  KvStore p;
+  p.begin("fry_wgrec", false);
+  p.putString("pPriv", priv);
+  p.putString("pPub", pub);
+  p.end();
+}
+void clearWgPendingKeypair() {
+  KvStore p;
+  p.begin("fry_wgrec", false);
+  p.remove("pPriv");
+  p.remove("pPub");
+  p.end();
+}
+#endif
+
 bool hasVpnConfig() {
   KvStore p;
   p.begin("fry_vpn", true);
@@ -418,6 +512,69 @@ void clearOtaBootFails() {
   KvStore p;
   p.begin("fry_ota", false);
   p.remove("bootfails");
+  p.end();
+}
+
+String getOtaBadVer() {
+  KvStore p;
+  p.begin("fry_ota", true);
+  String v = p.getString("badver", "");
+  p.end();
+  return v;
+}
+uint8_t getOtaBadN() {
+  KvStore p;
+  p.begin("fry_ota", true);
+  uint8_t v = p.getUChar("badn", 0);
+  p.end();
+  return v;
+}
+void setOtaStrikes(const char* version, uint8_t strikes) {
+  KvStore p;
+  p.begin("fry_ota", false);
+  if (version && version[0]) {
+    p.putString("badver", version);
+    p.putUChar("badn", strikes);
+  } else {
+    p.remove("badver");
+    p.remove("badn");
+  }
+  p.end();
+}
+
+bool getOtaPlannedRestart() {
+  KvStore p;
+  p.begin("fry_ota", true);
+  bool v = p.isKey("planrst") && p.getBool("planrst", false);
+  p.end();
+  return v;
+}
+void setOtaPlannedRestart(bool planned) {
+  KvStore p;
+  p.begin("fry_ota", false);
+  if (planned) {
+    p.putBool("planrst", true);
+  } else {
+    p.remove("planrst");
+  }
+  p.end();
+}
+
+bool getOtaRolledBack() {
+  KvStore p;
+  p.begin("fry_ota", true);
+  bool v = p.isKey("rbk") && p.getBool("rbk", false);
+  p.end();
+  return v;
+}
+void setOtaRolledBack(bool rolledBack) {
+  KvStore p;
+  p.begin("fry_ota", false);
+  if (rolledBack) {
+    p.putBool("rbk", true);
+  } else {
+    p.remove("rbk");
+  }
   p.end();
 }
 

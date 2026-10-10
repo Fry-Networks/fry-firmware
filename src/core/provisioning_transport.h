@@ -34,7 +34,10 @@ void notifyWifiUp();
 void notifyWifiAuthFail();
 void notifyWifiNoIp();
 void notifyApiOk();
-void notifyApiFail();
+// `detail` is the v1.1 registration code (Reg401..Unreachable); None reports the generic 4.
+void notifyApiFail(fry::ProvErr detail = fry::ProvErr::None);
+// v1.1: registration skipped because a USER_SUPPLIED board has no miner key yet.
+void notifyKeyMissing();
 
 // Commits WiFi-only credentials offered by Improv Serial (src/core/improv_serial_glue.cpp),
 // whose protocol carries no wallet field. Validates the SSID exactly as the BLE/SoftAP paths do,

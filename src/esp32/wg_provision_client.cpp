@@ -29,6 +29,8 @@ namespace {
 
 unsigned long s_nextAttemptMs = 0;
 uint32_t s_attemptNumber = 0;
+bool s_rotation = false;  // stage B armed: tick() runs although hasVpnConfig() is true
+fry::WgRotationState s_rotationState = fry::WgRotationState::Idle;
 
 // arduino-esp32's IPAddress packs the first octet in the LOW byte of its uint32_t conversion
 // (confirmed by src/esp32/vpn_wireguard.cpp's existing `staIp.u_addr.ip4.addr =
@@ -40,6 +42,8 @@ uint32_t arduinoIpToHostOrder(uint32_t arduinoOrder) {
   return ((arduinoOrder & 0xFFu) << 24) | ((arduinoOrder & 0xFF00u) << 8) |
         ((arduinoOrder & 0xFF0000u) >> 8) | ((arduinoOrder >> 24) & 0xFFu);
 }
+
+bool generateKeypair(char privB64[45], char pubB64[45]);
 
 // Reuses the persisted keypair if both halves already exist (logging "wg: keypair reused
 // pub=<8>"); otherwise generates one, persists it, and logs "wg: keypair generated pub=<8>".
@@ -56,6 +60,35 @@ bool ensureKeypair(char pubOut[45]) {
     return true;
   }
 
+  char privB64[45];
+  char pubB64[45];
+  if (!generateKeypair(privB64, pubB64)) return false;
+
+  // Persisted BEFORE the POST is sent — a crash/reset between keygen and the server's response
+  // never orphans it: the server's 200-idempotent-replay behavior recovers on retry.
+  fry_config::setWgKeypair(privB64, pubB64);
+  std::strncpy(pubOut, pubB64, 44);
+  pubOut[44] = 0;
+  Serial.printf("wg: keypair generated pub=%.8s\n", pubOut);
+  return true;
+}
+
+// Stage-B keypair: the pending pair in fry_wgrec if a previous attempt left one (the server
+// replays the same public key idempotently), otherwise a fresh one. NEVER touches fry_vpn's
+// wgPriv/wgPub: the old tunnel keeps using them until the response validates.
+bool rotationKeypair(char privOut[45], char pubOut[45]) {
+  if (fry_config::getWgPendingKeypair(privOut, pubOut)) {
+    Serial.printf("wg: rotation keypair reused pub=%.8s\n", pubOut);
+    return true;
+  }
+  if (!generateKeypair(privOut, pubOut)) return false;
+  fry_config::setWgPendingKeypair(privOut, pubOut);
+  Serial.printf("wg: rotation keypair generated pub=%.8s\n", pubOut);
+  return true;
+}
+
+// Generates a clamped X25519 pair as two 44-char base64 strings. Nothing is persisted here.
+bool generateKeypair(char privB64[45], char pubB64[45]) {
   // esp_fill_random is the ESP-IDF hardware RNG (already linked via the esp32 core - no new
   // lib_dep). crypto_scalarmult_curve25519_base clamps its input again internally (confirmed by
   // reading .pio/libdeps/esp32/libsodium's ref10 mult_base implementation), so applying our own
@@ -72,34 +105,47 @@ bool ensureKeypair(char pubOut[45]) {
     return false;
   }
 
-  char privB64[45];
-  char pubB64[45];
-  fry::encodeWgKeyB64(priv, privB64, sizeof(privB64));
-  fry::encodeWgKeyB64(pub, pubB64, sizeof(pubB64));
+  fry::encodeWgKeyB64(priv, privB64, 45);
+  fry::encodeWgKeyB64(pub, pubB64, 45);
   sodium_memzero(priv, sizeof(priv));
-
-  // Persisted BEFORE the POST is sent — a crash/reset between keygen and the server's response
-  // never orphans it: the server's 200-idempotent-replay behavior recovers on retry.
-  fry_config::setWgKeypair(privB64, pubB64);
-  std::strncpy(pubOut, pubB64, 44);
-  pubOut[44] = 0;
-  Serial.printf("wg: keypair generated pub=%.8s\n", pubOut);
   return true;
 }
 
 }  // namespace
 
+bool backoffActive() {
+  return s_nextAttemptMs != 0 && static_cast<int32_t>(millis() - s_nextAttemptMs) < 0;
+}
+
+void requestRotation() {
+  s_rotation = true;
+  s_rotationState = fry::WgRotationState::Pending;
+}
+
+fry::WgRotationState rotationState() { return s_rotationState; }
+
 void tick() {
-  if (fry_config::hasVpnConfig()) return;  // never re-provisions an existing config
+  // Never re-provisions an existing config, except one armed stage-B rotation (see requestRotation).
+  if (fry_config::hasVpnConfig() && !s_rotation) return;
 
   unsigned long now = millis();
-  if (s_nextAttemptMs != 0 && now < s_nextAttemptMs) return;
+  if (s_nextAttemptMs != 0 && now < s_nextAttemptMs) {
+    if (s_rotation) {  // blocked by a backoff: abandon the attempt, keep the old config
+      s_rotation = false;
+      s_rotationState = fry::WgRotationState::Failed;
+    }
+    return;
+  }
 
   // Token: NVS fry/deviceToken ONLY. Deliberately NO fallback to a compiled bootstrap token
   // (unlike hardwareapi_client.cpp's addAuthHeader) — a board mints a WireGuard peer only once
   // it has actually registered and holds its own per-device token.
   String token = fry_config::getDeviceToken();
-  bool hasToken = token.length() > 0;
+  // A USER_SUPPLIED board without a key has no peer to request; it is treated like a missing
+  // token (the same long deferral), never as a POST to an empty key path.
+  char minerKey[40] = {0};
+  if (token.length() > 0) fry_identity::ensureMinerKey(minerKey, sizeof(minerKey));
+  bool hasToken = token.length() > 0 && minerKey[0] != 0;
   bool heapOk = fry::heapGatePass(
       ESP.getFreeHeap(), fry::queryMaxFreeBlock(), HEAP_GATE_OTA,
       fry::otaMinContiguousBlock(/*isHttps=*/true, /*bearsslSingleBuffer=*/false, HEAP_GATE_OTA_BLOCK));
@@ -112,13 +158,12 @@ void tick() {
   fry::WgProvisionConfig cfg;
   bool parsedOk = false;
 
+  char pubB64[45] = {0};
+  char rotPrivB64[45] = {0};  // stage B only: the pending private half, RAM until validated
   if (hasToken && heapOk && clockOk) {
-    char pubB64[45];
-    if (!ensureKeypair(pubB64)) {
+    if (!(s_rotation ? rotationKeypair(rotPrivB64, pubB64) : ensureKeypair(pubB64))) {
       Serial.println("wg: keypair generation failed");
     } else {
-      char minerKey[40];
-      fry_identity::ensureMinerKey(minerKey, sizeof(minerKey));
       char body[192];
       fry::buildWgProvisionBody(pubB64, FRY_FIRMWARE_VERSION, FRY_CHIP, body, sizeof(body));
 
@@ -200,9 +245,30 @@ void tick() {
       allowedCsv += plan.allowedCidr[i];
     }
 
-    fry_config::setWgProvisioned(cfg.serverPub, cfg.hasPsk ? cfg.psk : "", cfg.endpointHost,
-                                cfg.endpointPort, cfg.addressCidr, allowedCsv.c_str(),
-                                cfg.keepaliveS);
+    // Stage B: the old config is replaced only here, after validateWgProvision accepted the 2xx.
+    // setWgProvisioned writes every fry_vpn field it owns (the SERVER's keepalive and allowed
+    // routes replace the old ones); socksPort is not one of them, so it carries over untouched.
+    struct Commit : fry::WgRotationWriter {
+      const char* priv; const char* pub; const fry::WgProvisionConfig& cfg; const String& csv;
+      Commit(const char* pr, const char* pu, const fry::WgProvisionConfig& c, const String& a)
+          : priv(pr), pub(pu), cfg(c), csv(a) {}
+      void commit() override {
+        fry_config::setWgKeypair(priv, pub);
+        fry_config::setWgProvisioned(cfg.serverPub, cfg.hasPsk ? cfg.psk : "", cfg.endpointHost,
+                                    cfg.endpointPort, cfg.addressCidr, csv.c_str(), cfg.keepaliveS);
+        fry_config::clearWgPendingKeypair();
+      }
+    };
+    if (s_rotation) {
+      Commit w(rotPrivB64, pubB64, cfg, allowedCsv);
+      s_rotationState = fry::wgRotationFinish(true, &w);
+      s_rotation = false;
+      sodium_memzero(rotPrivB64, sizeof(rotPrivB64));
+    } else {
+      fry_config::setWgProvisioned(cfg.serverPub, cfg.hasPsk ? cfg.psk : "", cfg.endpointHost,
+                                   cfg.endpointPort, cfg.addressCidr, allowedCsv.c_str(),
+                                   cfg.keepaliveS);
+    }
     char pub8[9] = {0};
     std::strncpy(pub8, cfg.serverPub, 8);
     Serial.printf("wg: provisioned peer=%s\n", pub8);
@@ -211,6 +277,11 @@ void tick() {
     return;
   }
 
+  if (s_rotation) {  // every failure path: the old config is untouched and keeps being retried
+    s_rotationState = fry::wgRotationFinish(false, nullptr);
+    s_rotation = false;
+    sodium_memzero(rotPrivB64, sizeof(rotPrivB64));
+  }
   Serial.printf("wg: provision POST http=%d\n", static_cast<int>(httpStatus));
   fry::WgFetchOutcome outcome = fry::classifyWgFetch(hasToken, heapOk, clockOk, httpStatus);
   fry::WgRetrySchedule sched = fry::wgRetryDelayMs(outcome, s_attemptNumber, retryAfterS);

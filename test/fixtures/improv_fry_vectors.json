@@ -1,0 +1,121 @@
+{
+  "schema": 1,
+  "_comment": "Improv vendor vectors 0xF0/0xF1 (PROTOCOL.md 11.4), the single source for fry-firmware (test/test_improv_fixture, test/flash/improv_fry.test.mjs) and the dashboard (vendored byte-identical copy). Produced by an independent Python encoder over the protocol text. The key is synthetic.",
+  "vectors": [
+    {
+      "name": "kFryReqSetKey",
+      "kind": "rpc_request",
+      "command": 240,
+      "data_hex": "2446454d2d544553544b455930303030303030303030303030303030303030303030303031",
+      "key": "FEM-TESTKEY0000000000000000000000001",
+      "hex": "494d50524f56010327f0252446454d2d544553544b45593030303030303030303030303030303030303030303030303120"
+    },
+    {
+      "name": "kFryReqGetStatus",
+      "kind": "rpc_request",
+      "command": 241,
+      "data_hex": "",
+      "hex": "494d50524f56010302f100d4"
+    },
+    {
+      "name": "kFrySetKeyOk",
+      "kind": "rpc_result",
+      "command": 240,
+      "verdict": "accept",
+      "masked": "FEM-TE\u2026",
+      "strings": [
+        "ok",
+        "FEM-TE\u2026"
+      ],
+      "hex": "494d50524f5601040ff00d026f6b0946454d2d5445e280a679"
+    },
+    {
+      "name": "kFrySetKeyBadKey",
+      "kind": "rpc_result",
+      "command": 240,
+      "verdict": "bad_key",
+      "masked": "FEM-TE\u2026",
+      "strings": [
+        "err",
+        "7",
+        "bad_key"
+      ],
+      "hex": "494d50524f56010410f00e036572720137076261645f6b65794a"
+    },
+    {
+      "name": "kFrySetKeyLocked",
+      "kind": "rpc_result",
+      "command": 240,
+      "verdict": "key_locked",
+      "masked": "FEM-TE\u2026",
+      "strings": [
+        "err",
+        "8",
+        "key_locked"
+      ],
+      "hex": "494d50524f56010413f0110365727201380a6b65795f6c6f636b65649f"
+    },
+    {
+      "name": "kFryStatusConnected",
+      "kind": "rpc_result",
+      "command": 241,
+      "status": {
+        "state": 3,
+        "err": 0,
+        "keySet": true,
+        "keyConfirmed": true,
+        "key": "FEM-TESTKEY0000000000000000000000001",
+        "regHttp": 202,
+        "hbAgeS": 12,
+        "fw": "0.4.0",
+        "ota": "valid",
+        "apCode": ""
+      },
+      "strings": [
+        "1",
+        "3",
+        "0",
+        "0",
+        "1",
+        "FEM-TE\u2026",
+        "0.4.0",
+        "202",
+        "12",
+        "valid",
+        ""
+      ],
+      "hex": "494d50524f5601042af128013101330130013001310946454d2d5445e280a605302e342e30033230320231320576616c696400d4"
+    },
+    {
+      "name": "kFryStatusKeyRequired",
+      "kind": "rpc_result",
+      "command": 241,
+      "status": {
+        "state": 4,
+        "err": 6,
+        "keySet": false,
+        "keyConfirmed": false,
+        "key": "",
+        "regHttp": 0,
+        "hbAgeS": -1,
+        "fw": "0.4.0",
+        "ota": "pending",
+        "apCode": "ABCD2345"
+      },
+      "strings": [
+        "1",
+        "4",
+        "4",
+        "6",
+        "0",
+        "",
+        "0.4.0",
+        "0",
+        "-1",
+        "pending",
+        "ABCD2345"
+      ],
+      "hex": "494d50524f56010429f127013101340134013601300005302e342e300130022d310770656e64696e6708414243443233343579"
+    }
+  ]
+}

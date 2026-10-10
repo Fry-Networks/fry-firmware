@@ -32,6 +32,17 @@ String getDeviceToken();
 void setDeviceToken(const char* token);
 String getApiBase();  // falls back to the compiled HARDWAREAPI_BASE default if unset
 void setApiBase(const char* base);
+// v1.1 key ownership (PROTOCOL.md section 11.1). fry/keyOk: hardwareapi accepted the current key
+// with a 2xx registration. fry/keySrc: "user" once an owner wrote it, absent for a minted or
+// migrated key. fry/apCode: the ESP8266 WPA2 setup-AP passphrase. factoryReset() keeps all three.
+bool getKeyOk();
+void setKeyOk(bool ok);
+String getKeySrc();
+void setKeySrc(const char* src);
+String getApCode();
+void setApCode(const char* code);
+// Removes fry/installId and fry/deviceToken: a new key is a new installation.
+void clearInstallation();
 
 // ── fry_vpn ───────────────────────────────────────────────────────────────
 String getWgPriv();
@@ -71,6 +82,20 @@ void setWgProvAt(uint32_t epochS);
 // idempotent-replay behavior recovers from posting the same public key again.
 void setWgKeypair(const char* priv, const char* pub);
 
+#ifndef ESP8266  // WireGuard recovery is ESP32-family only; the ESP8266 build compiles none of it
+// Epoch seconds of the last dead-tunnel stage-B attempt (lib/fry_core/wg_recover.h), 0 if never.
+// Own namespace fry_wgrec, so it survives clearVpn() and a factory-less reboot loop.
+uint32_t getWgRecoverAt();
+void setWgRecoverAt(uint32_t epochS);
+// The keypair of an in-flight stage-B rotation, kept apart from fry_vpn's live wgPriv/wgPub so
+// the old tunnel keeps working until a validated response lets the pair replace them. Persisted
+// before the POST so a reset replays the SAME public key (the server answers that idempotently).
+// Buffers are 45 bytes (44 base64 chars + NUL). get returns false when no pair is stored.
+bool getWgPendingKeypair(char priv[45], char pub[45]);
+void setWgPendingKeypair(const char* priv, const char* pub);
+void clearWgPendingKeypair();
+#endif
+
 // The single entry point src/esp32/wg_provision_client.cpp calls after a successful POST.
 // Writes every field, then wgPeerPub (hasVpnConfig()'s existing commit marker), then wgProvAt
 // LAST — the new production trust gate in vpn_wireguard.cpp keys off wgProvAt, so a reset that
@@ -92,6 +117,19 @@ void setOtaUrl(const char* url);
 uint8_t getOtaBootFails();
 void setOtaBootFails(uint8_t v);
 void clearOtaBootFails();
+// Round 2 (PROTOCOL.md 11.8): fry_ota/badver + fry_ota/badn are the bad-version STRIKES. They are
+// only ever written together, through setOtaStrikes() ("" clears both).
+String getOtaBadVer();
+uint8_t getOtaBadN();
+void setOtaStrikes(const char* version, uint8_t strikes);
+// fry_ota/planrst: a restart that is not a failure (restartToApply, a USB re-key) while the image is
+// still pending, so the previous image does not count the rollback it causes as a strike.
+bool getOtaPlannedRestart();
+void setOtaPlannedRestart(bool planned);
+// fry_ota/rbk: the boot counter rolled back (manualRollback); rollback evidence for the previous
+// image where the bootloader left none.
+bool getOtaRolledBack();
+void setOtaRolledBack(bool rolledBack);
 
 // Wipes fry_wifi, fry/wallet, fry/provDone, fry/installId, fry/deviceToken, fry_vpn and fry_ota.
 // PRESERVES fry/salt and fry/minerKey so a re-provisioned board keeps one server identity

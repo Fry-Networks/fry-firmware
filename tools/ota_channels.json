@@ -1,0 +1,13 @@
+{
+  "_comment": "Read by tools/make_manifest.py. An env listed under exclude_from_builds is left out of that channel's OTA manifest builds{}, so boards of that chip get no automatic update (PROTOCOL.md section 11.5; firmware and v0.3.x clients alike treat a missing entry as no update - test/test_legacy_manifest_select). Its images are still copied to --dist for manual flashing. Remove an env from the list only after a real board of that chip passed the release's journeys.",
+  "channels": {
+    "prod": {
+      "exclude_from_builds": ["esp32s3", "esp8266"],
+      "reason": "no automatic OTA to ESP32-S3 or ESP8266 until a real board of that chip passes (iv1 R-S3 / R-8266)"
+    },
+    "test": {
+      "exclude_from_builds": [],
+      "reason": "bench boards only"
+    }
+  }
+}

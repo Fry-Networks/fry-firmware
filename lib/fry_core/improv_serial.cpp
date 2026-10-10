@@ -1,5 +1,6 @@
 #include "improv_serial.h"
 
+#include <cstdio>
 #include <cstring>
 
 namespace fry {
@@ -33,7 +34,9 @@ bool isKnownCommand(uint8_t command) {
   return command == static_cast<uint8_t>(Command::WifiSettings) ||
          command == static_cast<uint8_t>(Command::RequestState) ||
          command == static_cast<uint8_t>(Command::RequestDeviceInfo) ||
-         command == static_cast<uint8_t>(Command::RequestScannedWifi);
+         command == static_cast<uint8_t>(Command::RequestScannedWifi) ||
+         command == static_cast<uint8_t>(Command::FrySetMinerKey) ||
+         command == static_cast<uint8_t>(Command::FryGetStatus);
 }
 
 // Back to hunting for a header, re-testing the byte that broke the packet. "IMPROV" has no
@@ -126,6 +129,16 @@ bool decodeWifiSettings(const uint8_t* data, uint8_t dataLen, char* ssid, size_t
   return true;
 }
 
+bool decodeKeyWrite(const uint8_t* data, uint8_t dataLen, char* key, size_t keyCap) {
+  if (!data || !key || dataLen < 1) return false;
+  const uint8_t keyLen = data[0];
+  if (static_cast<size_t>(keyLen) + 1u != dataLen) return false;
+  if (keyLen >= keyCap) return false;
+  memcpy(key, data + 1, keyLen);
+  key[keyLen] = 0;
+  return true;
+}
+
 size_t encodeCurrentState(State state, uint8_t* out, size_t outCap) {
   if (!out || outCap < 11) return 0;
   size_t n = writeFrame(out, kTypeCurrentState, 1);
@@ -165,6 +178,42 @@ size_t encodeRpcResult(uint8_t command, const char* const* strings, uint8_t coun
     n += len;
   }
   return sealPacket(out, n);
+}
+
+size_t encodeKeyWriteResult(KeyWriteVerdict verdict, const char* maskedKey, uint8_t* out,
+                            size_t outCap) {
+  const uint8_t cmd = static_cast<uint8_t>(Command::FrySetMinerKey);
+  if (verdict == KeyWriteVerdict::Accept) {
+    const char* ok[] = {"ok", maskedKey ? maskedKey : ""};
+    return encodeRpcResult(cmd, ok, 2, out, outCap);
+  }
+  const char* reason = "key_locked";
+  if (verdict == KeyWriteVerdict::BadKey) reason = "bad_key";
+  if (verdict == KeyWriteVerdict::StoreFailed) reason = "store_failed";
+  const char* code = verdict == KeyWriteVerdict::BadKey ? "7" : "8";
+  const char* err[] = {"err", code, reason};
+  return encodeRpcResult(cmd, err, 3, out, outCap);
+}
+
+size_t encodeFryStatus(const DeviceStatus& status, uint8_t* out, size_t outCap) {
+  char state[4], legacy[4], detail[4], reg[12], hb[12];
+  snprintf(state, sizeof(state), "%u", static_cast<unsigned>(status.state));
+  snprintf(legacy, sizeof(legacy), "%u", static_cast<unsigned>(statusLegacyErr(status)));
+  snprintf(detail, sizeof(detail), "%u", static_cast<unsigned>(statusDetailErr(status)));
+  snprintf(reg, sizeof(reg), "%d", status.regHttp);
+  snprintf(hb, sizeof(hb), "%ld", static_cast<long>(status.hbAgeS));
+  const char* fields[] = {"1",
+                          state,
+                          legacy,
+                          detail,
+                          status.keySet ? "1" : "0",
+                          status.keyMasked,
+                          status.fw ? status.fw : "",
+                          reg,
+                          hb,
+                          status.ota ? status.ota : "",
+                          status.apCode ? status.apCode : ""};
+  return encodeRpcResult(static_cast<uint8_t>(Command::FryGetStatus), fields, 11, out, outCap);
 }
 
 }  // namespace improv

@@ -7,15 +7,21 @@
 
 #include <WiFi.h>
 #include <esp_wireguard.h>
+#include <freertos/semphr.h>
 #include <lwip/opt.h>
+#include <lwip/tcpip.h>
 
 #include <cstring>
+#include <ctime>
 
 #include "../core/fry_config.h"
 #include "../core/hardwareapi_client.h"
+#include "../core/ota_client.h"
+#include "../core/wifi_station.h"
 #include "socks5_parse.h"
 #include "wg_provision.h"
 #include "wg_provision_client.h"
+#include "wg_recover.h"
 
 #if IP_NAPT
 #include <lwip/lwip_napt.h>
@@ -42,6 +48,7 @@ wireguard_config_t s_wgConfig;
 wireguard_ctx_t s_wgCtx;
 bool s_initialized = false;
 bool s_wasUp = false;
+bool s_relayStarted = false;  // the SOCKS5 task must start once; bringUp() can now run again
 volatile uint32_t s_relayedBytes = 0;
 
 // Config strings must outlive the wireguard_config_t (esp_wireguard keeps the pointers, does
@@ -190,6 +197,77 @@ static constexpr unsigned long WG_BRINGUP_RETRY_MS = 5000;
 namespace {
 bool s_initAttempted = false;  // esp_wireguard_init() must never be called more than once ever
 unsigned long s_lastBringUpAttemptMs = 0;
+
+// Dead-tunnel recovery (lib/fry_core/wg_recover.h). RAM-only; the stage-B rate limit is the
+// persisted fry_wgrec/at stamp.
+fry::WgRecover s_recover;
+bool s_recovering = false;     // stage A tore the tunnel down and it has not been up since
+bool s_stageAPending = false;  // waiting for bringUp() to report whether the endpoint IP changed
+uint32_t s_stageAOldIp = 0;
+
+// True when the next bringUp() must start from a NEW netif: esp_wireguard_connect() builds the
+// netif (and bakes the private key into it) only while ctx->netif == NULL, and a failed connect
+// leaves the old one behind. Set by both stages, cleared once teardown has completed.
+bool s_freshNetifRequired = false;
+
+// esp_wireguard_disconnect() runs netif_remove/udp_remove/wireguardif_fini/sys_untimeout, which
+// the WG timers and UDP input in the tcpip thread race with (wireguardif.c wireguardif_shutdown).
+// CONFIG_LWIP_TCPIP_CORE_LOCKING is NOT set in this framework's sdkconfig for esp32/esp32c3
+// (tools/sdk/<chip>/sdkconfig), so LOCK_TCPIP_CORE() expands to nothing and cannot be used.
+// tcpip_callback() (lwip/tcpip.h) posts the call to the tcpip thread regardless of that flag; the
+// loop task blocks on a semaphore until it ran, so no other code touches the netif meanwhile.
+SemaphoreHandle_t s_teardownDone = nullptr;
+void teardownInTcpipThread(void*) {
+  // A stalled tcpip thread can queue two callbacks; the second finds the netif already gone, and
+  // esp_wireguard_disconnect(netif_set_ipaddr) would dereference NULL.
+  if (s_wgCtx.netif != nullptr) esp_wireguard_disconnect(&s_wgCtx);
+  xSemaphoreGive(s_teardownDone);
+}
+bool runTeardownInTcpipThread() {
+  if (s_teardownDone == nullptr) s_teardownDone = xSemaphoreCreateBinary();
+  if (s_teardownDone == nullptr) return false;
+  xSemaphoreTake(s_teardownDone, 0);  // drop a stale give from an earlier timed-out attempt
+  if (tcpip_callback(teardownInTcpipThread, nullptr) != ERR_OK) return false;
+  return xSemaphoreTake(s_teardownDone, pdMS_TO_TICKS(3000)) == pdTRUE;
+}
+
+class TunnelOps : public fry::WgTunnelOps {
+ public:
+  bool hasNetif() override { return s_wgCtx.netif != nullptr; }
+  bool teardown() override { return runTeardownInTcpipThread(); }
+};
+
+// Tears down iff a netif exists (keyed on the netif, not on s_initialized). False = still pending.
+bool settleTeardown() {
+  TunnelOps ops;
+  if (!fry::wgTearDownTunnel(ops)) {
+    Serial.println("wg: teardown pending - will retry");
+    return false;
+  }
+  s_freshNetifRequired = false;
+  return true;
+}
+
+// Persisted stage-B attempt stamp (fry_wgrec/at), cached in RAM after the first read: reading a
+// namespace that was never written logs an nvs_open NOT_FOUND error, so it must not run per tick.
+// If the NVS write fails the cached value still rate-limits for this boot (RAM fallback).
+bool s_stampLoaded = false;
+uint32_t s_stampCache = 0;
+uint32_t recoverStamp() {
+  if (!s_stampLoaded) {
+    s_stampCache = fry_config::getWgRecoverAt();
+    s_stampLoaded = true;
+  }
+  return s_stampCache;
+}
+void setRecoverStamp(uint32_t epochS) {
+  fry_config::setWgRecoverAt(epochS);
+  s_stampCache = epochS;
+  s_stampLoaded = true;
+  if (fry_config::getWgRecoverAt() != epochS) {
+    Serial.println("wg: recover stamp NOT persisted - rate limit is RAM-only this boot");
+  }
+}
 }  // namespace
 
 // True once a config exists AND this build trusts it. Production ESP32 builds only trust a
@@ -268,6 +346,7 @@ void applyAllowedIps() {
 // synced yet, or a transient connect failure) - esp_wireguard_init() itself only ever runs once
 // per boot, guarded by s_initAttempted, per the "never init twice" rule.
 bool bringUp() {
+  if (s_freshNetifRequired && !settleTeardown()) return false;
   // A WireGuard handshake with an unset clock cannot succeed, so honour the result rather
   // than discarding it - proceeding would spend the retry budget on a misleading error.
   if (!fry_hwapi::ensureNtpSynced()) {  // PROTOCOL.md / T6
@@ -308,6 +387,12 @@ bool bringUp() {
   // interface the default route and kill this device's own STA-routed traffic (T6 constraint).
   s_initialized = true;
   applyAllowedIps();
+  if (s_stageAPending) {
+    s_stageAPending = false;
+    bool changed = s_wgConfig.endpoint_ip.u_addr.ip4.addr != s_stageAOldIp;
+    Serial.printf("wg: recover A re-resolved endpoint, ip %s\n", changed ? "changed" : "unchanged");
+    s_recover.onReResolved(changed, millis());
+  }
 
 #if IP_NAPT
   ip_addr_t staIp = {};
@@ -318,10 +403,84 @@ bool bringUp() {
 #else
   Serial.println("wg: NAPT not compiled into this framework's liblwip.a (CONFIG_LWIP_IP_FORWARD "
                   "unset) - falling back to the SOCKS5 tunnel-only relay");
-  xTaskCreate(relayTaskFn, "fry_relay", 4096, nullptr, 1, nullptr);
+  if (!s_relayStarted) {
+    s_relayStarted = true;
+    xTaskCreate(relayTaskFn, "fry_relay", 4096, nullptr, 1, nullptr);
+  }
 #endif
   return true;
 }
+
+#ifndef FRY_SERIAL_PROVISION
+static constexpr unsigned long WG_RECOVER_TICK_MS = 5000;
+
+// Runs every tick (initialized or not). Lab builds are excluded: their config comes from the
+// `set_wg` serial command and cannot be re-provisioned by the server.
+void recoverTick() {
+  static unsigned long lastMs = 0;
+  unsigned long nowMs = millis();
+  if (nowMs - lastMs < WG_RECOVER_TICK_MS) return;  // the NVS reads below are not loop()-cheap
+  lastMs = nowMs;
+
+  const bool up =
+      s_initialized && s_wgCtx.netif != nullptr && esp_wireguard_peer_is_up(&s_wgCtx) == ESP_OK;
+  if (up) s_recovering = false;
+
+  fry::WgRecoverInput in;
+  in.armed = s_initialized || s_recovering;
+  in.up = up;
+  in.wifiUp = fry_wifi::isConnected();
+  in.nowMs = nowMs;
+  if (in.armed && !up) {  // the rest only matters while an armed tunnel is down
+    in.hostnameEndpoint = fry::wgEndpointIsHostname(fry_config::getWgEndpoint().c_str());
+    // An image that is PENDING_VERIFY (settling after an OTA: ota_client.cpp s_confirmPending,
+    // reported by imageStateName) or an unconsumed fry_ota/pending flag means an update is in
+    // flight. checkNow()'s download itself is synchronous inside loop(), so it cannot overlap.
+    in.otaBusy = strcmp(fry_ota::imageStateName(), "pending") == 0 ||
+                 fry_config::getOtaPending().length() > 0;
+    in.clockSynced = fry_hwapi::ensureNtpSynced(/*timeoutMs=*/1);
+    in.provBlocked = fry_wg_provision::backoffActive();
+    // Proof the API is reachable: hardwareapi answered 2xx within kWgApiFreshS
+    // (ota_client.cpp s_heartbeat, noted by every registration/PoC/lease answer; cadence 10 min).
+    in.apiReachable = fry::wgApiRecent(fry_ota::heartbeatAgeS());
+    in.jitterS = fry::wgRecoverJitterS(ESP.getEfuseMac());
+    in.epochNow = static_cast<uint32_t>(time(nullptr));
+    in.lastStageBEpoch = recoverStamp();
+  }
+
+  switch (s_recover.decide(in)) {
+    case fry::WgRecoverAction::None:
+      return;
+    case fry::WgRecoverAction::ReResolve:
+      Serial.println("wg: recover A - no handshake, re-resolving endpoint");
+      s_stageAOldIp = s_wgConfig.endpoint_ip.u_addr.ip4.addr;
+      s_stageAPending = true;
+      s_recovering = true;
+      s_freshNetifRequired = true;
+      s_initialized = false;  // tick() now retries loadConfig()+bringUp(), which re-resolves
+      s_wasUp = false;
+      settleTeardown();       // a failed teardown is retried by bringUp() via the flag
+      return;
+    case fry::WgRecoverAction::ReProvision:
+      Serial.println("wg: recover B - no handshake, rotating the WireGuard peer");
+      setRecoverStamp(in.epochNow);  // persisted BEFORE the attempt: a crash never loops
+      fry_wg_provision::requestRotation();
+      fry_wg_provision::tick();  // one blocking POST, exactly like the boot-time provisioning call
+      if (fry_wg_provision::rotationState() != fry::WgRotationState::Committed) {
+        Serial.println("wg: recover B failed - old config kept, tunnel untouched");
+        return;
+      }
+      Serial.println("wg: recover B committed - rebuilding the tunnel with the new config");
+      s_recovering = false;
+      s_stageAPending = false;
+      s_freshNetifRequired = true;
+      s_initialized = false;
+      s_wasUp = false;
+      settleTeardown();
+      return;
+  }
+}
+#endif
 
 void init() {
   if (!loadConfig()) return;
@@ -333,6 +492,9 @@ void init() {
 }
 
 void tick() {
+#ifndef FRY_SERIAL_PROVISION
+  recoverTick();
+#endif
   if (!s_initialized) {
 #ifndef FRY_SERIAL_PROVISION
     // Drives its own retry/backoff schedule (lib/fry_core/wg_provision.h's
@@ -348,7 +510,7 @@ void tick() {
     bringUp();
     return;
   }
-  bool up = (esp_wireguard_peer_is_up(&s_wgCtx) == ESP_OK);
+  bool up = (s_wgCtx.netif != nullptr && esp_wireguard_peer_is_up(&s_wgCtx) == ESP_OK);
   if (up && !s_wasUp) {
     char pub8[9] = {0};
     strncpy(pub8, s_wgConfig.public_key, 8);
