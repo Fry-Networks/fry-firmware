@@ -229,7 +229,18 @@ bool renewLease() {
   http.end();
   fry_ota::noteHeartbeat(code, "lease");
   if (!(code > 0 && code < 300)) return false;
-  const fry::LeaseResult lr = fry::parseLeaseResponse(resp.c_str());
+  const fry::LeaseResult lr = fry::parseLeaseResponse(resp.c_str(), installId);
+  if (lr.verdict == fry::LeaseVerdict::NotHeld) {
+    // This firmware only renews, so "granted:false, no holder" means no lease is held: neutral. One
+    // INFO per boot, no backoff (the backoff below gates ONLY renewLease() itself; heartbeats,
+    // PoC PUTs and WG provisioning never consult it).
+    static bool s_notHeldLogged = false;
+    if (!s_notHeldLogged) {
+      s_notHeldLogged = true;
+      Serial.println("lease: not held (renew only, nothing to deny)");
+    }
+    return false;
+  }
   if (lr.verdict == fry::LeaseVerdict::Denied) {
     uint32_t waitMs = fry::wgBackoffMs(fry::WgFetchOutcome::Forbidden403, s_leaseDenials,
                                        0, static_cast<uint32_t>(random(0x7FFFFFFF)) ^ micros());

@@ -338,14 +338,31 @@ void test_t9_poc_software_block() {
       out.c_str());
 }
 
-// Lease (U2/U3): the server denies with 200 + granted:false.
-void test_lease_denied_is_parsed() {
-  fry::LeaseResult r = fry::parseLeaseResponse("{\"granted\":false,\"reason_code\":\"lease_held_elsewhere\"}");
+// Lease: the firmware only renews, so "granted:false, holder null" (no lease held) is NEUTRAL.
+void test_lease_never_acquired_null_holder_is_neutral() {
+  const char* body = "{\"granted\":false,\"holder_install_id\":null,\"ttl_seconds\":0,\"error_code\":null}";
+  TEST_ASSERT_TRUE(fry::parseLeaseResponse(body, "396f92aaaa").verdict == fry::LeaseVerdict::NotHeld);
+  TEST_ASSERT_TRUE(fry::parseLeaseResponse(body).verdict == fry::LeaseVerdict::NotHeld);
+  TEST_ASSERT_TRUE(fry::parseLeaseResponse("{\"granted\":false}", "x").verdict == fry::LeaseVerdict::NotHeld);
+  TEST_ASSERT_TRUE(fry::parseLeaseResponse("{\"granted\":false,\"holder_install_id\":\"\"}", "x").verdict == fry::LeaseVerdict::NotHeld);
+}
+
+void test_lease_other_holder_is_denied() {
+  const char* body = "{\"granted\":false,\"holder_install_id\":\"8258a8bbbb\",\"ttl_seconds\":300}";
+  TEST_ASSERT_TRUE(fry::parseLeaseResponse(body, "396f92aaaa").verdict == fry::LeaseVerdict::Denied);
+  // our own id as the holder is not a denial
+  TEST_ASSERT_TRUE(fry::parseLeaseResponse("{\"granted\":false,\"holder_install_id\":\"396f92aaaa\"}", "396f92aaaa").verdict == fry::LeaseVerdict::NotHeld);
+  // without our own id we cannot tell: neutral unless the reason code says so
+  TEST_ASSERT_TRUE(fry::parseLeaseResponse(body, "").verdict == fry::LeaseVerdict::NotHeld);
+}
+
+void test_lease_reason_code_is_denied() {
+  fry::LeaseResult r = fry::parseLeaseResponse("{\"granted\":false,\"reason_code\":\"lease_held_elsewhere\"}", "x");
   TEST_ASSERT_TRUE(r.verdict == fry::LeaseVerdict::Denied);
   TEST_ASSERT_EQUAL_STRING("lease_held_elsewhere", r.reasonCode);
-  r = fry::parseLeaseResponse("{\"granted\":false}");
+  r = fry::parseLeaseResponse("{\"granted\":false,\"reason_code\":\"lease_held_elsewhere\",\"holder_install_id\":null}");
   TEST_ASSERT_TRUE(r.verdict == fry::LeaseVerdict::Denied);
-  TEST_ASSERT_EQUAL_STRING("", r.reasonCode);
+  TEST_ASSERT_TRUE(fry::parseLeaseResponse("{\"granted\":false,\"reason_code\":\"something_else\"}", "x").verdict == fry::LeaseVerdict::NotHeld);
 }
 
 void test_lease_granted_and_legacy_bodies() {
@@ -380,7 +397,9 @@ int main() {
   RUN_TEST(test_t8_missing_key_is_not_read);
   RUN_TEST(test_t8_missing_namespace_is_never_opened_and_logs_once);
   RUN_TEST(test_t9_poc_software_block);
-  RUN_TEST(test_lease_denied_is_parsed);
+  RUN_TEST(test_lease_never_acquired_null_holder_is_neutral);
+  RUN_TEST(test_lease_other_holder_is_denied);
+  RUN_TEST(test_lease_reason_code_is_denied);
   RUN_TEST(test_lease_granted_and_legacy_bodies);
   return UNITY_END();
 }
