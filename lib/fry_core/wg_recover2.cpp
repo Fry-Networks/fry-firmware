@@ -133,4 +133,11 @@ WgMigrationAction wgMigrationDecide(const WgMigrationInput& in) {
   return WgMigrationAction::Refresh;
 }
 
+// STUB (RED): mirrors the pre-fix behaviour, which trusts the library verdict alone.
+bool wgPeerHealthy(bool libSaysUp, bool haveHandshake, uint32_t handshakeAgeS) {
+  (void)haveHandshake;
+  (void)handshakeAgeS;
+  return libSaysUp;
+}
+
 }  // namespace fry

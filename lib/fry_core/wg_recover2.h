@@ -43,6 +43,15 @@ constexpr uint32_t kWgBackoffCapMs = 900000 / kWg2TimerDiv;
 constexpr uint32_t kWgForbiddenCapMs = 3600000 / kWg2TimerDiv;
 constexpr uint32_t kWgRetryAfterMaxS = 3600 / kWg2TimerDiv;
 
+// INF-1: the library's esp_wireguard_peer_is_up() stays OK while the PREVIOUS keypair is valid,
+// and that keypair is never expired once the current one is destroyed (~180 s) - so a session
+// that rekeyed before the hub dropped the peer reads "up" forever. Health is therefore judged
+// from the age of the latest handshake against kWg2DeadAfterS (the same constant decide() uses).
+//   healthy  <=>  libSaysUp && haveHandshake && handshakeAgeS < kWg2DeadAfterS
+// Boundary: age == kWg2DeadAfterS is NOT healthy (decide() calls the tunnel dead at >= 180 s).
+// libSaysUp == false is never healthy; haveHandshake == false (no handshake time) is not healthy.
+bool wgPeerHealthy(bool libSaysUp, bool haveHandshake, uint32_t handshakeAgeS);
+
 struct WgRecover2Input {
   bool armed = false;             // the tunnel was brought up (or stage A is in flight) this boot
   bool up = false;                // esp_wireguard_peer_is_up == ESP_OK
