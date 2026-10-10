@@ -15,6 +15,7 @@
 #include "config.h"
 #include "heap_gate.h"
 #include "wg_provision.h"
+#include "wg_recover2.h"
 
 #ifndef FRY_FIRMWARE_VERSION
 #define FRY_FIRMWARE_VERSION "0.0.0-dev"
@@ -31,6 +32,8 @@ unsigned long s_nextAttemptMs = 0;
 uint32_t s_attemptNumber = 0;
 bool s_rotation = false;  // stage B armed: tick() runs although hasVpnConfig() is true
 fry::WgRotationState s_rotationState = fry::WgRotationState::Idle;
+PendingConfig s_pending;
+bool s_pendingReady = false;
 
 // arduino-esp32's IPAddress packs the first octet in the LOW byte of its uint32_t conversion
 // (confirmed by src/esp32/vpn_wireguard.cpp's existing `staIp.u_addr.ip4.addr =
@@ -73,20 +76,6 @@ bool ensureKeypair(char pubOut[45]) {
   return true;
 }
 
-// Stage-B keypair: the pending pair in fry_wgrec if a previous attempt left one (the server
-// replays the same public key idempotently), otherwise a fresh one. NEVER touches fry_vpn's
-// wgPriv/wgPub: the old tunnel keeps using them until the response validates.
-bool rotationKeypair(char privOut[45], char pubOut[45]) {
-  if (fry_config::getWgPendingKeypair(privOut, pubOut)) {
-    Serial.printf("wg: rotation keypair reused pub=%.8s\n", pubOut);
-    return true;
-  }
-  if (!generateKeypair(privOut, pubOut)) return false;
-  fry_config::setWgPendingKeypair(privOut, pubOut);
-  Serial.printf("wg: rotation keypair generated pub=%.8s\n", pubOut);
-  return true;
-}
-
 // Generates a clamped X25519 pair as two 44-char base64 strings. Nothing is persisted here.
 bool generateKeypair(char privB64[45], char pubB64[45]) {
   // esp_fill_random is the ESP-IDF hardware RNG (already linked via the esp32 core - no new
@@ -124,6 +113,26 @@ void requestRotation() {
 
 fry::WgRotationState rotationState() { return s_rotationState; }
 
+bool takePending(PendingConfig& out) {
+  if (!s_pendingReady) return false;
+  out = s_pending;
+  s_pendingReady = false;
+  return true;
+}
+
+void commitPending(const PendingConfig& c) {
+  fry_config::setWgProvisioned(c.serverPub, c.hasPsk ? c.psk : "", c.endpointHost, c.endpointPort,
+                               c.addressCidr, c.allowedCsv, c.keepaliveS);
+}
+
+void noteTrialFailed() {
+  uint32_t delayMs = fry::wgBackoffMs(fry::WgFetchOutcome::TransientError, s_attemptNumber, 0,
+                                      esp_random());
+  if (s_attemptNumber != 0xFFFFFFFFu) s_attemptNumber++;
+  s_nextAttemptMs = millis() + delayMs;
+  if (s_nextAttemptMs == 0) s_nextAttemptMs = 1;
+}
+
 void tick() {
   // Never re-provisions an existing config, except one armed stage-B rotation (see requestRotation).
   if (fry_config::hasVpnConfig() && !s_rotation) return;
@@ -159,20 +168,41 @@ void tick() {
   bool parsedOk = false;
 
   char pubB64[45] = {0};
-  char rotPrivB64[45] = {0};  // stage B only: the pending private half, RAM until validated
   if (hasToken && heapOk && clockOk) {
-    if (!(s_rotation ? rotationKeypair(rotPrivB64, pubB64) : ensureKeypair(pubB64))) {
-      Serial.println("wg: keypair generation failed");
+    bool haveKey;
+    if (s_rotation) {  // T3/T6: the active keypair, never a new one
+      String ap = fry_config::getWgPriv();
+      String au = fry_config::getWgPub();
+      const bool present = ap.length() == 44 && au.length() == 44;
+      haveKey = fry::wgRefreshKeySource(present) == fry::WgKeySource::UseActive;
+      if (haveKey) {
+        std::strncpy(pubB64, au.c_str(), 44);
+        pubB64[44] = 0;
+        Serial.printf("wg: re-provision with the active keypair pub=%.8s\n", pubB64);
+      }
+    } else {
+      haveKey = ensureKeypair(pubB64);
+    }
+    if (!haveKey) {
+      Serial.println("wg: keypair unavailable - re-provision skipped");
     } else {
       char body[192];
       fry::buildWgProvisionBody(pubB64, FRY_FIRMWARE_VERSION, FRY_CHIP, body, sizeof(body));
 
       String url = fry_config::getApiBase() + "/vpn/v1/wireguard/" + minerKey + "/peer";
       WiFiClientSecure sec;
+      // T6: the TLS handshake runs inside loop(). WiFiClientSecure::setHandshakeTimeout takes
+      // SECONDS (WiFiClientSecure.cpp:369-371 multiplies by 1000; the default is 120000 ms,
+      // :40 and :61), so a stalled server can no longer hold the loop for two minutes.
+      sec.setHandshakeTimeout(8);
       HTTPClient http;
       if (fry_http::beginHttpsUrl(http, sec, url)) {
         const char* retryAfterHeader[] = {"Retry-After"};
         http.collectHeaders(retryAfterHeader, 1);
+        // T6: this POST runs inside loop(); bound it so the watchdog and the relay are never starved.
+        http.setConnectTimeout(5000);
+        http.setTimeout(8000);
+        yield();
         http.addHeader("Authorization", "Bearer " + token);
         http.addHeader("Content-Type", "application/json");
         httpStatus = http.POST(body);
@@ -222,6 +252,10 @@ void tick() {
         } else {
           String ra = http.header("Retry-After");
           if (ra.length() > 0) retryAfterS = static_cast<uint32_t>(ra.toInt());
+          if (retryAfterS == 0 && httpStatus > 0) {  // C3 also sends retry_after_s in the body
+            String eb = http.getString();
+            retryAfterS = fry::parseRetryAfterJson(eb.c_str());
+          }
         }
       }
       http.end();
@@ -245,25 +279,29 @@ void tick() {
       allowedCsv += plan.allowedCidr[i];
     }
 
-    // Stage B: the old config is replaced only here, after validateWgProvision accepted the 2xx.
-    // setWgProvisioned writes every fry_vpn field it owns (the SERVER's keepalive and allowed
-    // routes replace the old ones); socksPort is not one of them, so it carries over untouched.
-    struct Commit : fry::WgRotationWriter {
-      const char* priv; const char* pub; const fry::WgProvisionConfig& cfg; const String& csv;
-      Commit(const char* pr, const char* pu, const fry::WgProvisionConfig& c, const String& a)
-          : priv(pr), pub(pu), cfg(c), csv(a) {}
-      void commit() override {
-        fry_config::setWgKeypair(priv, pub);
-        fry_config::setWgProvisioned(cfg.serverPub, cfg.hasPsk ? cfg.psk : "", cfg.endpointHost,
-                                    cfg.endpointPort, cfg.addressCidr, csv.c_str(), cfg.keepaliveS);
-        fry_config::clearWgPendingKeypair();
-      }
-    };
+    // T3: a refresh is NOT written here. The validated response is held in RAM and the glue builds
+    // the tunnel from it as a trial; commitPending() writes it only after that handshakes. The old
+    // config (and the keypair, which is never replaced) stays in NVS until then.
     if (s_rotation) {
-      Commit w(rotPrivB64, pubB64, cfg, allowedCsv);
+      struct Hold : fry::WgRotationWriter {
+        const fry::WgProvisionConfig& cfg; const String& csv;
+        Hold(const fry::WgProvisionConfig& c, const String& a) : cfg(c), csv(a) {}
+        void commit() override {
+          s_pending = PendingConfig();
+          std::strncpy(s_pending.serverPub, cfg.serverPub, sizeof(s_pending.serverPub) - 1);
+          s_pending.hasPsk = cfg.hasPsk;
+          if (cfg.hasPsk) std::strncpy(s_pending.psk, cfg.psk, sizeof(s_pending.psk) - 1);
+          std::strncpy(s_pending.endpointHost, cfg.endpointHost, sizeof(s_pending.endpointHost) - 1);
+          s_pending.endpointPort = cfg.endpointPort;
+          std::strncpy(s_pending.addressCidr, cfg.addressCidr, sizeof(s_pending.addressCidr) - 1);
+          std::strncpy(s_pending.allowedCsv, csv.c_str(), sizeof(s_pending.allowedCsv) - 1);
+          s_pending.keepaliveS = cfg.keepaliveS;
+          s_pendingReady = true;
+        }
+      };
+      Hold w(cfg, allowedCsv);
       s_rotationState = fry::wgRotationFinish(true, &w);
       s_rotation = false;
-      sodium_memzero(rotPrivB64, sizeof(rotPrivB64));
     } else {
       fry_config::setWgProvisioned(cfg.serverPub, cfg.hasPsk ? cfg.psk : "", cfg.endpointHost,
                                    cfg.endpointPort, cfg.addressCidr, allowedCsv.c_str(),
@@ -280,15 +318,17 @@ void tick() {
   if (s_rotation) {  // every failure path: the old config is untouched and keeps being retried
     s_rotationState = fry::wgRotationFinish(false, nullptr);
     s_rotation = false;
-    sodium_memzero(rotPrivB64, sizeof(rotPrivB64));
   }
   Serial.printf("wg: provision POST http=%d\n", static_cast<int>(httpStatus));
   fry::WgFetchOutcome outcome = fry::classifyWgFetch(hasToken, heapOk, clockOk, httpStatus);
-  fry::WgRetrySchedule sched = fry::wgRetryDelayMs(outcome, s_attemptNumber, retryAfterS);
+  // T5: full-jitter exponential backoff (30-60 s first, cap 15 min), Retry-After wins, a denial
+  // waits at most 1 h. Never the old 6 h.
+  uint32_t delayMs = fry::wgBackoffMs(outcome, s_attemptNumber, retryAfterS, esp_random());
   if (s_attemptNumber != 0xFFFFFFFFu) s_attemptNumber++;
-  s_nextAttemptMs = now + sched.delayMs;
+  s_nextAttemptMs = now + delayMs;
+  if (s_nextAttemptMs == 0) s_nextAttemptMs = 1;  // 0 means "no backoff" below
   Serial.printf("wg: provision deferred reason=%s retry_in=%us\n", fry::wgOutcomeName(outcome),
-                static_cast<unsigned>(sched.delayMs / 1000));
+                static_cast<unsigned>(delayMs / 1000));
 }
 
 }  // namespace fry_wg_provision

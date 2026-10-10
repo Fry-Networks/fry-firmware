@@ -12,9 +12,12 @@ print("fry_prebuild: api token %s" % ("present (%d chars)" % len(tok) if tok els
 # fault back. ESP8266 has one slot, so a fault image there would crash-loop until reflashed over USB.
 _env_name = env.subst("$PIOENV")
 _is_test_env = _env_name.endswith("_test")
+# IV6 QA envs (*_qa) read the TEST channel from a bench mirror and nothing else, so a QA board can
+# never take the prod manifest. They may carry FRY_OTA_TEST_CHANNEL but still never FRY_TEST_FAULT.
+_is_qa_env = _env_name.endswith("_qa")
 _fault = os.environ.get("FRY_TEST_FAULT", "")
 _smuggled = " ".join(env.GetProjectOption("build_flags", []) or []) + " " + os.environ.get("PLATFORMIO_BUILD_FLAGS", "")
-if not _is_test_env and ("FRY_TEST_FAULT" in _smuggled or "FRY_OTA_TEST_CHANNEL" in _smuggled):
+if not (_is_test_env or _is_qa_env) and ("FRY_TEST_FAULT" in _smuggled or "FRY_OTA_TEST_CHANNEL" in _smuggled):
     print("fry_prebuild: REFUSED - FRY_TEST_FAULT / FRY_OTA_TEST_CHANNEL in the flags of %s, which is not a *_test env" % _env_name)
     env.Exit(1)
 if _fault:
@@ -26,6 +29,14 @@ if _fault:
         env.Exit(1)
     env.Append(CPPDEFINES=[("FRY_TEST_FAULT", _fault)])
     print("fry_prebuild: TEST FAULT %s compiled into %s - test channel only, never publish to prod" % (_fault, _env_name))
+if _is_qa_env:
+    # Build-time override: FRY_QA_MANIFEST_URL=http://<bench-mirror>:<port>/manifest.json pio run -e esp32_qa
+    _qa_url = os.environ.get("FRY_QA_MANIFEST_URL", "") or "http://127.0.0.1:8796/manifest.json"
+    if not _qa_url.startswith("http://") or any(c in _qa_url for c in "\"'\\ \t\n"):
+        print("fry_prebuild: REFUSED - FRY_QA_MANIFEST_URL must be a plain http:// URL without quotes or spaces (got %r)" % _qa_url)
+        env.Exit(1)
+    env.Append(CPPDEFINES=[("OTA_MANIFEST_URL_TEST", env.StringifyMacro(_qa_url))])
+    print("fry_prebuild: QA test-channel manifest %s" % _qa_url)
 for k in ("PROJECT_DIR", "PROJECT_CORE_DIR"):
     p = env.subst("$" + k)
     env.Append(CCFLAGS=["-ffile-prefix-map=%s=." % p, "-fmacro-prefix-map=%s=." % p])

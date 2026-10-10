@@ -21,12 +21,31 @@ void tick();
 // recovery (src/esp32/vpn_wireguard.cpp) never clears the config inside one.
 bool backoffActive();
 
-// Stage B of the dead-tunnel recovery (lib/fry_core/wg_recover.h): arm ONE rotation attempt that
-// the next tick() performs even though hasVpnConfig() is true. It POSTs a NEW keypair (same
-// install_id) and replaces the cached config only after a validated 2xx; on any failure the
-// existing config is untouched. rotationState() is Pending until tick() has finished the attempt,
-// then Committed or Failed. A failure leaves the normal backoff (backoffActive) in place.
+// T3 re-provision (stage B of the dead-tunnel recovery, and the T7 post-OTA refresh): arm ONE
+// attempt that the next tick() performs even though hasVpnConfig() is true. It POSTs the SAME
+// install_id and the SAME WG keypair (never a new one; a board without a keypair fails the attempt)
+// and does NOT touch the cached config: a validated 2xx is held in RAM as a PendingConfig.
+// rotationState() is Pending until tick() has finished the attempt, then Committed (a pending
+// config is ready for takePending) or Failed. A failure leaves the T5 backoff (backoffActive).
 void requestRotation();
 fry::WgRotationState rotationState();
+
+// A refreshed config awaiting its first handshake. RAM-only: a reset drops it and the old config
+// is used, which is the point (persist only after a handshake).
+struct PendingConfig {
+  char serverPub[45] = {};
+  bool hasPsk = false;
+  char psk[45] = {};
+  char endpointHost[64] = {};
+  uint16_t endpointPort = 0;
+  char addressCidr[20] = {};
+  char allowedCsv[80] = {};
+  uint32_t keepaliveS = 25;
+};
+bool takePending(PendingConfig& out);  // true once per Committed attempt
+// Called after the pending config handshook: writes it to fry_vpn (same keypair, nothing minted).
+void commitPending(const PendingConfig& cfg);
+// Called when the pending config did not handshake in time: schedules a T5 backoff.
+void noteTrialFailed();
 
 }  // namespace fry_wg_provision

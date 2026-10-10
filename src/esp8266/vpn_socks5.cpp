@@ -9,6 +9,8 @@
 #include <ESP8266WiFi.h>
 
 #include "../core/fry_config.h"
+#include "dest_ctx.h"
+#include "relay_link.h"
 #include "socks5_parse.h"
 
 namespace fry_vpn {
@@ -39,10 +41,12 @@ void resetToListening() {
   s_state = RelayState::Listening;
 }
 
+uint8_t s_denyRep = 0x01;  // REP byte of the failed connect reply (0x01 general, 0x02 blocked, 0x04 DNS)
+
 void sendConnectReply(bool ok) {
   // Fixed minimal reply: VER=5, REP, RSV=0, ATYP=IPv4, BND.ADDR=0.0.0.0, BND.PORT=0. Real
   // clients only care about the REP byte for a simple relay like this one.
-  uint8_t reply[10] = {0x05, static_cast<uint8_t>(ok ? 0x00 : 0x01), 0x00, 0x01, 0, 0, 0, 0, 0, 0};
+  uint8_t reply[10] = {0x05, static_cast<uint8_t>(ok ? 0x00 : s_denyRep), 0x00, 0x01, 0, 0, 0, 0, 0, 0};
   s_client.write(reply, sizeof(reply));
 }
 
@@ -83,10 +87,12 @@ void init() {
   s_server = new WiFiServer(port);
   s_server->begin();
   Serial.printf("socks5: listening :%u\n", port);
+  fry_relay::begin();  // IV5 G-3: the server-observable relay link, separate from :1080
 }
 
 void tick() {
   if (!s_server) return;
+  fry_relay::tick();
 
   switch (s_state) {
     case RelayState::Listening: {
@@ -145,7 +151,32 @@ void tick() {
       size_t consumed = 0;
       fry::Socks5Result r = fry::parseConnectRequest(s_buf, s_bufLen, req, consumed);
       if (r == fry::Socks5Result::Ok) {
-        bool ok = s_upstream.connect(req.host, req.port);
+        // Destination filter (lib/fry_core/dest_filter.h). The host is ALWAYS reduced to one IPv4
+        // address, that address is checked, and the connect goes to THAT address, never to the host
+        // string (lwIP would read "012.0.0.1" as octal 10.0.0.1). Non-canonical numeric forms are
+        // blocked. Reply 0x02 = not allowed, 0x04 = host unreachable (DNS).
+        bool ok = false;
+        uint32_t dst = 0;
+        bool haveIp = false;
+        bool dnsFailed = false;
+        bool literal = false;
+        const fry::DestCtx dctx = fry_dest::ctx();
+        const bool litAllowed = fry::destFilterText(req.host, dctx, &literal);
+        if (literal) {
+          haveIp = litAllowed && fry::destParseV4(req.host, &dst);
+        } else {
+          IPAddress resolved;
+          if (WiFi.hostByName(req.host, resolved, 3000) == 1) {
+            dst = fry_dest::hostOrder(resolved);
+            haveIp = fry::destFilterV4(dst, dctx);
+          } else {
+            dnsFailed = true;
+          }
+        }
+        if (haveIp) {
+          ok = s_upstream.connect(IPAddress(dst >> 24, (dst >> 16) & 0xFF, (dst >> 8) & 0xFF, dst & 0xFF), req.port);
+        }
+        s_denyRep = ok ? 0x00 : (dnsFailed ? 0x04 : (haveIp ? 0x01 : 0x02));
         sendConnectReply(ok);
         if (ok) {
           s_state = RelayState::Relaying;
@@ -154,6 +185,7 @@ void tick() {
           resetToListening();
         }
       } else if (r != fry::Socks5Result::NeedMoreData) {
+        s_denyRep = 0x01;
         sendConnectReply(false);
         resetToListening();
       } else if (s_bufLen >= kConnectBufMax) {

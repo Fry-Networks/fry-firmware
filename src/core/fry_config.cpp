@@ -3,7 +3,12 @@
 #include <cstring>
 #include <ctime>
 
+#ifndef ESP8266
+#include <nvs.h>
+#endif
+
 #include "config.h"
+#include "kv_guard.h"
 #include "kv_store.h"
 
 namespace fry_config {
@@ -224,12 +229,31 @@ void clearInstallation() {
 
 // ── fry_vpn ───────────────────────────────────────────────────────────────
 
+namespace {
+// Does the NVS namespace exist? Probed with a raw read-only nvs_open: it neither logs (Preferences::
+// begin(ns, true) logs an [E] nvs_open NOT_FOUND on every call for a namespace never written, which
+// is every board with no VPN config) nor writes flash. A positive answer is cached: a namespace is
+// never removed (clearVpn() clears its keys only).
+bool nsExists(const char* ns) {
+#ifdef ESP8266
+  (void)ns;
+  return true;
+#else
+  static bool vpnSeen = false;
+  const bool isVpn = std::strcmp(ns, "fry_vpn") == 0;
+  if (isVpn && vpnSeen) return true;
+  nvs_handle_t h;
+  if (nvs_open(ns, NVS_READONLY, &h) != ESP_OK) return false;
+  nvs_close(h);
+  if (isVpn) vpnSeen = true;
+  return true;
+#endif
+}
+}  // namespace
+
 String getWgPriv() {
   KvStore p;
-  p.begin("fry_vpn", true);
-  String v = p.getString("wgPriv", "");
-  p.end();
-  return v;
+  return fry::kvGetStringGuarded<String>(nsExists, p, "fry_vpn", "wgPriv");  // no [E] for a missing namespace or key (T8)
 }
 void setWgPriv(const char* v) {
   KvStore p;
@@ -240,10 +264,7 @@ void setWgPriv(const char* v) {
 
 String getWgPub() {
   KvStore p;
-  p.begin("fry_vpn", true);
-  String v = p.getString("wgPub", "");
-  p.end();
-  return v;
+  return fry::kvGetStringGuarded<String>(nsExists, p, "fry_vpn", "wgPub");  // no [E] for a missing namespace or key (T8)
 }
 void setWgPub(const char* v) {
   KvStore p;
@@ -254,10 +275,7 @@ void setWgPub(const char* v) {
 
 String getWgPeerPub() {
   KvStore p;
-  p.begin("fry_vpn", true);
-  String v = p.getString("wgPeerPub", "");
-  p.end();
-  return v;
+  return fry::kvGetStringGuarded<String>(nsExists, p, "fry_vpn", "wgPeerPub");  // no [E] for a missing namespace or key (T8)
 }
 void setWgPeerPub(const char* v) {
   KvStore p;
@@ -268,10 +286,7 @@ void setWgPeerPub(const char* v) {
 
 String getWgPsk() {
   KvStore p;
-  p.begin("fry_vpn", true);
-  String v = p.getString("wgPsk", "");
-  p.end();
-  return v;
+  return fry::kvGetStringGuarded<String>(nsExists, p, "fry_vpn", "wgPsk");  // no [E] for a missing namespace or key (T8)
 }
 void setWgPsk(const char* v) {
   KvStore p;
@@ -282,10 +297,7 @@ void setWgPsk(const char* v) {
 
 String getWgEndpoint() {
   KvStore p;
-  p.begin("fry_vpn", true);
-  String v = p.getString("wgEndpoint", "");
-  p.end();
-  return v;
+  return fry::kvGetStringGuarded<String>(nsExists, p, "fry_vpn", "wgEndpoint");  // no [E] for a missing namespace or key (T8)
 }
 void setWgEndpoint(const char* v) {
   KvStore p;
@@ -295,6 +307,7 @@ void setWgEndpoint(const char* v) {
 }
 
 uint32_t getWgPort() {
+  if (!nsExists("fry_vpn")) return 51820;
   KvStore p;
   p.begin("fry_vpn", true);
   uint32_t v = p.getUInt("wgPort", 51820);
@@ -310,10 +323,7 @@ void setWgPort(uint32_t v) {
 
 String getWgAddr() {
   KvStore p;
-  p.begin("fry_vpn", true);
-  String v = p.getString("wgAddr", "");
-  p.end();
-  return v;
+  return fry::kvGetStringGuarded<String>(nsExists, p, "fry_vpn", "wgAddr");  // no [E] for a missing namespace or key (T8)
 }
 void setWgAddr(const char* v) {
   KvStore p;
@@ -323,6 +333,7 @@ void setWgAddr(const char* v) {
 }
 
 uint32_t getSocksPort() {
+  if (!nsExists("fry_vpn")) return SOCKS5_PORT;
   KvStore p;
   p.begin("fry_vpn", true);
   uint32_t v = p.getUInt("socksPort", SOCKS5_PORT);
@@ -338,10 +349,7 @@ void setSocksPort(uint32_t v) {
 
 String getWgAllowed() {
   KvStore p;
-  p.begin("fry_vpn", true);
-  String v = p.getString("wgAllowed", "");
-  p.end();
-  return v;
+  return fry::kvGetStringGuarded<String>(nsExists, p, "fry_vpn", "wgAllowed");  // no [E] when absent (T8)
 }
 void setWgAllowed(const char* csv) {
   KvStore p;
@@ -351,6 +359,7 @@ void setWgAllowed(const char* csv) {
 }
 
 uint32_t getWgKeepalive() {
+  if (!nsExists("fry_vpn")) return 25;
   KvStore p;
   p.begin("fry_vpn", true);
   uint32_t v = p.getUInt("wgKeepalive", 25);
@@ -365,6 +374,7 @@ void setWgKeepalive(uint32_t v) {
 }
 
 uint32_t getWgProvAt() {
+  if (!nsExists("fry_vpn")) return 0;
   KvStore p;
   p.begin("fry_vpn", true);
   uint32_t v = p.getUInt("wgProvAt", 0);
@@ -386,9 +396,42 @@ void setWgKeypair(const char* priv, const char* pub) {
   p.end();
 }
 
+#ifndef ESP8266
+// Commit-in-progress marker (fry_wgrec/commit): the 8 fry_vpn writes of setWgProvisioned are not
+// atomic, so a reset between them could leave old and new fields mixed under an old wgProvAt that
+// the production gate trusts. The marker is written first and cleared last.
+void setWgCommitMarker(bool on) {
+  KvStore p;
+  p.begin("fry_wgrec", false);
+  if (on) p.putUChar("commit", 1); else p.remove("commit");
+  p.end();
+}
+// On boot: a marker still set means the last commit was torn. Drop wgPeerPub and wgProvAt only, so
+// the provisioning client POSTs again with the SAME keypair (wgPriv/wgPub stay) and writes a whole
+// config. Returns true when a torn commit was found.
+bool recoverTornWgCommit() {
+  if (!nsExists("fry_wgrec")) return false;  // never written: nothing can be torn, and no flash write
+  KvStore p;
+  p.begin("fry_wgrec", true);
+  const bool torn = p.isKey("commit");
+  p.end();
+  if (!torn) return false;
+  KvStore v;
+  v.begin("fry_vpn", false);
+  v.remove("wgPeerPub");
+  v.remove("wgProvAt");
+  v.end();
+  setWgCommitMarker(false);
+  return true;
+}
+#endif
+
 void setWgProvisioned(const char* peerPub, const char* psk, const char* endpointHost,
                       uint16_t endpointPort, const char* addrCidr, const char* allowedCsv,
                       uint32_t keepaliveS) {
+#ifndef ESP8266
+  setWgCommitMarker(true);  // first; cleared last. A marker still set at boot = an interrupted commit
+#endif
   setWgPsk(psk);
   setWgEndpoint(endpointHost);
   setWgPort(endpointPort);
@@ -397,6 +440,9 @@ void setWgProvisioned(const char* peerPub, const char* psk, const char* endpoint
   setWgKeepalive(keepaliveS);
   setWgPeerPub(peerPub);  // hasVpnConfig()'s existing commit marker
   setWgProvAt(static_cast<uint32_t>(time(nullptr)));  // the new production-trust gate, written LAST
+#ifndef ESP8266
+  setWgCommitMarker(false);
+#endif
 }
 
 #ifndef ESP8266
@@ -438,9 +484,38 @@ void clearWgPendingKeypair() {
   p.remove("pPub");
   p.end();
 }
+// T7 migration state, own namespace fry_wgmig. Opened read-write even to read: a read-only open of
+// a namespace that was never written logs an [E] nvs_open NOT_FOUND on every board's first boot.
+void getWgMigVer(char* out, size_t outLen) {
+  KvStore p;
+  p.begin("fry_wgmig", false);
+  out[0] = 0;
+  if (p.isKey("ver")) p.getString("ver", out, outLen);
+  p.end();
+}
+void setWgMigVer(const char* version) {
+  KvStore p;
+  p.begin("fry_wgmig", false);
+  p.putString("ver", version);
+  p.end();
+}
+uint32_t getWgMigTries() {
+  KvStore p;
+  p.begin("fry_wgmig", false);
+  uint32_t v = p.isKey("tries") ? p.getUInt("tries", 0) : 0;
+  p.end();
+  return v;
+}
+void setWgMigTries(uint32_t n) {
+  KvStore p;
+  p.begin("fry_wgmig", false);
+  p.putUInt("tries", n);
+  p.end();
+}
 #endif
 
 bool hasVpnConfig() {
+  if (!nsExists("fry_vpn")) return false;
   KvStore p;
   p.begin("fry_vpn", true);
   bool has = p.isKey("wgPeerPub") && p.isKey("wgEndpoint");

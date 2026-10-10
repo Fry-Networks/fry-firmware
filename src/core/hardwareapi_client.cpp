@@ -5,6 +5,7 @@
 #include <cstring>
 #include <ctime>
 
+#include "api_shapes.h"
 #include "config.h"
 #include "fry_config.h"
 #include "http_tls.h"
@@ -14,6 +15,7 @@
 #include "reg_result.h"
 #include "telemetry.h"
 #include "trigger_hooks.h"
+#include "wg_recover2.h"
 #include "wifi_station.h"
 
 #include <generated/fry_secrets.h>
@@ -192,7 +194,17 @@ bool registerInstallation() {
 
 int lastRegisterHttp() { return s_lastRegHttp; }
 
+// Lease denials (U2/U3): the server answers 200 + granted:false while another install holds the
+// key. Back off on the T5 table so a denied board neither floods nor goes silent.
+namespace {
+unsigned long s_leaseBlockUntilMs = 0;
+uint32_t s_leaseDenials = 0;
+}  // namespace
+
 bool renewLease() {
+  if (s_leaseBlockUntilMs != 0 && static_cast<int32_t>(millis() - s_leaseBlockUntilMs) < 0) {
+    return false;  // inside a denial backoff
+  }
   char minerKey[40];
   fry_identity::ensureMinerKey(minerKey, sizeof(minerKey));
   if (minerKey[0] == 0) return false;  // no key, no installation to lease
@@ -212,9 +224,30 @@ bool renewLease() {
   http.addHeader("Content-Type", "application/json");
   int code = http.sendRequest("PATCH", body);  // String overload — avoids a const/non-const
                                                 // uint8_t* signature mismatch between cores
+  String resp;
+  if (code > 0 && code < 300) resp = http.getString();
   http.end();
   fry_ota::noteHeartbeat(code, "lease");
-  return code > 0 && code < 300;
+  if (!(code > 0 && code < 300)) return false;
+  const fry::LeaseResult lr = fry::parseLeaseResponse(resp.c_str());
+  if (lr.verdict == fry::LeaseVerdict::Denied) {
+    uint32_t waitMs = fry::wgBackoffMs(fry::WgFetchOutcome::Forbidden403, s_leaseDenials,
+                                       0, static_cast<uint32_t>(random(0x7FFFFFFF)) ^ micros());
+    if (s_leaseDenials < 0xFFFFFFFFu) s_leaseDenials++;
+    s_leaseBlockUntilMs = millis() + waitMs;
+    if (s_leaseBlockUntilMs == 0) s_leaseBlockUntilMs = 1;
+    if (lr.reasonCode[0] != 0) {
+      Serial.printf("lease: denied (key in use by another install) reason=%s next=%lus\n",
+                    lr.reasonCode, static_cast<unsigned long>(waitMs / 1000UL));
+    } else {
+      Serial.printf("lease: denied (key in use by another install) next=%lus\n",
+                    static_cast<unsigned long>(waitMs / 1000UL));
+    }
+    return false;
+  }
+  s_leaseDenials = 0;
+  s_leaseBlockUntilMs = 0;
+  return true;
 }
 
 int putPoc() {
@@ -232,6 +265,8 @@ int putPoc() {
   document["uptime_s"] = millis() / 1000;
   document["heap_free"] = ESP.getFreeHeap();
   document["rssi"] = fry_wifi::isConnected() ? fry_wifi::rssi() : 0;
+  // T9: the version the hwapi eligibility gate reads (software.os, software.poc_version_installed).
+  fry::fillPocSoftware(document["software"].to<JsonObject>(), FRY_BUILD_ENV, FRY_FIRMWARE_VERSION);
   String body;
   serializeJson(doc, body);
 

@@ -18,10 +18,17 @@
 #include "../core/hardwareapi_client.h"
 #include "../core/ota_client.h"
 #include "../core/wifi_station.h"
+#include "dest_filter.h"
+#include "kv_guard.h"
 #include "socks5_parse.h"
 #include "wg_provision.h"
 #include "wg_provision_client.h"
 #include "wg_recover.h"
+#include "wg_recover2.h"
+
+#ifndef FRY_FIRMWARE_VERSION
+#define FRY_FIRMWARE_VERSION "0.0.0-dev"
+#endif
 
 #if IP_NAPT
 #include <lwip/lwip_napt.h>
@@ -54,6 +61,18 @@ volatile uint32_t s_relayedBytes = 0;
 // Config strings must outlive the wireguard_config_t (esp_wireguard keeps the pointers, does
 // not copy them), so these are file-scope statics rather than locals in init().
 String s_priv, s_pub, s_psk, s_addr, s_netmask, s_endpoint;
+
+uint32_t ipToHostOrder(const IPAddress& ip) {
+  return (static_cast<uint32_t>(ip[0]) << 24) | (static_cast<uint32_t>(ip[1]) << 16) |
+         (static_cast<uint32_t>(ip[2]) << 8) | static_cast<uint32_t>(ip[3]);
+}
+fry::DestCtx relayDestCtx() {
+  fry::DestCtx c;
+  c.selfIp = ipToHostOrder(WiFi.localIP());
+  c.selfMask = ipToHostOrder(WiFi.subnetMask());
+  c.gateway = ipToHostOrder(WiFi.gatewayIP());
+  return c;
+}
 
 #if !IP_NAPT
 // Fallback when this build's lwIP has no NAPT compiled in. This is not a build-flag choice we
@@ -129,9 +148,36 @@ void relayTaskFn(void*) {
       size_t consumed = 0;
       fry::Socks5Result r = fry::parseConnectRequest(buf, bufLen, req, consumed);
       if (r == fry::Socks5Result::Ok) {
-        connected = upstream.connect(req.host, req.port);
-        uint8_t reply[10] = {0x05, static_cast<uint8_t>(connected ? 0x00 : 0x01), 0x00, 0x01,
-                              0, 0, 0, 0, 0, 0};
+        // Destination filter (lib/fry_core/dest_filter.h). The host is ALWAYS reduced to one IPv4
+        // address first, that address is checked, and the connect goes to THAT address, never to
+        // the host string (lwIP would read "012.0.0.1" as octal 10.0.0.1). Non-canonical numeric
+        // forms come back blocked. 0x02 = not allowed by ruleset, 0x04 = host unreachable (DNS).
+        uint32_t dst = 0;
+        bool haveIp = false;
+        bool dnsFailed = false;
+        bool literal = false;
+        const fry::DestCtx ctx = relayDestCtx();
+        bool allowed = fry::destFilterText(req.host, ctx, &literal);
+        if (literal) {
+          haveIp = allowed && fry::destParseV4(req.host, &dst);  // an IPv6 literal cannot be dialled here
+        } else {
+          IPAddress resolved;
+          if (WiFi.hostByName(req.host, resolved) == 1) {
+            dst = ipToHostOrder(resolved);
+            haveIp = fry::destFilterV4(dst, ctx);
+          } else {
+            dnsFailed = true;
+          }
+        }
+        if (haveIp) {
+          connected = upstream.connect(IPAddress(dst >> 24, (dst >> 16) & 0xFF, (dst >> 8) & 0xFF, dst & 0xFF), req.port);
+        } else if (!dnsFailed) {
+          Serial.printf("socks5: destination blocked (blocked=%u allowed=%u)\n",
+                        static_cast<unsigned>(fry::destCounters().blocked),
+                        static_cast<unsigned>(fry::destCounters().allowed));
+        }
+        uint8_t reply[10] = {0x05, static_cast<uint8_t>(connected ? 0x00 : (dnsFailed ? 0x04 : (haveIp ? 0x01 : 0x02))),
+                              0x00, 0x01, 0, 0, 0, 0, 0, 0};
         client.write(reply, sizeof(reply));
         break;
       } else if (r != fry::Socks5Result::NeedMoreData) {
@@ -200,7 +246,12 @@ unsigned long s_lastBringUpAttemptMs = 0;
 
 // Dead-tunnel recovery (lib/fry_core/wg_recover.h). RAM-only; the stage-B rate limit is the
 // persisted fry_wgrec/at stamp.
-fry::WgRecover s_recover;
+fry::WgRecover2 s_recover;
+fry::WgTrial s_trial;                         // T3: a refreshed config on trial until it handshakes
+fry_wg_provision::PendingConfig s_trialCfg;   // RAM-only; the old config stays in NVS meanwhile
+bool s_migActive = false;                     // T7: a post-OTA endpoint refresh is still owed
+uint32_t s_migTries = 0;
+fry::OnceFlag s_noConfigLog;
 bool s_recovering = false;     // stage A tore the tunnel down and it has not been up since
 bool s_stageAPending = false;  // waiting for bringUp() to report whether the endpoint IP changed
 uint32_t s_stageAOldIp = 0;
@@ -285,14 +336,23 @@ bool provisioningGateOpen() {
 // Loads the persisted config into the file-scope String/wgConfig fields. Returns false (and logs
 // exactly the historical message) when no config is stored yet at all.
 bool loadConfig() {
-  s_priv = fry_config::getWgPriv();
-  s_pub = fry_config::getWgPeerPub();
-  s_psk = fry_config::getWgPsk();
-  s_addr = fry_config::getWgAddr();  // e.g. "10.13.13.2/24"
-  s_endpoint = fry_config::getWgEndpoint();
+  s_priv = fry_config::getWgPriv();  // the keypair is never replaced, trial or not
+  if (s_trial.active()) {
+    s_pub = s_trialCfg.serverPub;
+    s_psk = s_trialCfg.hasPsk ? s_trialCfg.psk : "";
+    s_addr = s_trialCfg.addressCidr;
+    s_endpoint = s_trialCfg.endpointHost;
+  } else {
+    s_pub = fry_config::getWgPeerPub();
+    s_psk = fry_config::getWgPsk();
+    s_addr = fry_config::getWgAddr();  // e.g. "10.13.13.2/24"
+    s_endpoint = fry_config::getWgEndpoint();
+  }
 
   if (s_priv.length() == 0 || s_pub.length() == 0 || s_endpoint.length() == 0) {
-    Serial.println("wg: no VPN config - skipping");
+    if (s_noConfigLog.first()) {  // T8: an expected state, one INFO line per boot
+      Serial.println("wg: no VPN config - skipping");
+    }
     return false;
   }
 
@@ -319,7 +379,7 @@ bool loadConfig() {
 // the WIREGUARD_MAX_SRC_IPS fix - the build-time half is the static_assert-equivalent #error
 // block above requiring CONFIG_WIREGUARD_MAX_SRC_IPS == 4.
 void applyAllowedIps() {
-  String csv = fry_config::getWgAllowed();
+  String csv = s_trial.active() ? String(s_trialCfg.allowedCsv) : fry_config::getWgAllowed();
   int start = 0;
   while (start <= static_cast<int>(csv.length())) {
     int sep = csv.indexOf(';', start);
@@ -361,8 +421,8 @@ bool bringUp() {
   s_wgConfig.address = s_addr.c_str();
   s_wgConfig.netmask = s_netmask.c_str();
   s_wgConfig.endpoint = s_endpoint.c_str();
-  s_wgConfig.port = static_cast<uint16_t>(fry_config::getWgPort());
-  s_wgConfig.persistent_keepalive = static_cast<uint16_t>(fry_config::getWgKeepalive());
+  s_wgConfig.port = static_cast<uint16_t>(s_trial.active() ? s_trialCfg.endpointPort : fry_config::getWgPort());
+  s_wgConfig.persistent_keepalive = static_cast<uint16_t>(s_trial.active() ? s_trialCfg.keepaliveS : fry_config::getWgKeepalive());
 
   esp_err_t err;
   if (!s_initAttempted) {
@@ -414,10 +474,31 @@ bool bringUp() {
 #ifndef FRY_SERIAL_PROVISION
 static constexpr unsigned long WG_RECOVER_TICK_MS = 5000;
 
+// The provisioning host (T1 gate): can DNS answer for it right now? Cached for 30 s and only asked
+// once the tunnel has been down for the dead threshold, so a down tunnel costs at most one
+// bounded lookup per 30 s.
+bool apiHostResolves(unsigned long nowMs) {
+  static unsigned long checkedMs = 0;
+  static bool cached = false;
+  if (checkedMs != 0 && nowMs - checkedMs < 30000) return cached;
+  checkedMs = nowMs ? nowMs : 1;
+  String base = fry_config::getApiBase();  // https://host[:port][/path]
+  int h = base.indexOf("://");
+  String host = h >= 0 ? base.substring(h + 3) : base;
+  int cut = host.indexOf('/');
+  if (cut >= 0) host = host.substring(0, cut);
+  cut = host.indexOf(':');
+  if (cut >= 0) host = host.substring(0, cut);
+  IPAddress ip;
+  cached = host.length() > 0 && WiFi.hostByName(host.c_str(), ip) == 1;
+  return cached;
+}
+
 // Runs every tick (initialized or not). Lab builds are excluded: their config comes from the
 // `set_wg` serial command and cannot be re-provisioned by the server.
 void recoverTick() {
   static unsigned long lastMs = 0;
+  static unsigned long downSinceMs = 0;
   unsigned long nowMs = millis();
   if (nowMs - lastMs < WG_RECOVER_TICK_MS) return;  // the NVS reads below are not loop()-cheap
   lastMs = nowMs;
@@ -426,12 +507,46 @@ void recoverTick() {
       s_initialized && s_wgCtx.netif != nullptr && esp_wireguard_peer_is_up(&s_wgCtx) == ESP_OK;
   if (up) s_recovering = false;
 
-  fry::WgRecoverInput in;
+  // T3: a refreshed config runs as a trial. It is persisted only after it handshakes; if it never
+  // does, the old config is reloaded and the T5 backoff applies.
+  if (s_trial.active()) {
+    switch (s_trial.tick(up, nowMs, fry_wifi::isConnected())) {
+      case fry::WgTrialEvent::Commit:
+        fry_wg_provision::commitPending(s_trialCfg);
+        Serial.println("wg: recover trial handshook - new config persisted");
+        if (s_migActive) {
+          s_migActive = false;
+          fry_config::setWgMigVer(FRY_FIRMWARE_VERSION);
+          fry_config::setWgMigTries(0);
+          Serial.println("wg: migration done - endpoint refreshed after the update");
+        }
+        break;
+      case fry::WgTrialEvent::Rollback:
+        Serial.println("wg: recover trial did not handshake - old config restored, backing off");
+        fry_wg_provision::noteTrialFailed();
+        s_recovering = true;
+        s_freshNetifRequired = true;
+        s_initialized = false;  // tick() reloads the persisted config and brings it up
+        s_wasUp = false;
+        settleTeardown();
+        break;
+      case fry::WgTrialEvent::None:
+        break;
+    }
+    return;
+  }
+
+  fry::WgRecover2Input in;
   in.armed = s_initialized || s_recovering;
   in.up = up;
   in.wifiUp = fry_wifi::isConnected();
   in.nowMs = nowMs;
-  if (in.armed && !up) {  // the rest only matters while an armed tunnel is down
+  if (in.armed && in.wifiUp && !up) {
+    if (downSinceMs == 0) downSinceMs = nowMs ? nowMs : 1;
+  } else {
+    downSinceMs = 0;
+  }
+  if ((in.armed && !up) || s_migActive) {  // the rest only matters while down or a migration is owed
     in.hostnameEndpoint = fry::wgEndpointIsHostname(fry_config::getWgEndpoint().c_str());
     // An image that is PENDING_VERIFY (settling after an OTA: ota_client.cpp s_confirmPending,
     // reported by imageStateName) or an unconsumed fry_ota/pending flag means an update is in
@@ -440,15 +555,49 @@ void recoverTick() {
                  fry_config::getOtaPending().length() > 0;
     in.clockSynced = fry_hwapi::ensureNtpSynced(/*timeoutMs=*/1);
     in.provBlocked = fry_wg_provision::backoffActive();
-    // Proof the API is reachable: hardwareapi answered 2xx within kWgApiFreshS
-    // (ota_client.cpp s_heartbeat, noted by every registration/PoC/lease answer; cadence 10 min).
-    in.apiReachable = fry::wgApiRecent(fry_ota::heartbeatAgeS());
+    in.hostResolves = (downSinceMs != 0 && nowMs - downSinceMs >= fry::kWg2DeadAfterS * 1000UL)
+                          ? apiHostResolves(nowMs)
+                          : true;
     in.jitterS = fry::wgRecoverJitterS(ESP.getEfuseMac());
+    if (in.jitterS > fry::kWg2JitterMaxS) in.jitterS = in.jitterS % (fry::kWg2JitterMaxS + 1);
     in.epochNow = static_cast<uint32_t>(time(nullptr));
     in.lastStageBEpoch = recoverStamp();
   }
 
-  switch (s_recover.decide(in)) {
+  fry::WgRecoverAction act = s_recover.decide(in);
+  bool fromMigration = false;
+  // T7: one refresh owed after an OTA. Same gates as stage B plus a boot-settling delay; the T5
+  // backoff paces failures and the persisted attempt counter bounds them (24, then give up).
+  if (act == fry::WgRecoverAction::None && s_migActive && in.wifiUp && in.clockSynced &&
+      !in.provBlocked && !in.otaBusy && nowMs > 60000UL &&
+      (in.lastStageBEpoch == 0 || in.epochNow < in.lastStageBEpoch ||
+       in.epochNow - in.lastStageBEpoch >= fry::kWg2StageBFloorS)) {
+    fry::WgMigrationInput mi;
+    char lastVer[16] = {0};
+    fry_config::getWgMigVer(lastVer, sizeof(lastVer));
+    mi.lastVer = lastVer;
+    mi.curVer = FRY_FIRMWARE_VERSION;
+    mi.hasConfig = true;
+    mi.rawIpEndpoint = !in.hostnameEndpoint;
+    mi.tries = s_migTries;
+    fry::WgMigrationAction ma = fry::wgMigrationDecide(mi);
+    if (ma == fry::WgMigrationAction::GiveUp) {
+      s_migActive = false;
+      fry_config::setWgMigVer(FRY_FIRMWARE_VERSION);
+      fry_config::setWgMigTries(0);
+      Serial.printf("wg: migration gave up after %u attempts\n", static_cast<unsigned>(s_migTries));
+    } else if (ma == fry::WgMigrationAction::RecordVersion) {
+      s_migActive = false;
+      fry_config::setWgMigVer(FRY_FIRMWARE_VERSION);
+    } else if (ma == fry::WgMigrationAction::Refresh) {
+      s_migTries++;
+      fry_config::setWgMigTries(s_migTries);  // persisted BEFORE the attempt: a reboot loop is bounded
+      act = fry::WgRecoverAction::ReProvision;
+      fromMigration = true;
+    }
+  }
+
+  switch (act) {
     case fry::WgRecoverAction::None:
       return;
     case fry::WgRecoverAction::ReResolve:
@@ -462,16 +611,19 @@ void recoverTick() {
       settleTeardown();       // a failed teardown is retried by bringUp() via the flag
       return;
     case fry::WgRecoverAction::ReProvision:
-      Serial.println("wg: recover B - no handshake, rotating the WireGuard peer");
+      Serial.printf("wg: recover B - %s, re-provisioning with the same keypair\n",
+                    fromMigration ? "post-update endpoint refresh" : "no handshake");
       setRecoverStamp(in.epochNow);  // persisted BEFORE the attempt: a crash never loops
       fry_wg_provision::requestRotation();
-      fry_wg_provision::tick();  // one blocking POST, exactly like the boot-time provisioning call
-      if (fry_wg_provision::rotationState() != fry::WgRotationState::Committed) {
+      fry_wg_provision::tick();  // one bounded blocking POST (8 s), like the boot-time provisioning call
+      if (fry_wg_provision::rotationState() != fry::WgRotationState::Committed ||
+          !fry_wg_provision::takePending(s_trialCfg)) {
         Serial.println("wg: recover B failed - old config kept, tunnel untouched");
         return;
       }
-      Serial.println("wg: recover B committed - rebuilding the tunnel with the new config");
-      s_recovering = false;
+      Serial.println("wg: recover B response validated - trialling the new config, old one kept");
+      s_trial.begin(millis());
+      s_recovering = true;
       s_stageAPending = false;
       s_freshNetifRequired = true;
       s_initialized = false;
@@ -483,7 +635,42 @@ void recoverTick() {
 #endif
 
 void init() {
+#ifndef FRY_SERIAL_PROVISION
+  if (fry_config::recoverTornWgCommit()) {
+    Serial.println("wg: interrupted config commit found - dropping the peer key, re-provisioning with the same keypair");
+  }
+#endif
   if (!loadConfig()) return;
+#ifndef FRY_SERIAL_PROVISION
+  // T7: the first boot after an OTA owes ONE endpoint refresh when the cached endpoint is a raw IP.
+  {
+    fry::WgMigrationInput mi;
+    char lastVer[16] = {0};
+    fry_config::getWgMigVer(lastVer, sizeof(lastVer));
+    mi.lastVer = lastVer;
+    mi.curVer = FRY_FIRMWARE_VERSION;
+    mi.hasConfig = true;
+    mi.rawIpEndpoint = !fry::wgEndpointIsHostname(s_endpoint.c_str());
+    s_migTries = fry_config::getWgMigTries();
+    mi.tries = s_migTries;
+    switch (fry::wgMigrationDecide(mi)) {
+      case fry::WgMigrationAction::None:
+        break;
+      case fry::WgMigrationAction::RecordVersion:
+        fry_config::setWgMigVer(FRY_FIRMWARE_VERSION);
+        fry_config::setWgMigTries(0);
+        break;
+      case fry::WgMigrationAction::Refresh:
+        s_migActive = true;
+        Serial.println("wg: first boot after an update with a raw-IP endpoint - one refresh owed");
+        break;
+      case fry::WgMigrationAction::GiveUp:
+        fry_config::setWgMigVer(FRY_FIRMWARE_VERSION);
+        Serial.printf("wg: migration gave up after %u attempts\n", static_cast<unsigned>(s_migTries));
+        break;
+    }
+  }
+#endif
   if (!provisioningGateOpen()) {
     Serial.println("wg: config present but not yet server-provisioned - deferring bring-up");
     return;  // tick() retries once the fetch client (or, in a lab build, `set_wg`) commits one

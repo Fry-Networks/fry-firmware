@@ -94,6 +94,16 @@ void setWgRecoverAt(uint32_t epochS);
 bool getWgPendingKeypair(char priv[45], char pub[45]);
 void setWgPendingKeypair(const char* priv, const char* pub);
 void clearWgPendingKeypair();
+// T7: the firmware version at which the post-OTA endpoint migration last settled ("" = never) and
+// the number of refresh attempts made for it (lib/fry_core/wg_recover2.h wgMigrationDecide).
+void getWgMigVer(char* out, size_t outLen);
+void setWgMigVer(const char* version);
+uint32_t getWgMigTries();
+void setWgMigTries(uint32_t n);
+// Torn-commit guard for setWgProvisioned (marker fry_wgrec/commit, written first, cleared last).
+// Call once at boot before reading the config; true = a torn commit was found and the peer key and
+// trust stamp were dropped so the config is re-provisioned with the same keypair.
+bool recoverTornWgCommit();
 #endif
 
 // The single entry point src/esp32/wg_provision_client.cpp calls after a successful POST.
