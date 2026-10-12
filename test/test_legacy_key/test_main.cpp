@@ -18,8 +18,8 @@ using fry::migrateLegacyMinerKey;
 
 namespace {
 
-const char kLegacyUpper[] = "IOT-3A4500E6501DE12F2BFDEF0507B5E87C";  // the key on the bench board
-const char kLegacyLower[] = "IOT-3a4500e6501de12f2bfdef0507b5e87c";
+const char kLegacyUpper[] = "IOT-5E1F0000000000000000000000000001";  // the key on the bench board
+const char kLegacyLower[] = "IOT-5e1f0000000000000000000000000001";
 
 // Fills a buffer with a sentinel so "left untouched" is an assertion and not an assumption.
 void poison(char* buf, size_t len) { memset(buf, '?', len - 1); buf[len - 1] = 0; }
@@ -34,7 +34,7 @@ bool untouched(const char* buf, size_t len) {
 void test_legacy_key_is_recognised(void) {
   TEST_ASSERT_TRUE(isLegacyMinerKey(kLegacyUpper));
   TEST_ASSERT_TRUE(isLegacyMinerKey(kLegacyLower));
-  TEST_ASSERT_FALSE(isLegacyMinerKey("FEM-3A4500E6501DE12F2BFDEF0507B5E87C"));
+  TEST_ASSERT_FALSE(isLegacyMinerKey("FEM-5E1F0000000000000000000000000001"));
   TEST_ASSERT_FALSE(isLegacyMinerKey(nullptr));
 }
 
@@ -42,7 +42,7 @@ void test_migrates_the_prefix_and_keeps_the_hex(void) {
   char out[40];
   poison(out, sizeof(out));
   TEST_ASSERT_TRUE(migrateLegacyMinerKey(kLegacyUpper, out, sizeof(out)));
-  TEST_ASSERT_EQUAL_STRING("FEM-3A4500E6501DE12F2BFDEF0507B5E87C", out);
+  TEST_ASSERT_EQUAL_STRING("FEM-5E1F0000000000000000000000000001", out);
   // Same 32 hex digits, only the prefix moved.
   TEST_ASSERT_EQUAL_STRING(kLegacyUpper + 4, out + 4);
   // And the result is a key the rest of the firmware will accept.
@@ -52,7 +52,7 @@ void test_migrates_the_prefix_and_keeps_the_hex(void) {
 void test_an_already_migrated_key_is_refused_and_out_is_untouched(void) {
   char out[40];
   poison(out, sizeof(out));
-  TEST_ASSERT_FALSE(migrateLegacyMinerKey("FEM-3A4500E6501DE12F2BFDEF0507B5E87C", out, sizeof(out)));
+  TEST_ASSERT_FALSE(migrateLegacyMinerKey("FEM-5E1F0000000000000000000000000001", out, sizeof(out)));
   TEST_ASSERT_TRUE(untouched(out, sizeof(out)));
 }
 
@@ -60,15 +60,15 @@ void test_lowercase_hex_is_accepted_with_its_case_preserved(void) {
   char out[40];
   poison(out, sizeof(out));
   TEST_ASSERT_TRUE(migrateLegacyMinerKey(kLegacyLower, out, sizeof(out)));
-  TEST_ASSERT_EQUAL_STRING("FEM-3a4500e6501de12f2bfdef0507b5e87c", out);
+  TEST_ASSERT_EQUAL_STRING("FEM-5e1f0000000000000000000000000001", out);
   TEST_ASSERT_EQUAL_STRING(kLegacyLower + 4, out + 4);
 }
 
 void test_wrong_length_hex_is_rejected(void) {
   char out[40];
   poison(out, sizeof(out));
-  TEST_ASSERT_FALSE(migrateLegacyMinerKey("IOT-3A4500E6501DE12F2BFDEF0507B5E87", out, sizeof(out)));   // 31
-  TEST_ASSERT_FALSE(migrateLegacyMinerKey("IOT-3A4500E6501DE12F2BFDEF0507B5E87CD", out, sizeof(out)));  // 33
+  TEST_ASSERT_FALSE(migrateLegacyMinerKey("IOT-5E1F000000000000000000000000000", out, sizeof(out)));   // 31
+  TEST_ASSERT_FALSE(migrateLegacyMinerKey("IOT-5E1F0000000000000000000000000001D", out, sizeof(out)));  // 33
   TEST_ASSERT_FALSE(migrateLegacyMinerKey("IOT-", out, sizeof(out)));
   TEST_ASSERT_TRUE(untouched(out, sizeof(out)));
 }
@@ -76,9 +76,9 @@ void test_wrong_length_hex_is_rejected(void) {
 void test_non_hex_and_null_are_rejected(void) {
   char out[40];
   poison(out, sizeof(out));
-  TEST_ASSERT_FALSE(migrateLegacyMinerKey("IOT-3A4500E6501DE12F2BFDEF0507B5E87G", out, sizeof(out)));
-  TEST_ASSERT_FALSE(migrateLegacyMinerKey("IOT-3A4500E6501DE12F2BFDEF0507B5E87 ", out, sizeof(out)));
-  TEST_ASSERT_FALSE(migrateLegacyMinerKey("XXX-3A4500E6501DE12F2BFDEF0507B5E87C", out, sizeof(out)));
+  TEST_ASSERT_FALSE(migrateLegacyMinerKey("IOT-5E1F000000000000000000000000000G", out, sizeof(out)));
+  TEST_ASSERT_FALSE(migrateLegacyMinerKey("IOT-5E1F000000000000000000000000000 ", out, sizeof(out)));
+  TEST_ASSERT_FALSE(migrateLegacyMinerKey("XXX-5E1F0000000000000000000000000001", out, sizeof(out)));
   TEST_ASSERT_FALSE(migrateLegacyMinerKey(nullptr, out, sizeof(out)));
   TEST_ASSERT_TRUE(untouched(out, sizeof(out)));
 }
@@ -91,7 +91,7 @@ void test_a_buffer_one_byte_short_is_refused(void) {
   TEST_ASSERT_FALSE(migrateLegacyMinerKey(kLegacyUpper, out, 36));
   TEST_ASSERT_TRUE(untouched(out, sizeof(out)));
   TEST_ASSERT_TRUE(migrateLegacyMinerKey(kLegacyUpper, out, 37));
-  TEST_ASSERT_EQUAL_STRING("FEM-3A4500E6501DE12F2BFDEF0507B5E87C", out);
+  TEST_ASSERT_EQUAL_STRING("FEM-5E1F0000000000000000000000000001", out);
 }
 
 void test_migration_is_not_repeatable(void) {
