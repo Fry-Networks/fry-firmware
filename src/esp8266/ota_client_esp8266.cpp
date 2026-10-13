@@ -20,6 +20,8 @@
 #endif
 
 #include <cstring>
+#include <memory>
+#include <new>
 
 #include "config.h"
 #include "../core/fry_config.h"
@@ -67,6 +69,18 @@ bool s_firstCheckDone = false;
 // B4: the manifest entry's declared image size, checked against Content-Length before a byte is
 // written (one slot, no rollback on this chip).
 uint32_t s_expectSize = 0;
+
+// The loop() (CONT) stack is 4 KB and the BearSSL handshake runs on top of whatever checkNow() and
+// downloadAndApply() already hold. The HTTP/TLS clients (and the download buffer below) therefore
+// live on the heap, never in those frames: measured with the diag build, the OTA connect started
+// with 276 bytes of CONT stack free and a soft WDT followed. The heap gates are sampled BEFORE
+// any of this is allocated and are not re-sampled.
+struct OtaConn {
+  HTTPClient http;
+  WiFiClientSecure sec;
+  WiFiClient plain;
+};
+constexpr size_t kDownloadBufSize = 1024;
 
 // The relay link's TLS session would otherwise sit in the heap the GitHub path needs.
 struct RelayLinkPause {
@@ -184,9 +198,15 @@ bool downloadAndApply(const String& url, const String& shaExpect, const String& 
     logSkip(fry::OtaFailKind::GateFailed, "heap gate");
     return false;
   }
-  HTTPClient http;
-  WiFiClientSecure sec;
-  WiFiClient plain;
+  std::unique_ptr<OtaConn> conn(new (std::nothrow) OtaConn);
+  if (!conn) {
+    Serial.println("ota: out of memory for the connection");
+    logSkip(fry::OtaFailKind::GateFailed, "no memory");
+    return false;
+  }
+  HTTPClient& http = conn->http;
+  WiFiClientSecure& sec = conn->sec;
+  WiFiClient& plain = conn->plain;
   if (!otaBeginUrl(http, sec, plain, url, plan)) {
     Serial.println("ota: begin failed");
     return false;
@@ -237,6 +257,13 @@ bool downloadAndApply(const String& url, const String& shaExpect, const String& 
       return false;
     }
   }
+  std::unique_ptr<uint8_t[]> bufHeap(new (std::nothrow) uint8_t[kDownloadBufSize]);
+  if (!bufHeap) {
+    Serial.println("ota: out of memory for the download buffer");
+    http.end();
+    logSkip(fry::OtaFailKind::GateFailed, "no memory");
+    return false;
+  }
   if (!Update.begin(len)) {
     Serial.printf("ota: Update.begin failed (bin %dB too big for slot?)\n", len);
     http.end();
@@ -246,14 +273,14 @@ bool downloadAndApply(const String& url, const String& shaExpect, const String& 
 
   fry::Sha256 sha;
   WiFiClient* stream = http.getStreamPtr();
-  uint8_t buf[1024];
+  uint8_t* const buf = bufHeap.get();
   size_t done = 0;
   unsigned long lastData = millis();
   unsigned long lastLog = 0;
   while (done < static_cast<size_t>(len)) {
     size_t avail = stream->available();
     if (avail) {
-      int r = stream->readBytes(buf, avail > sizeof(buf) ? sizeof(buf) : avail);
+      int r = stream->readBytes(buf, avail > kDownloadBufSize ? kDownloadBufSize : avail);
       if (r <= 0) break;
       sha.update(buf, r);
       if (Update.write(buf, r) != static_cast<size_t>(r)) {
@@ -417,9 +444,15 @@ bool checkNow() {
   {
     String body;
     {
-      HTTPClient http;
-      WiFiClientSecure sec;
-      WiFiClient plain;
+      std::unique_ptr<OtaConn> conn(new (std::nothrow) OtaConn);
+      if (!conn) {
+        Serial.println("ota: out of memory for the connection");
+        logSkip(fry::OtaFailKind::GateFailed, "no memory");
+        return false;
+      }
+      HTTPClient& http = conn->http;
+      WiFiClientSecure& sec = conn->sec;
+      WiFiClient& plain = conn->plain;
       if (!otaBeginUrl(http, sec, plain, manifestUrl, plan)) {
         Serial.println("ota: manifest fetch begin failed");
         return false;
