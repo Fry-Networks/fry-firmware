@@ -8,9 +8,10 @@ name: release-fw
 # releases/latest, which never points at a draft, so nothing ships until a person publishes it
 # after the canary.
 #
-# Round 2 (R5): this release holds ESP32-S3 and ESP8266 back ENTIRELY - they are not built, not
-# attached and not in the manifest; the Pages flasher keeps serving their 0.3.3 parts from
-# docs/flash/fw/hold/. The flasher moves ESP32/ESP32-C3 to the new version only after the canary,
+# Round 2 (R5): this release holds ESP32-S3 back ENTIRELY - it is not built, not attached and not in
+# the manifest; the Pages flasher keeps serving its 0.3.3 parts from docs/flash/fw/hold/. ESP8266 is
+# built, attached and listed in the prod OTA manifest (it passed on a real board, iv6); the Pages
+# flasher still holds its 0.3.3 parts. The flasher moves ESP32/ESP32-C3 to the new version only after the canary,
 # so the tagged commit's flasher is checked for consistency and for the hold, not for the version.
 
 on:
@@ -26,7 +27,7 @@ jobs:
     strategy:
       fail-fast: true
       matrix:
-        env: [esp32, esp32c3]
+        env: [esp32, esp32c3, esp8266]
     steps:
       - uses: actions/checkout@v4
 
@@ -117,6 +118,7 @@ jobs:
           set -eu
           python3 tools/test_make_manifest_exclude.py
           python3 tools/test_make_manifest_envs.py
+          python3 tools/test_make_manifest_esp8266.py
           python3 tools/test_check_no_token.py
           python3 tools/test_check_prod_channel.py
           python3 tools/test_ble_key_write_security.py
@@ -180,7 +182,7 @@ jobs:
         run: |
           set -eu
           mkdir -p release
-          for env in esp32 esp32c3; do
+          for env in esp32 esp32c3 esp8266; do
             mkdir -p "manifest_input/$env"
             cp "artifacts/fw-$env/firmware-$env.bin" "release/firmware-$env.bin"
             cp "artifacts/fw-$env/firmware-$env.bin" "manifest_input/$env/firmware.bin"
@@ -196,14 +198,14 @@ jobs:
         run: |
           set -eu
           python3 tools/make_manifest.py --version "${GITHUB_REF_NAME#fw-v}" --channel prod \
-            --envs esp32,esp32c3 --release-base "https://github.com/${{ github.repository }}/releases/download/${GITHUB_REF_NAME}" \
+            --envs esp32,esp32c3,esp8266 --release-base "https://github.com/${{ github.repository }}/releases/download/${GITHUB_REF_NAME}" \
             --build-dir manifest_input --out ota/manifest.json --dist release
           python3 - <<'EOF'
           import json
           m = json.load(open("ota/manifest.json"))
           cfg = json.load(open("tools/ota_channels.json"))
           excluded = set(cfg["channels"]["prod"]["exclude_from_builds"])
-          want = {"esp32", "esp32c3"} - excluded  # R5: the held chips are not even built
+          want = {"esp32", "esp32c3", "esp8266"} - excluded  # R5: the held chips are not even built
           assert m["channel"] == "prod", m
           assert set(m["builds"]) == want, (sorted(m["builds"]), sorted(want))
           print("manifest builds:", sorted(m["builds"]), "excluded:", sorted(excluded))
@@ -219,6 +221,7 @@ jobs:
           files: |
             release/firmware-esp32.bin
             release/firmware-esp32c3.bin
+            release/firmware-esp8266.bin
             release/firmware-esp32-factory.bin
             release/firmware-esp32c3-factory.bin
             ota/manifest.json
