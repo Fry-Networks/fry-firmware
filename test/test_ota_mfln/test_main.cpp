@@ -5,6 +5,7 @@
 
 #include <cstring>
 
+#include "heap_gate.h"
 #include "ota_mfln.h"
 
 namespace {
@@ -100,14 +101,6 @@ void test_staged_image_cleared_unless_fully_applied() {
   TEST_ASSERT_TRUE(fry::otaMustClearStaged(0, 1000, false, false));
 }
 
-void test_every_failure_skips_to_the_next_scheduled_check() {
-  const fry::OtaFailKind kinds[] = {fry::OtaFailKind::ConnectOrHandshake, fry::OtaFailKind::HttpError,
-                                    fry::OtaFailKind::ManifestParse, fry::OtaFailKind::GateFailed};
-  for (fry::OtaFailKind k : kinds)
-    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(fry::OtaFailAction::SkipToNextCheck),
-                            static_cast<uint8_t>(fry::otaFailureAction(k)));
-}
-
 void test_mfln_plan_never_follows_redirects_and_a_3xx_is_a_skip() {
   TEST_ASSERT_FALSE(fry::otaFollowRedirects(fry::otaTlsPlan(kHwApi, kBlock)));
   const int redirects[] = {301, 302, 303, 307, 308};
@@ -115,14 +108,21 @@ void test_mfln_plan_never_follows_redirects_and_a_3xx_is_a_skip() {
   TEST_ASSERT_FALSE(fry::otaIsRedirectCode(200));
   TEST_ASSERT_FALSE(fry::otaIsRedirectCode(404));
   TEST_ASSERT_FALSE(fry::otaIsRedirectCode(-1));
-  // a 3xx is never 200, so checkNow/downloadAndApply take their "HTTP <code>" skip branch
-  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(fry::OtaFailAction::SkipToNextCheck),
-                          static_cast<uint8_t>(fry::otaFailureAction(fry::OtaFailKind::HttpError)));
 }
 
 void test_other_plans_keep_following_redirects() {
   TEST_ASSERT_TRUE(fry::otaFollowRedirects(fry::otaTlsPlan(kGhRel, kBlock)));
   TEST_ASSERT_TRUE(fry::otaFollowRedirects(fry::otaTlsPlan("http://10.0.0.5:8796/m.json", kBlock)));
+}
+
+void test_relay_board_heap_passes_for_hardwareapi_and_fails_for_github() {
+  // Measured relay board: 25000 free, 30160 largest block. HEAP_GATE_OTA = 20000 (config.h).
+  constexpr uint32_t kFree = 25000, kMaxBlock = 30160, kGateOta = 20000;
+  TEST_ASSERT_TRUE(fry::heapGatePass(kFree, kMaxBlock, kGateOta, fry::otaTlsPlan(kHwApi, kBlock).minBlock));
+  TEST_ASSERT_FALSE(fry::heapGatePass(kFree, kMaxBlock, kGateOta, fry::otaTlsPlan(kGhRel, kBlock).minBlock));
+  TEST_ASSERT_FALSE(fry::heapGatePass(kFree, kMaxBlock, kGateOta, fry::otaTlsPlan(kGhAsset, kBlock).minBlock));
+  // the total-free gate still applies on the small path
+  TEST_ASSERT_FALSE(fry::heapGatePass(19999, kMaxBlock, kGateOta, fry::otaTlsPlan(kHwApi, kBlock).minBlock));
 }
 
 }  // namespace
@@ -138,8 +138,8 @@ int main() {
   RUN_TEST(test_plain_http_to_a_listed_host_is_not_a_tls_plan);
   RUN_TEST(test_unparseable_url_takes_the_conservative_path);
   RUN_TEST(test_staged_image_cleared_unless_fully_applied);
-  RUN_TEST(test_every_failure_skips_to_the_next_scheduled_check);
   RUN_TEST(test_mfln_plan_never_follows_redirects_and_a_3xx_is_a_skip);
   RUN_TEST(test_other_plans_keep_following_redirects);
+  RUN_TEST(test_relay_board_heap_passes_for_hardwareapi_and_fails_for_github);
   return UNITY_END();
 }

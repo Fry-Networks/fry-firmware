@@ -102,9 +102,9 @@ void manualRollback() {
 void logOtaTls(const String& url, const fry::OtaTlsPlan& plan) {
   char host[96];
   if (!fry::otaUrlHost(url.c_str(), host, sizeof(host))) strcpy(host, "?");
-  Serial.printf_P(PSTR("ota-tls: host=%s mfln=%s bufs=%u/%u blk=%u free=%u\n"), host,
+  Serial.printf_P(PSTR("ota-tls: host=%s mfln=%s bufs=%u/%u%s blk=%u free=%u\n"), host,
                   plan.mfln ? "yes" : "no", static_cast<unsigned>(plan.rx),
-                  static_cast<unsigned>(plan.tx), static_cast<unsigned>(fry::queryMaxFreeBlock()),
+                  static_cast<unsigned>(plan.tx), plan.mfln ? "" : "(planned)", static_cast<unsigned>(fry::queryMaxFreeBlock()),
                   static_cast<unsigned>(ESP.getFreeHeap()));
 }
 
