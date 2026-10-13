@@ -14,6 +14,7 @@
 #include <ArduinoJson.h>
 #if defined(ARDUINO_ARCH_ESP8266)
 #include <Updater.h>  // ESP8266 core header is named Updater.h, not Update.h
+#include <eboot_command.h>
 #else
 #include <Update.h>
 #endif
@@ -34,6 +35,7 @@
 #include <esp_ota_ops.h>
 #endif
 
+#include "ota_mfln.h"
 #include "ota_target.h"
 #include "relay_link.h"
 
@@ -94,8 +96,42 @@ void manualRollback() {
   ESP.restart();
 }
 
-bool otaBeginUrl(HTTPClient& http, WiFiClientSecure& sec, WiFiClient& plain, const String& url) {
+// Mandatory on every OTA TLS connection (manifest and image), sampled right before the connect.
+// The rx/tx shown for a non-MFLN host are the planned 16384/512; beginHttpsUrl may still fall back
+// to 512/512 and says so on its own "tls:" line.
+void logOtaTls(const String& url, const fry::OtaTlsPlan& plan) {
+  char host[96];
+  if (!fry::otaUrlHost(url.c_str(), host, sizeof(host))) strcpy(host, "?");
+  Serial.printf_P(PSTR("ota-tls: host=%s mfln=%s bufs=%u/%u blk=%u free=%u\n"), host,
+                  plan.mfln ? "yes" : "no", static_cast<unsigned>(plan.rx),
+                  static_cast<unsigned>(plan.tx), static_cast<unsigned>(fry::queryMaxFreeBlock()),
+                  static_cast<unsigned>(ESP.getFreeHeap()));
+}
+
+void logOtaTlsNegotiated(WiFiClientSecure& sec, const fry::OtaTlsPlan& plan) {
+#if defined(ARDUINO_ARCH_ESP8266)
+  if (plan.https) Serial.printf_P(PSTR("ota-tls: negotiated mfln=%d\n"), sec.getMFLNStatus() ? 1 : 0);
+#else
+  (void)sec;
+  (void)plan;
+#endif
+}
+
+bool otaBeginUrl(HTTPClient& http, WiFiClientSecure& sec, WiFiClient& plain, const String& url,
+                 const fry::OtaTlsPlan& plan) {
   if (url.startsWith("https://")) {
+    logOtaTls(url, plan);
+    if (plan.mfln) {
+      // hardwareapi echoes max_fragment_length: a 512/512 BearSSL session, no contiguous block
+      // needed. If a redirect leads to a host that does not honour MFLN the handshake simply fails
+      // (HTTP -1) and the caller skips to the next scheduled check.
+      sec.setInsecure();  // same documented limitation as beginHttpsUrl (http_tls.cpp)
+      sec.setBufferSizes(plan.rx, plan.tx);
+      if (!http.begin(sec, url)) return false;
+      http.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);
+      http.setRedirectLimit(5);
+      return true;
+    }
     // GitHub - the compiled OTA_MANIFEST_URL host, and the *.githubusercontent.com targets its
     // release redirects hand out - does not honour MFLN. On ESP8266, probing it costs a ~32 KB
     // contiguous allocation purely to be told no, and that spike is what made every HTTPS
@@ -111,20 +147,57 @@ bool otaBeginUrl(HTTPClient& http, WiFiClientSecure& sec, WiFiClient& plain, con
   return true;
 }
 
+// Update.end(false) on a COMPLETE download still stages it (Updater.cpp end(): only hasError() or an
+// unfinished download rejects; it then writes the eboot ACTION_COPY_RAW command), so a bad-hash image
+// would be copied by the very next restart. Called after bytes reached Update on every path that
+// does not apply: end the update, then cancel whatever staging that left behind.
+void abortUpdate(size_t done, int len, bool shaOk, bool endOk) {
+#if defined(ARDUINO_ARCH_ESP8266)
+  Update.end(false);
+  if (!fry::otaMustClearStaged(static_cast<uint32_t>(done), static_cast<uint32_t>(len), shaOk, endOk)) return;
+  eboot_command_clear();
+  Serial.println("ota: staged image cleared (eboot cmd)");
+#else
+  (void)done;
+  (void)len;
+  (void)shaOk;
+  (void)endOk;
+  Update.abort();
+#endif
+}
+
+// Every failure (connect/handshake, HTTP, parse, gate) waits for the next scheduled check: no
+// restart, no immediate retry. tick() stamps s_lastCheckMs before checkNow(), so returning is enough.
+void logSkip(fry::OtaFailKind kind, const char* why) {
+  if (fry::otaFailureAction(kind) == fry::OtaFailAction::SkipToNextCheck)
+    Serial.printf_P(PSTR("ota: skipped until next check (%s)\n"), why);
+}
+
 bool downloadAndApply(const String& url, const String& shaExpect, const String& newVersion) {
+  const fry::OtaTlsPlan plan = fry::otaTlsPlan(url.c_str(), HEAP_GATE_OTA_BLOCK);
+  // Small-buffer path: sample the gate ONCE, before any client is constructed (a gate re-sampled
+  // after the TLS client allocated measures the wrong heap). No contiguous-block requirement.
+  if (plan.mfln && !fry::waitForHeapGate(HEAP_GATE_OTA, plan.minBlock)) {
+    Serial.printf("ota: heap gate failed (total free)\n");
+    logSkip(fry::OtaFailKind::GateFailed, "heap gate");
+    return false;
+  }
   HTTPClient http;
   WiFiClientSecure sec;
   WiFiClient plain;
-  if (!otaBeginUrl(http, sec, plain, url)) {
+  if (!otaBeginUrl(http, sec, plain, url, plan)) {
     Serial.println("ota: begin failed");
     return false;
   }
   http.setTimeout(20000);
 
   int code = http.GET();
+  logOtaTlsNegotiated(sec, plan);
   if (code != 200) {
     Serial.printf("ota: HTTP %d\n", code);
     http.end();
+    logSkip(code < 0 ? fry::OtaFailKind::ConnectOrHandshake : fry::OtaFailKind::HttpError,
+            code < 0 ? "image connect/handshake failed" : "image HTTP error");
     return false;
   }
   int len = http.getSize();
@@ -145,25 +218,29 @@ bool downloadAndApply(const String& url, const String& shaExpect, const String& 
   // safe update: measured on COM11 at blk=34176 the http lab OTA was rejected by the
   // unconditional gate even though it needs none of that headroom. Bounded wait either way,
   // so a transient fragmentation dip becomes a short retry rather than a failed update.
-  const bool isHttps = url.startsWith("https://");
+  if (!plan.mfln) {
+    const bool isHttps = url.startsWith("https://");
 #if defined(ARDUINO_ARCH_ESP8266)
-  constexpr bool kBearsslSingleBuffer = true;
+    constexpr bool kBearsslSingleBuffer = true;
 #else
-  constexpr bool kBearsslSingleBuffer = false;  // ESP32 family uses mbedtls
+    constexpr bool kBearsslSingleBuffer = false;  // ESP32 family uses mbedtls
 #endif
-  const uint32_t minBlock =
-      fry::otaMinContiguousBlock(isHttps, kBearsslSingleBuffer, HEAP_GATE_OTA_BLOCK);
-  if (!fry::waitForHeapGate(HEAP_GATE_OTA, minBlock)) {
-    Serial.printf("ota: heap gate failed (%s)\n",
-                  minBlock ? "total free or largest contiguous block" : "total free");
-    http.end();
-    return false;
+    const uint32_t minBlock =
+        fry::otaMinContiguousBlock(isHttps, kBearsslSingleBuffer, HEAP_GATE_OTA_BLOCK);
+    if (!fry::waitForHeapGate(HEAP_GATE_OTA, minBlock)) {
+      Serial.printf("ota: heap gate failed (%s)\n",
+                    minBlock ? "total free or largest contiguous block" : "total free");
+      http.end();
+      logSkip(fry::OtaFailKind::GateFailed, "heap gate");
+      return false;
+    }
   }
   if (!Update.begin(len)) {
     Serial.printf("ota: Update.begin failed (bin %dB too big for slot?)\n", len);
     http.end();
     return false;
   }
+  Serial.printf("ota: download start %d bytes\n", len);
 
   fry::Sha256 sha;
   WiFiClient* stream = http.getStreamPtr();
@@ -179,11 +256,7 @@ bool downloadAndApply(const String& url, const String& shaExpect, const String& 
       sha.update(buf, r);
       if (Update.write(buf, r) != static_cast<size_t>(r)) {
         Serial.println("ota: write failed");
-#if defined(ARDUINO_ARCH_ESP8266)
-        Update.end(false);
-#else
-        Update.abort();
-#endif
+        abortUpdate(done, len, false, false);
         http.end();
         return false;
       }
@@ -207,13 +280,11 @@ bool downloadAndApply(const String& url, const String& shaExpect, const String& 
 
   if (done != static_cast<size_t>(len)) {
     Serial.printf("ota: incomplete download %u/%d\n", static_cast<unsigned>(done), len);
-#if defined(ARDUINO_ARCH_ESP8266)
-    Update.end(false);
-#else
-    Update.abort();
-#endif
+    abortUpdate(done, len, false, false);
     return false;
   }
+
+  Serial.printf("ota: download done %u bytes\n", static_cast<unsigned>(done));
 
   uint8_t digest[32];
   sha.finish(digest);
@@ -225,16 +296,13 @@ bool downloadAndApply(const String& url, const String& shaExpect, const String& 
   want.toLowerCase();
   if (got != want) {
     Serial.printf("ota: sha256 mismatch (got %.16s want %.16s) - rejected\n", got.c_str(), want.c_str());
-#if defined(ARDUINO_ARCH_ESP8266)
-    Update.end(false);
-#else
-    Update.abort();
-#endif
+    abortUpdate(done, len, false, true);
     return false;
   }
 
   if (!Update.end(true)) {
     Serial.println("ota: Update.end failed");
+    abortUpdate(done, len, true, false);
     return false;
   }
 
@@ -312,93 +380,110 @@ bool checkNow() {
   if (manifestUrl.length() == 0) return false;
 
   RelayLinkPause relayPause;
+  // Sampled once, before any client exists. Only a host that is not known to honour MFLN needs the
+  // big contiguous block; hardwareapi (small-buffer path) needs just the total-free gate.
+  const fry::OtaTlsPlan plan = fry::otaTlsPlan(manifestUrl.c_str(), HEAP_GATE_OTA_BLOCK);
 #if defined(FRY_BOARD_ESP8266)
-  // Do not even open an HTTPS session for the manifest unless the big BearSSL path is
-  // affordable. The release manifest lives on GitHub, which does not honour MFLN, so on a
-  // fragmented heap the 512/512 fallback cannot carry its handshake and BearSSL fails hard
-  // rather than returning an error. Skipping the check costs one deferred update; not
-  // skipping it cost a crash-and-reboot on COM11. Plain-HTTP manifests (the lab server) are
-  // unaffected and still checked, which is how OTA is exercised on this chip.
-  if (manifestUrl.startsWith("https://") &&
-      !fry::waitForHeapGate(HEAP_GATE_OTA, HEAP_GATE_OTA_BLOCK, 1)) {
+  // Do not even open an HTTPS session for the manifest unless the BearSSL path chosen for its host
+  // is affordable. A GitHub manifest does not honour MFLN, so on a fragmented heap the 512/512
+  // fallback cannot carry its handshake and BearSSL fails hard rather than returning an error.
+  // Skipping the check costs one deferred update; not skipping it cost a crash-and-reboot on COM11.
+  // Plain-HTTP manifests (the lab server) are unaffected and still checked.
+  if (plan.https && !fry::waitForHeapGate(HEAP_GATE_OTA, plan.minBlock, 1)) {
     // Print the numbers, not just the verdict. "insufficient" alone cost real diagnostic time:
     // a board carrying a stale plain-http lab override never reaches this branch at all, and its
     // unrelated "manifest fetch HTTP -1" (lab server unreachable) was read for two runs as
     // evidence of a TLS/heap failure on the GitHub path that was in fact never attempted.
     // With the shortfall visible, the two situations can never be confused again.
     Serial.printf("ota: skipped https manifest check - need blk>=%u free>=%u, have blk=%u free=%u\n",
-                  static_cast<unsigned>(HEAP_GATE_OTA_BLOCK), static_cast<unsigned>(HEAP_GATE_OTA),
+                  static_cast<unsigned>(plan.minBlock), static_cast<unsigned>(HEAP_GATE_OTA),
                   static_cast<unsigned>(fry::queryMaxFreeBlock()),
                   static_cast<unsigned>(ESP.getFreeHeap()));
+    logSkip(fry::OtaFailKind::GateFailed, "heap gate");
     return false;
   }
-  // T2 F1: the relay link is freed above (RelayLinkPause), so this is the heap the GitHub path
-  // really gets - logged so the bench can prove 0.3.4 still clears HEAP_GATE_OTA_BLOCK.
+  // T2 F1: the relay link is freed above (RelayLinkPause), so this is the heap the manifest path
+  // really gets - logged so the bench can prove the gate numbers.
   Serial.printf_P(PSTR("ota: heap at manifest check free=%u blk=%u (relay link freed)\n"),
                 static_cast<unsigned>(ESP.getFreeHeap()),
                 static_cast<unsigned>(fry::queryMaxFreeBlock()));
 #endif
 
-  HTTPClient http;
-  WiFiClientSecure sec;
-  WiFiClient plain;
-  if (!otaBeginUrl(http, sec, plain, manifestUrl)) {
-    Serial.println("ota: manifest fetch begin failed");
-    return false;
-  }
-  int code = http.GET();
-  if (code != 200) {
-    // Log the largest contiguous block alongside the code. HTTPClient collapses connect-refused,
-    // iobuf-OOM and TLS-handshake-failure all into -1, and the 30 s [health] line samples far too
-    // coarsely to catch the allocation peak, so without blk here a -1 is undiagnosable.
-    Serial.printf("ota: manifest fetch HTTP %d (blk=%u)\n", code,
-                  static_cast<unsigned>(fry::queryMaxFreeBlock()));
-    http.end();
-    return false;
-  }
-  String body = http.getString();
-  http.end();
+  // Everything the download needs is copied out so the manifest body, the JSON document and the
+  // manifest's TLS client are all freed before the image connection is opened.
+  String imgUrl, imgSha, latestStr;
+  {
+    String body;
+    {
+      HTTPClient http;
+      WiFiClientSecure sec;
+      WiFiClient plain;
+      if (!otaBeginUrl(http, sec, plain, manifestUrl, plan)) {
+        Serial.println("ota: manifest fetch begin failed");
+        return false;
+      }
+      int code = http.GET();
+      logOtaTlsNegotiated(sec, plan);
+      if (code != 200) {
+        // Log the largest contiguous block alongside the code. HTTPClient collapses connect-refused,
+        // iobuf-OOM and TLS-handshake-failure all into -1, and the 30 s [health] line samples far too
+        // coarsely to catch the allocation peak, so without blk here a -1 is undiagnosable.
+        Serial.printf("ota: manifest fetch HTTP %d (blk=%u)\n", code,
+                      static_cast<unsigned>(fry::queryMaxFreeBlock()));
+        http.end();
+        logSkip(code < 0 ? fry::OtaFailKind::ConnectOrHandshake : fry::OtaFailKind::HttpError,
+                code < 0 ? "manifest connect/handshake failed" : "manifest HTTP error");
+        return false;
+      }
+      body = http.getString();
+      http.end();
+    }
 
-  JsonDocument doc;
-  if (deserializeJson(doc, body)) {
-    Serial.println("ota: manifest parse failed");
-    return false;
+    JsonDocument doc;
+    if (deserializeJson(doc, body)) {
+      Serial.println("ota: manifest parse failed");
+      logSkip(fry::OtaFailKind::ManifestParse, "manifest parse");
+      return false;
+    }
+
+    JsonObject build = doc["builds"][FRY_BUILD_ENV];
+    // Only ever move FORWARD, comparing numerically; the entry's own version wins over the shared
+    // top level (the ESP32/C3 version), and B4 refuses an entry not built for this board/layout -
+    // all before anything is downloaded. Order and rules: fry::decideOtaApply (native tested).
+    fry::OtaManifestEntry entry;
+    entry.topVersion = doc["firmware_version"] | "";
+    entry.buildVersion = build["version"] | "";
+    entry.url = build["url"] | "";
+    entry.sha256 = build["sha256"] | "";
+    entry.target.boardId = build["board_id"] | "";
+    entry.target.flashSize = build["flash_size"] | 0u;
+    fry::OtaDeviceFlash device;
+    device.boardId = FRY_OTA_BOARD_ID;
+    device.flashReal = ESP.getFlashChipRealSize();
+    device.flashHeader = ESP.getFlashChipSize();
+    device.isEsp8285 = esp_is_8285();
+    const fry::OtaDecision decision = fry::decideOtaApply(entry, device, FRY_FIRMWARE_VERSION);
+    const char* latest = decision.version;
+    Serial.printf("ota: manifest check cur=%s latest=%s action=%s\n", FRY_FIRMWARE_VERSION,
+                  strlen(latest) ? latest : "?",
+                  decision.action == fry::OtaAction::Update   ? "update"
+                  : decision.action == fry::OtaAction::Refuse ? "refuse"
+                                                              : "none");
+    if (decision.action == fry::OtaAction::Refuse) {
+      Serial.printf_P(PSTR("ota: refused %s (want board=%s flash=%u, have board=%s real=%u hdr=%u)\n"),
+                    fry::otaTargetReason(decision.verdict), entry.target.boardId,
+                    static_cast<unsigned>(entry.target.flashSize), device.boardId,
+                    static_cast<unsigned>(device.flashReal), static_cast<unsigned>(device.flashHeader));
+      return false;
+    }
+    if (decision.action != fry::OtaAction::Update) return false;
+    s_expectSize = build["size"] | 0u;
+    imgUrl = entry.url;
+    imgSha = entry.sha256;
+    latestStr = latest;
   }
 
-  JsonObject build = doc["builds"][FRY_BUILD_ENV];
-  // Only ever move FORWARD, comparing numerically; the entry's own version wins over the shared
-  // top level (the ESP32/C3 version), and B4 refuses an entry not built for this board/layout -
-  // all before anything is downloaded. Order and rules: fry::decideOtaApply (native tested).
-  fry::OtaManifestEntry entry;
-  entry.topVersion = doc["firmware_version"] | "";
-  entry.buildVersion = build["version"] | "";
-  entry.url = build["url"] | "";
-  entry.sha256 = build["sha256"] | "";
-  entry.target.boardId = build["board_id"] | "";
-  entry.target.flashSize = build["flash_size"] | 0u;
-  fry::OtaDeviceFlash device;
-  device.boardId = FRY_OTA_BOARD_ID;
-  device.flashReal = ESP.getFlashChipRealSize();
-  device.flashHeader = ESP.getFlashChipSize();
-  device.isEsp8285 = esp_is_8285();
-  const fry::OtaDecision decision = fry::decideOtaApply(entry, device, FRY_FIRMWARE_VERSION);
-  const char* latest = decision.version;
-  Serial.printf("ota: manifest check cur=%s latest=%s action=%s\n", FRY_FIRMWARE_VERSION,
-                strlen(latest) ? latest : "?",
-                decision.action == fry::OtaAction::Update   ? "update"
-                : decision.action == fry::OtaAction::Refuse ? "refuse"
-                                                            : "none");
-  if (decision.action == fry::OtaAction::Refuse) {
-    Serial.printf_P(PSTR("ota: refused %s (want board=%s flash=%u, have board=%s real=%u hdr=%u)\n"),
-                  fry::otaTargetReason(decision.verdict), entry.target.boardId,
-                  static_cast<unsigned>(entry.target.flashSize), device.boardId,
-                  static_cast<unsigned>(device.flashReal), static_cast<unsigned>(device.flashHeader));
-    return false;
-  }
-  if (decision.action != fry::OtaAction::Update) return false;
-  s_expectSize = build["size"] | 0u;
-
-  return downloadAndApply(entry.url, entry.sha256, latest);
+  return downloadAndApply(imgUrl, imgSha, latestStr);
 }
 
 void tick() {
