@@ -123,13 +123,15 @@ bool otaBeginUrl(HTTPClient& http, WiFiClientSecure& sec, WiFiClient& plain, con
     logOtaTls(url, plan);
     if (plan.mfln) {
       // hardwareapi echoes max_fragment_length: a 512/512 BearSSL session, no contiguous block
-      // needed. If a redirect leads to a host that does not honour MFLN the handshake simply fails
-      // (HTTP -1) and the caller skips to the next scheduled check.
+      // needed. Redirects are NOT followed (fry::otaFollowRedirects): the target would not be
+      // re-classified, and 512/512 BearSSL against a non-MFLN host spins in _run_until until the
+      // soft WDT fires. hardwareapi serves both files directly, so a 3xx comes back as
+      // "HTTP <code>" and the caller skips to the next scheduled check.
       sec.setInsecure();  // same documented limitation as beginHttpsUrl (http_tls.cpp)
       sec.setBufferSizes(plan.rx, plan.tx);
       if (!http.begin(sec, url)) return false;
-      http.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);
-      http.setRedirectLimit(5);
+      http.setFollowRedirects(fry::otaFollowRedirects(plan) ? HTTPC_FORCE_FOLLOW_REDIRECTS
+                                                            : HTTPC_DISABLE_FOLLOW_REDIRECTS);
       return true;
     }
     // GitHub - the compiled OTA_MANIFEST_URL host, and the *.githubusercontent.com targets its
