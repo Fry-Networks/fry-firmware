@@ -97,6 +97,12 @@ EWT_CHIP_FAMILY = {
 OTADATA_OFFSET = 0xE000
 APP_OFFSET = 0x10000
 
+# ESP8266 OTA entries carry the board identity the esp8266 client checks before it flashes
+# (platformio.ini FRY_OTA_BOARD_ID / flash size 4 MB, 1 MB sketch), the image size in bytes and the
+# image's own version. Only this env gets them; esp32/esp32c3/esp32s3 entries are unchanged.
+ESP8266_BOARD_ID = "esp8266-4m1m"
+ESP8266_FLASH_SIZE = 4194304
+
 CHANNELS = ("prod", "test")
 DEFAULT_CHANNELS_CONFIG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ota_channels.json")
 
@@ -354,6 +360,8 @@ def main():
     ap.add_argument("--envs", default=None,
                     help="comma-separated subset of envs to build the manifest from (round 2: a "
                          "release that holds some chips back, e.g. esp32,esp32c3)")
+    ap.add_argument("--esp8266-version", default=None,
+                    help="version written into builds.esp8266.version (default: --version)")
     ap.add_argument("--ewt-merge", default=None,
                     help="with --ewt-out: carry over this EWT manifest's builds for chip families "
                          "not built here (held chips keep their previous parts)")
@@ -382,6 +390,13 @@ def main():
             "url": a.release_base.rstrip("/") + "/firmware-%s.bin" % env,
             "sha256": sha256_of(bin_path),
         }
+        if env == "esp8266":
+            builds[env].update({
+                "board_id": ESP8266_BOARD_ID,
+                "flash_size": ESP8266_FLASH_SIZE,
+                "size": os.path.getsize(bin_path),
+                "version": a.esp8266_version or a.version,
+            })
 
     if missing:
         sys.stderr.write("make_manifest: missing built binaries, run `pio run -e <env>` first:\n")

@@ -91,20 +91,22 @@ def main():
         rc, log, m = run(tmp, "--no-factory", "--dist", dist)
         check("exit 0", rc == 0, log)
         builds = sorted((m or {}).get("builds", {}))
-        check("builds{} is esp32 + esp32c3 only", builds == ["esp32", "esp32c3"], builds)
+        check("builds{} is esp32 + esp32c3 + esp8266 (esp32s3 held)",
+              builds == ["esp32", "esp32c3", "esp8266"], builds)
         check("channel is prod", (m or {}).get("channel") == "prod", m)
         check("each url is its own chip's app image",
               all((m or {}).get("builds", {}).get(e, {}).get("url", "").endswith("/firmware-%s.bin" % e)
-                  for e in ("esp32", "esp32c3")))
+                  for e in ("esp32", "esp32c3", "esp8266")))
         check("excluded images are still copied for manual flashing",
               all(os.path.isfile(os.path.join(dist, "firmware-%s.bin" % e)) for e in ENVS))
-        check("the exclusion is logged", "esp32s3 left out" in log and "esp8266 left out" in log, log)
+        check("the exclusion is logged",
+              "esp32s3 left out" in log and "esp8266 left out" not in log, log)
 
         print("the committed config says what the release relies on:")
         with open(CONFIG, encoding="utf-8") as f:
             cfg = json.load(f)
-        check("prod excludes esp32s3 and esp8266",
-              sorted(cfg["channels"]["prod"]["exclude_from_builds"]) == ["esp32s3", "esp8266"])
+        check("prod excludes esp32s3 only",
+              sorted(cfg["channels"]["prod"]["exclude_from_builds"]) == ["esp32s3"])
         check("test excludes nothing", cfg["channels"]["test"]["exclude_from_builds"] == [])
 
         print("--channel test:")
