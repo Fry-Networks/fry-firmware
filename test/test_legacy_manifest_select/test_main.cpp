@@ -1,9 +1,11 @@
 // A2 fleet OTA safety: what do boards ALREADY IN THE FIELD do with the new production manifest?
 //
-// The 0.4.0 prod manifest leaves esp32s3 and esp8266 out of "builds" on purpose (no automatic OTA to
-// those chips until a real board passes - tools/ota_channels.json). That is only safe if the OLD
+// The prod manifest leaves esp32s3 out of "builds" on purpose (no automatic OTA to that chip until a
+// real board passes - tools/ota_channels.json); esp8266 passed on a real board and is listed, with
+// the extra board_id/flash_size/size/version keys. Leaving a chip out is only safe if the OLD
 // clients, which nobody can update any more, treat a missing entry as "no update" and never fall
-// back to another chip's image. This suite compiles their manifest-selection code EXACTLY as it
+// back to another chip's image; listing esp8266 is only safe if they ignore the extra keys and take
+// the esp8266 entry's own url and sha. This suite compiles their manifest-selection code EXACTLY as it
 // shipped and feeds it the new manifest shape.
 //
 // legacy_v031_select.inc / legacy_v033_select.inc are verbatim copies, not rewrites:
@@ -90,7 +92,8 @@ const char* const kSelectorNames[] = {"v0.3.1", "0.3.3"};
 const char* const kInstalled[] = {"0.3.1", "0.3.2", "0.3.3"};
 
 // Exactly the shape tools/make_manifest.py writes for the prod channel (json.dump, indent=2,
-// sort_keys): esp32 and esp32c3 only, each with its factory image, plus the new "channel" key.
+// sort_keys): esp32 and esp32c3 with their factory images, esp8266 with its board keys, plus the
+// "channel" key.
 const char kProdManifest[] = R"({
   "builds": {
     "esp32": {
@@ -108,6 +111,14 @@ const char kProdManifest[] = R"({
       },
       "sha256": "4444444444444444444444444444444444444444444444444444444444444444",
       "url": "https://github.com/Fry-Networks/fry-firmware/releases/download/fw-v0.4.0/firmware-esp32c3.bin"
+    },
+    "esp8266": {
+      "board_id": "esp8266-4m1m",
+      "flash_size": 4194304,
+      "sha256": "6666666666666666666666666666666666666666666666666666666666666666",
+      "size": 505392,
+      "url": "https://github.com/Fry-Networks/fry-firmware/releases/download/fw-v0.4.0/firmware-esp8266.bin",
+      "version": "0.4.0"
     }
   },
   "channel": "prod",
@@ -120,10 +131,11 @@ const char kWithS3[] = R"({"builds":{"esp32":{"sha256":"222222222222222222222222
 
 bool contains(const std::string& s, const char* needle) { return s.find(needle) != std::string::npos; }
 
-// The assertions that make publishing safe, for any manifest that lists only esp32 + esp32c3.
+// The assertions that make publishing safe, for any manifest that lists esp32, esp32c3 and esp8266
+// but not esp32s3.
 void assertOldClientsSafe(const char* manifest, const char* label) {
-  const char* const missing[] = {"esp32s3", "esp8266"};
-  const char* const present[] = {"esp32", "esp32c3"};
+  const char* const missing[] = {"esp32s3"};
+  const char* const present[] = {"esp32", "esp32c3", "esp8266"};
   for (int s = 0; s < 2; s++) {
     for (const char* cur : kInstalled) {
       for (const char* env : missing) {
@@ -140,11 +152,15 @@ void assertOldClientsSafe(const char* manifest, const char* label) {
         char msg[160];
         snprintf(msg, sizeof(msg), "%s client %s %s on %s", kSelectorNames[s], cur, env, label);
         TEST_ASSERT_TRUE_MESSAGE(r.willUpdate, msg);
-        char tail[40];
-        snprintf(tail, sizeof(tail), "/firmware-%s.bin", env);
-        TEST_ASSERT_TRUE_MESSAGE(r.url.size() > strlen(tail) &&
-                                     r.url.compare(r.url.size() - strlen(tail), strlen(tail), tail) == 0,
-                                 msg);  // its own chip's app image, never a factory image
+        // its own chip's app image (firmware-<env>.bin, or firmware-<env>-<version>.bin for an
+        // image published under a versioned name), never a factory image
+        char head[40];
+        snprintf(head, sizeof(head), "/firmware-%s", env);
+        size_t at = r.url.rfind(head);
+        TEST_ASSERT_TRUE_MESSAGE(at != std::string::npos, msg);
+        TEST_ASSERT_TRUE_MESSAGE(r.url.size() > 4 && r.url.compare(r.url.size() - 4, 4, ".bin") == 0, msg);
+        const char next = r.url[at + strlen(head)];
+        TEST_ASSERT_TRUE_MESSAGE(next == '.' || next == '-', msg);
         TEST_ASSERT_FALSE_MESSAGE(contains(r.url, "factory"), msg);
         TEST_ASSERT_EQUAL_size_t_MESSAGE(64, r.sha.size(), msg);
       }
@@ -172,6 +188,12 @@ void test_old_clients_take_their_own_chip_image_with_the_right_sha() {
     Selection c = kSelectors[s](kProdManifest, "esp32c3", "0.3.3");
     TEST_ASSERT_EQUAL_STRING("4444444444444444444444444444444444444444444444444444444444444444", c.sha.c_str());
     TEST_ASSERT_TRUE(contains(c.url, "firmware-esp32c3.bin"));
+    // The extra board_id/flash_size/size/version keys are ignored; the esp8266 entry's own url and
+    // sha are taken.
+    Selection e = kSelectors[s](kProdManifest, "esp8266", "0.3.3");
+    TEST_ASSERT_TRUE(e.willUpdate);
+    TEST_ASSERT_EQUAL_STRING("6666666666666666666666666666666666666666666666666666666666666666", e.sha.c_str());
+    TEST_ASSERT_TRUE(contains(e.url, "firmware-esp8266.bin"));
   }
 }
 
