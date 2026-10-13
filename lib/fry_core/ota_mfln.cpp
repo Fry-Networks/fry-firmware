@@ -69,6 +69,10 @@ OtaTlsPlan otaTlsPlan(const char* url, uint32_t configuredBlock) {
   return p;
 }
 
+// STUB (red)
+bool otaFollowRedirects(const OtaTlsPlan&) { return true; }
+bool otaIsRedirectCode(int) { return false; }
+
 bool otaMustClearStaged(uint32_t received, uint32_t len, bool shaOk, bool endOk) {
   return !(received == len && shaOk && endOk);
 }

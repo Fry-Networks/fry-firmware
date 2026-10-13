@@ -108,6 +108,23 @@ void test_every_failure_skips_to_the_next_scheduled_check() {
                             static_cast<uint8_t>(fry::otaFailureAction(k)));
 }
 
+void test_mfln_plan_never_follows_redirects_and_a_3xx_is_a_skip() {
+  TEST_ASSERT_FALSE(fry::otaFollowRedirects(fry::otaTlsPlan(kHwApi, kBlock)));
+  const int redirects[] = {301, 302, 303, 307, 308};
+  for (int c : redirects) TEST_ASSERT_TRUE(fry::otaIsRedirectCode(c));
+  TEST_ASSERT_FALSE(fry::otaIsRedirectCode(200));
+  TEST_ASSERT_FALSE(fry::otaIsRedirectCode(404));
+  TEST_ASSERT_FALSE(fry::otaIsRedirectCode(-1));
+  // a 3xx is never 200, so checkNow/downloadAndApply take their "HTTP <code>" skip branch
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(fry::OtaFailAction::SkipToNextCheck),
+                          static_cast<uint8_t>(fry::otaFailureAction(fry::OtaFailKind::HttpError)));
+}
+
+void test_other_plans_keep_following_redirects() {
+  TEST_ASSERT_TRUE(fry::otaFollowRedirects(fry::otaTlsPlan(kGhRel, kBlock)));
+  TEST_ASSERT_TRUE(fry::otaFollowRedirects(fry::otaTlsPlan("http://10.0.0.5:8796/m.json", kBlock)));
+}
+
 }  // namespace
 
 int main() {
@@ -122,5 +139,7 @@ int main() {
   RUN_TEST(test_unparseable_url_takes_the_conservative_path);
   RUN_TEST(test_staged_image_cleared_unless_fully_applied);
   RUN_TEST(test_every_failure_skips_to_the_next_scheduled_check);
+  RUN_TEST(test_mfln_plan_never_follows_redirects_and_a_3xx_is_a_skip);
+  RUN_TEST(test_other_plans_keep_following_redirects);
   return UNITY_END();
 }

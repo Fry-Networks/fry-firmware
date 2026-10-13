@@ -33,6 +33,13 @@ struct OtaTlsPlan {
 // configuredBlock is HEAP_GATE_OTA_BLOCK; it is applied to the non-MFLN https path only.
 OtaTlsPlan otaTlsPlan(const char* url, uint32_t configuredBlock);
 
+// The small-buffer client must never follow a redirect: the target host is not re-classified, and
+// 512/512 BearSSL against a non-MFLN host (GitHub) spins in _run_until until the soft WDT fires
+// (measured on the bench). hardwareapi serves both files directly, so any 3xx is an HTTP error and
+// the check is skipped. Other paths keep following redirects (GitHub's release redirects).
+bool otaFollowRedirects(const OtaTlsPlan& plan);
+bool otaIsRedirectCode(int httpCode);
+
 // Framework Updater::end(false) on a COMPLETE download still falls through to eboot_command_write
 // (ACTION_COPY_RAW), i.e. it STAGES the image though our SHA-256 check failed, and the restart that
 // follows would copy it. True whenever bytes may be staged and the image must not stay staged:
