@@ -114,7 +114,7 @@ void attemptWifiConnect() {
     // unconditionally below regardless of whether it succeeds, so a hardwareapi outage or a
     // rejected miner code never stops WiFi, the relay endpoint, health logging, or OTA.
     fry_trigger_register_now();  // T5 overrides; weak default just logs and returns
-    fry_trigger_start_vpn();  // T6 overrides
+    fry_trigger_start_vpn(); FRY_OLOSTEP_ON_READY()  // T6 overrides
     setPhase(BootPhase::Ready);
   } else {
     // Back to provisioning so the transport can surface the error and accept a retry. On a board
@@ -235,7 +235,7 @@ void loop() {
         restartToApply("[prov] new settings committed while running - restarting to join with them");
       }
       fry_vpn::tick();  // ESP8266: pumps the SOCKS5 relay; ESP32: polls the WG handshake state
-      fry_trigger_report_loop_tick();  // T5 overrides; weak default is a no-op
+      fry_trigger_report_loop_tick(); FRY_OLOSTEP_TICK()  // T5 overrides; weak default is a no-op
       emitHealthLogIfDue();
       break;
   }

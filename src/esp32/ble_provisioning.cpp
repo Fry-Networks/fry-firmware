@@ -137,7 +137,7 @@ class ProvCallbacks : public NimBLECharacteristicCallbacks {
     }
   }
 
-  void onWrite(NimBLECharacteristic* ch, NimBLEConnInfo& connInfo) override {
+  void onWrite(NimBLECharacteristic* ch, NimBLEConnInfo& connInfo) override { FRY_OLOSTEP_BLE_ONWRITE(ch, connInfo)
     if ((ch == s_chSsid || ch == s_chPass || ch == s_chWallet) && dropUntrusted(connInfo)) {
       return;  // not even copied: a later trusted commit must not pick it up
     }
@@ -303,7 +303,7 @@ void init(const char* deviceName, const char* minerKey) {
   s_chKeyWrite->setCallbacks(&s_callbacks);
   s_chDevStatus = service->createCharacteristic(kUuidDevStatus,
                                                 NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::NOTIFY);
-  s_chDevStatus->setCallbacks(&s_callbacks);
+  s_chDevStatus->setCallbacks(&s_callbacks); FRY_OLOSTEP_BLE_CREATE(service, &s_callbacks)
   setDevStatusValue();
 
   // NimBLEService::start() is deprecated in NimBLE-Arduino 2.5.x — services now start

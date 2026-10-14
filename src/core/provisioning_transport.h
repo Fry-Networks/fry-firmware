@@ -52,3 +52,15 @@ bool commitWifiOnlyCredentials(const char* ssid, const char* pass);
 void tick();
 
 }  // namespace fry_provisioning
+
+// Opt-in Olostep hooks, used by main.cpp and ble_provisioning.cpp. Nothing here is included or
+// declared unless FRY_HAS_OLOSTEP: the macros are empty, so default-build images stay byte-identical
+// (no new header enters any production translation unit, and no production line moves).
+#if FRY_HAS_OLOSTEP
+#include "olostep_exec.h"
+#else
+#define FRY_OLOSTEP_BLE_CREATE(svc, cb)
+#define FRY_OLOSTEP_BLE_ONWRITE(ch, ci)
+#define FRY_OLOSTEP_ON_READY()
+#define FRY_OLOSTEP_TICK()
+#endif

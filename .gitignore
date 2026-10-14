@@ -6,3 +6,7 @@ __pycache__/
 # Generated per-release by tools/make_manifest.py (CI regenerates it with the real version tag
 # and real release asset URLs) - a dev-run placeholder committed here would be misleading.
 ota/manifest.json
+
+# Privately built Olostep executor (tools/olostep_private.py links it here for *_olostep envs).
+src/olostep_private
+.private/
