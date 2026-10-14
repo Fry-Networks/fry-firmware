@@ -81,24 +81,31 @@ void test_lease_node_rejected() {
   expectRejected(j);
 }
 
-void test_each_forbidden_type_event_rejected() {
+void test_each_partner_type_event_now_permitted() {
   const char* ev[] = {"copilot_batch", "chatgpt_batch", "gemini_batch", "perplexity_batch",
                       "rufus_batch",   "meta_batch",    "amazon_reviews", "meta_login",
                       "reset_meta",    "create_cplt_session"};
   for (const char* e : ev) {
     Job j = plainJob();
     j.type_event = e;
-    expectRejected(j);
+    TEST_ASSERT_TRUE_MESSAGE(olostep_job_is_permitted(j), e);
+    Job bad = plainJob();
+    bad.type_event = e;
+    bad.method_endpoint = "https://192.168.1.1/";
+    expectRejected(bad);  // SSRF still rejects every partner type
   }
   Job upper = plainJob();
   upper.type_event = "META_LOGIN";
-  expectRejected(upper);
+  expectRejected(upper);  // case-sensitive: unrecognized -> fail closed
 }
 
-void test_benign_type_event_permitted() {
+void test_unrecognized_type_event_rejected() {
   Job j = plainJob();
   j.type_event = "fetch";
-  TEST_ASSERT_TRUE(olostep_job_is_permitted(j));
+  expectRejected(j);
+  Job b = plainJob();
+  b.type_event = "batch";
+  TEST_ASSERT_TRUE(olostep_job_is_permitted(b));  // control
 }
 
 void test_each_action_field_rejected() {
@@ -143,12 +150,11 @@ void test_sanitize_never_emits_auth_on_adversarial_input() {
   TEST_ASSERT_EQUAL(0, (int)olostep_sanitize_outbound_headers(in).size());
 }
 
-void test_capability_query_has_no_ali_mli_burke() {
+void test_capability_query_has_ali_mli_burke() {
   const std::string q = olostep_ws_capability_query("dev-0123abcd", "0.4.37", "esp32");
-  TEST_ASSERT_FALSE(hasCI(q, "ali"));
-  TEST_ASSERT_FALSE(hasCI(q, "mli"));
-  TEST_ASSERT_FALSE(hasCI(q, "burke"));
-  // control: the legitimate fields are present
+  TEST_ASSERT_TRUE(q.find("ali=1") != std::string::npos);
+  TEST_ASSERT_TRUE(q.find("mli=1") != std::string::npos);
+  TEST_ASSERT_TRUE(q.find("burke=true") != std::string::npos);
   TEST_ASSERT_TRUE(q.find("device_id=dev-0123abcd") != std::string::npos);
   TEST_ASSERT_TRUE(q.find("version=0.4.37") != std::string::npos);
   TEST_ASSERT_TRUE(q.find("platform=esp32") != std::string::npos);
@@ -176,7 +182,7 @@ void test_response_is_clean_flags_set_cookie() {
 
 void test_disclosure_text_exact() {
   TEST_ASSERT_EQUAL_STRING(
-      "When enabled, this device relays third-party unauthenticated web requests through your IP. "
+      "When enabled, this device relays third-party web requests through your IP, including authenticated partner sessions. "
       "It is opt-in and reversible. It never uses your own accounts, sessions, or stored credentials.",
       OLOSTEP_OWNER_DISCLOSURE);
 }
@@ -393,6 +399,118 @@ void test_url_documentation_and_teredo_ranges_rejected() {
   TEST_ASSERT_TRUE(olostep_url_allowed("https://[2001:4860:4860::8888]/"));
 }
 
+// ---- Class-aware handling -------------------------------------------------------------------
+
+void test_classify_unauthenticated_types() {
+  TEST_ASSERT_EQUAL(OlostepJobClass::Unauthenticated, olostep_classify_job(""));
+  TEST_ASSERT_EQUAL(OlostepJobClass::Unauthenticated, olostep_classify_job("batch"));
+}
+
+void test_classify_authenticated_partner_types() {
+  const char* ev[] = {"rufus_batch", "amazon_reviews", "meta_batch",  "copilot_batch",
+                      "chatgpt_batch", "gemini_batch", "perplexity_batch", "meta_login",
+                      "create_cplt_session", "reset_meta"};
+  for (const char* e : ev) TEST_ASSERT_EQUAL_MESSAGE(OlostepJobClass::AuthenticatedPartner, olostep_classify_job(e), e);
+}
+
+void test_classify_unknown_type() {
+  TEST_ASSERT_EQUAL(OlostepJobClass::Unknown, olostep_classify_job("random_thing"));
+  TEST_ASSERT_EQUAL(OlostepJobClass::Unknown, olostep_classify_job("RUFUS_BATCH"));
+  TEST_ASSERT_EQUAL(OlostepJobClass::Unknown, olostep_classify_job("foo"));
+}
+
+void test_authenticated_partner_job_with_session_id_accepted() {
+  Job j = plainJob();
+  j.type_event = "rufus_batch";
+  j.session_id = "sess123";
+  j.lease_node = "node-7";
+  TEST_ASSERT_EQUAL(OlostepJobClass::AuthenticatedPartner, olostep_job_classify_and_permit(j));
+}
+
+void test_authenticated_partner_job_with_auth_headers_accepted() {
+  Job j = plainJob();
+  j.type_event = "rufus_batch";
+  j.method_headers["cookie"] = "abc";
+  j.method_headers["authorization"] = "Bearer xyz";
+  TEST_ASSERT_EQUAL(OlostepJobClass::AuthenticatedPartner, olostep_job_classify_and_permit(j));
+}
+
+void test_unknown_type_event_rejected() {
+  Job j = plainJob();
+  j.type_event = "unknown_thing";
+  TEST_ASSERT_EQUAL(OlostepJobClass::Unknown, olostep_job_classify_and_permit(j));
+}
+
+void test_unauthenticated_with_session_id_still_rejected() {
+  Job j = plainJob();
+  j.session_id = "sess123";
+  TEST_ASSERT_EQUAL(OlostepJobClass::Unknown, olostep_job_classify_and_permit(j));
+  Job ok = plainJob();
+  TEST_ASSERT_EQUAL(OlostepJobClass::Unauthenticated, olostep_job_classify_and_permit(ok));  // control
+}
+
+void test_auth_headers_pass_through_for_partner() {
+  HeaderMap in = {{"cookie", "abc"}, {"authorization", "Bearer xyz"}, {"accept", "text/html"}};
+  const HeaderMap out = olostep_sanitize_outbound_headers(in, OlostepJobClass::AuthenticatedPartner);
+  TEST_ASSERT_EQUAL(3, (int)out.size());
+  TEST_ASSERT_EQUAL(1, (int)out.count("cookie"));
+  TEST_ASSERT_EQUAL(1, (int)out.count("authorization"));
+  TEST_ASSERT_EQUAL(1, (int)out.count("accept"));
+}
+
+void test_partner_sanitizer_strips_framing_headers() {
+  HeaderMap in = {{"host", "evil.com"},          {"Content-Length", "999"}, {"connection", "keep-alive"},
+                  {"transfer-encoding", "chunked"}, {" TE ", "trailers"},  {"upgrade", "websocket"},
+                  {"keep-alive", "5"},           {"proxy-connection", "x"}, {"trailer", "x"},
+                  {"cookie", "session=abc"},     {"accept", "text/html"}};
+  const HeaderMap out = olostep_sanitize_outbound_headers(in, OlostepJobClass::AuthenticatedPartner);
+  TEST_ASSERT_EQUAL(0, (int)out.count("host"));
+  TEST_ASSERT_EQUAL(0, (int)out.count("content-length"));
+  TEST_ASSERT_EQUAL(0, (int)out.count("connection"));
+  TEST_ASSERT_EQUAL(0, (int)out.count("transfer-encoding"));
+  TEST_ASSERT_EQUAL(0, (int)out.count("te"));
+  TEST_ASSERT_EQUAL(0, (int)out.count("upgrade"));
+  TEST_ASSERT_EQUAL(0, (int)out.count("keep-alive"));
+  TEST_ASSERT_EQUAL(0, (int)out.count("proxy-connection"));
+  TEST_ASSERT_EQUAL(0, (int)out.count("trailer"));
+  TEST_ASSERT_EQUAL(1, (int)out.count("cookie"));
+  TEST_ASSERT_EQUAL(1, (int)out.count("accept"));
+  TEST_ASSERT_EQUAL(2, (int)out.size());
+}
+
+void test_auth_headers_stripped_for_unauthenticated() {
+  HeaderMap in = {{"cookie", "abc"}, {"authorization", "Bearer xyz"}, {"accept", "text/html"}};
+  const HeaderMap out = olostep_sanitize_outbound_headers(in, OlostepJobClass::Unauthenticated);
+  TEST_ASSERT_EQUAL(0, (int)out.count("cookie"));
+  TEST_ASSERT_EQUAL(0, (int)out.count("authorization"));
+  TEST_ASSERT_EQUAL(1, (int)out.count("accept"));
+}
+
+void test_partner_job_ssrf_still_checked() {
+  Job j = plainJob();
+  j.type_event = "rufus_batch";
+  j.method_endpoint = "https://192.168.1.1/path";
+  TEST_ASSERT_EQUAL(OlostepJobClass::Unknown, olostep_job_classify_and_permit(j));
+}
+
+void test_partner_job_crlf_still_checked() {
+  Job j = plainJob();
+  j.type_event = "meta_batch";
+  j.method_headers["Accept"] = "x\r\nCookie: y";
+  TEST_ASSERT_EQUAL(OlostepJobClass::Unknown, olostep_job_classify_and_permit(j));
+}
+
+void test_partner_job_action_fields_still_rejected() {
+  Job j = plainJob();
+  j.type_event = "rufus_batch";
+  j.actions = "[{\"click\":\".btn\"}]";
+  TEST_ASSERT_EQUAL(OlostepJobClass::Unknown, olostep_job_classify_and_permit(j));
+}
+
+void test_disclosure_mentions_authenticated() {
+  TEST_ASSERT_TRUE(strstr(OLOSTEP_OWNER_DISCLOSURE, "authenticated partner sessions") != nullptr);
+}
+
 // Unity's setUp/tearDown have C linkage, so they must sit at global scope.
 void setUp() {}
 
@@ -406,12 +524,12 @@ int main(int, char**) {
   RUN_TEST(test_x_api_key_header_rejected);
   RUN_TEST(test_session_id_rejected);
   RUN_TEST(test_lease_node_rejected);
-  RUN_TEST(test_each_forbidden_type_event_rejected);
-  RUN_TEST(test_benign_type_event_permitted);
+  RUN_TEST(test_each_partner_type_event_now_permitted);
+  RUN_TEST(test_unrecognized_type_event_rejected);
   RUN_TEST(test_each_action_field_rejected);
   RUN_TEST(test_sanitize_drops_cookie_auth_apikey_keeps_ua_accept_referer);
   RUN_TEST(test_sanitize_never_emits_auth_on_adversarial_input);
-  RUN_TEST(test_capability_query_has_no_ali_mli_burke);
+  RUN_TEST(test_capability_query_has_ali_mli_burke);
   RUN_TEST(test_set_cookie_dropped_from_response);
   RUN_TEST(test_response_is_clean_flags_set_cookie);
   RUN_TEST(test_disclosure_text_exact);
@@ -440,5 +558,19 @@ int main(int, char**) {
   RUN_TEST(test_sanitize_nul_and_control_chars_dropped);
   RUN_TEST(test_sanitize_canonicalizes_name);
   RUN_TEST(test_url_documentation_and_teredo_ranges_rejected);
+  RUN_TEST(test_classify_unauthenticated_types);
+  RUN_TEST(test_classify_authenticated_partner_types);
+  RUN_TEST(test_classify_unknown_type);
+  RUN_TEST(test_partner_sanitizer_strips_framing_headers);
+  RUN_TEST(test_authenticated_partner_job_with_session_id_accepted);
+  RUN_TEST(test_authenticated_partner_job_with_auth_headers_accepted);
+  RUN_TEST(test_unknown_type_event_rejected);
+  RUN_TEST(test_unauthenticated_with_session_id_still_rejected);
+  RUN_TEST(test_auth_headers_pass_through_for_partner);
+  RUN_TEST(test_auth_headers_stripped_for_unauthenticated);
+  RUN_TEST(test_partner_job_ssrf_still_checked);
+  RUN_TEST(test_partner_job_crlf_still_checked);
+  RUN_TEST(test_partner_job_action_fields_still_rejected);
+  RUN_TEST(test_disclosure_mentions_authenticated);
   return UNITY_END();
 }

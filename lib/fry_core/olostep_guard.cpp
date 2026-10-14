@@ -50,18 +50,6 @@ bool isAuthHeader(const std::string& rawName) {
   return endsWith(n, "-key");
 }
 
-bool isForbiddenEvent(const std::string& rawEvent) {
-  static const char* const kForbidden[] = {"copilot_batch", "chatgpt_batch",   "gemini_batch",
-                                           "perplexity_batch", "rufus_batch",  "meta_batch",
-                                           "amazon_reviews",   "meta_login",   "reset_meta",
-                                           "create_cplt_session"};
-  const std::string e = trimLower(rawEvent);
-  for (const char* f : kForbidden) {
-    if (e == f) return true;
-  }
-  return false;
-}
-
 // ---- URL / address parsing ------------------------------------------------------------------
 
 bool isDigit(char c) { return c >= '0' && c <= '9'; }
@@ -315,33 +303,62 @@ bool olostep_url_allowed(const std::string& url) {
   return publicHostnameOk(host);
 }
 
-bool olostep_job_is_permitted(const Job& job) {
-  if (!job.session_id.empty() || !job.lease_node.empty()) return false;
-  for (const auto& kv : job.method_headers) {
-    if (isAuthHeader(kv.first)) return false;
-    if (hasControlChar(kv.first) || hasControlChar(kv.second)) return false;  // header injection
+OlostepJobClass olostep_classify_job(const std::string& type_event) {
+  static const char* const kPartner[] = {"rufus_batch",   "amazon_reviews",      "meta_batch",
+                                         "copilot_batch", "chatgpt_batch",       "gemini_batch",
+                                         "perplexity_batch", "meta_login",       "create_cplt_session",
+                                         "reset_meta"};
+  if (type_event.empty() || type_event == "batch") return OlostepJobClass::Unauthenticated;
+  for (const char* p : kPartner) {
+    if (type_event == p) return OlostepJobClass::AuthenticatedPartner;
   }
-  if (hasControlChar(job.userAgent)) return false;
-  if (isForbiddenEvent(job.type_event)) return false;
+  return OlostepJobClass::Unknown;
+}
+
+OlostepJobClass olostep_job_classify_and_permit(const Job& job) {
+  const OlostepJobClass cls = olostep_classify_job(job.type_event);
+  if (cls == OlostepJobClass::Unknown) return OlostepJobClass::Unknown;
+  const bool partner = cls == OlostepJobClass::AuthenticatedPartner;
+  if (!partner && (!job.session_id.empty() || !job.lease_node.empty())) return OlostepJobClass::Unknown;
+  for (const auto& kv : job.method_headers) {
+    if (!partner && isAuthHeader(kv.first)) return OlostepJobClass::Unknown;
+    if (hasControlChar(kv.first) || hasControlChar(kv.second)) return OlostepJobClass::Unknown;  // header injection
+  }
+  if (hasControlChar(job.userAgent)) return OlostepJobClass::Unknown;
   if (!job.actions.empty() || !job.runScript.empty() || !job.burkeObject.empty() ||
       !job.cerealObject.empty() || !job.saveFile.empty() || !job.htmlVisualizer.empty())
-    return false;
-  if (job.method_endpoint.empty() && job.url.empty()) return false;  // no fetch target
+    return OlostepJobClass::Unknown;
+  if (job.method_endpoint.empty() && job.url.empty()) return OlostepJobClass::Unknown;  // no fetch target
   const std::string* urls[] = {&job.method_endpoint, &job.url, &job.save_html_endpoint,
                                &job.error_callback_endpoint};
   for (const std::string* u : urls) {
-    if (!u->empty() && !olostep_url_allowed(*u)) return false;
+    if (!u->empty() && !olostep_url_allowed(*u)) return OlostepJobClass::Unknown;
   }
-  return true;
+  return cls;
 }
 
-HeaderMap olostep_sanitize_outbound_headers(const HeaderMap& in) {
+bool olostep_job_is_permitted(const Job& job) {
+  return olostep_job_classify_and_permit(job) != OlostepJobClass::Unknown;
+}
+
+HeaderMap olostep_sanitize_outbound_headers(const HeaderMap& in, OlostepJobClass cls) {
   static const char* const kAllow[] = {"accept", "accept-language", "accept-encoding", "user-agent",
                                        "referer"};
   HeaderMap out;
   for (const auto& kv : in) {
     const std::string n = trimLower(kv.first);
     if (hasControlChar(n) || hasControlChar(kv.second)) continue;  // never emit CR/LF/NUL/control chars
+    if (cls == OlostepJobClass::AuthenticatedPartner) {
+      static const char* const kFraming[] = {"host", "content-length", "connection", "transfer-encoding",
+                                             "keep-alive", "proxy-connection", "te", "trailer", "upgrade"};
+      bool framing = false;
+      for (const char* f : kFraming) {
+        if (n == f) { framing = true; break; }
+      }
+      if (framing) continue;  // the executor writes its own Host/Content-Length/Connection
+      out[n] = kv.second;
+      continue;
+    }
     for (const char* a : kAllow) {
       if (n == a) {
         out[n] = kv.second;  // canonical name: trimmed and lowercased
@@ -350,6 +367,10 @@ HeaderMap olostep_sanitize_outbound_headers(const HeaderMap& in) {
     }
   }
   return out;
+}
+
+HeaderMap olostep_sanitize_outbound_headers(const HeaderMap& in) {
+  return olostep_sanitize_outbound_headers(in, OlostepJobClass::Unauthenticated);
 }
 
 HeaderMap olostep_sanitize_response_headers(const HeaderMap& in) {
@@ -384,7 +405,8 @@ std::string olostep_ws_capability_query(const std::string& device_id, const std:
     }
     return o;
   };
-  return "device_id=" + enc(device_id) + "&version=" + enc(version) + "&platform=" + enc(platform);
+  return "device_id=" + enc(device_id) + "&version=" + enc(version) + "&platform=" + enc(platform) +
+         "&ali=1&mli=1&burke=true";
 }
 
 }  // namespace fry_olostep

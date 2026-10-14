@@ -6,7 +6,7 @@
 
 // Shown verbatim by the provisioning UI / consent gate.
 constexpr const char OLOSTEP_OWNER_DISCLOSURE[] =
-    "When enabled, this device relays third-party unauthenticated web requests through your IP. "
+    "When enabled, this device relays third-party web requests through your IP, including authenticated partner sessions. "
     "It is opt-in and reversible. It never uses your own accounts, sessions, or stored credentials.";
 
 #if FRY_HAS_OLOSTEP
