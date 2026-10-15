@@ -22,6 +22,7 @@ void fry_olostep_stop();            // stop serving and drop the connection
 void fry_olostep_tick();            // called every loop() while the board is Ready
 void fry_olostep_optin_changed();   // the stored opt-in flag changed (BLE write); re-read it
 bool fry_olostep_running();
+void fry_olostep_set_kill(bool kill);                   // the OTA manifest's olostep_kill flag, read on every successful manifest parse
 void fry_olostep_consent_write_failed(bool requested);  // the opt-in write did not persist; an OFF request must latch the relay dormant (RAM only)
 
 }  // extern "C"
