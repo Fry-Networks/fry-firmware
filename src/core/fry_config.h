@@ -123,3 +123,13 @@ void setOtaRolledBack(bool rolledBack);
 void factoryReset();
 
 }  // namespace fry_config
+
+// A factory reset also clears the stored Olostep opt-in. The macro sits on an existing line of
+// fry_config.cpp so default-build images stay byte-identical (empty unless FRY_HAS_OLOSTEP).
+#include "olostep_flag.h"
+#if FRY_HAS_OLOSTEP
+#include "olostep_exec.h"
+#define FRY_OLOSTEP_ON_FACTORY_RESET() setOlostepOptIn(false); fry_olostep_optin_changed();
+#else
+#define FRY_OLOSTEP_ON_FACTORY_RESET()
+#endif
