@@ -17,8 +17,12 @@ each NAME is an environment variable holding one value. The report names the var
 path, never the value. --plant-control first scans an in-memory zip-in-tar with every needle
 planted inside and fails unless the scanner finds each one: a clean result then means something.
 
+A zip member that cannot be read (bad CRC, encrypted, unsupported compression) is reported as
+UNREADABLE and the scan carries on; it is never silently skipped and never counts as clean.
+
 Exit codes: 0 clean, 1 a token found (or the header is not empty), 2 usage error (missing or too
-short needle, unreadable path), 3 the planted control was NOT found (the scan cannot be trusted).
+short needle, unreadable path) or a member that could not be read and no token found, 3 the planted
+control was NOT found or could not be read (the scan cannot be trusted).
 """
 import argparse
 import io
@@ -52,8 +56,10 @@ def check_header(path):
     return 0
 
 
-def scan_bytes(data, label, needles, hits, depth, counter):
-    """Records (needle name, label) for every needle in data, then recurses into archives."""
+def scan_bytes(data, label, needles, hits, depth, counter, errors):
+    """Records (needle name, label) for every needle in data, then recurses into archives.
+
+    A member that cannot be read is appended to errors and the rest of the archive is still scanned."""
     counter[0] += 1
     for name, value in needles:
         if value in data:
@@ -65,9 +71,15 @@ def scan_bytes(data, label, needles, hits, depth, counter):
         try:
             with zipfile.ZipFile(bio) as z:
                 for info in z.infolist():
-                    if not info.is_dir():
-                        scan_bytes(z.read(info), "%s!%s" % (label, info.filename), needles, hits,
-                                   depth + 1, counter)
+                    if info.is_dir():
+                        continue
+                    member = "%s!%s" % (label, info.filename)
+                    try:
+                        payload = z.read(info)
+                    except Exception:
+                        errors.append(member)
+                        continue
+                    scan_bytes(payload, member, needles, hits, depth + 1, counter, errors)
         except zipfile.BadZipFile:
             pass
         return
@@ -79,30 +91,32 @@ def scan_bytes(data, label, needles, hits, depth, counter):
                     f = t.extractfile(member)
                     if f is not None:
                         scan_bytes(f.read(), "%s!%s" % (label, member.name), needles, hits,
-                                   depth + 1, counter)
+                                   depth + 1, counter, errors)
     except (tarfile.TarError, EOFError, OSError):
         pass  # not a tar: the raw bytes were already scanned
 
 
 def scan_paths(paths, needles):
-    hits, counter = [], [0]
+    hits, counter, errors = [], [0], []
     for path in paths:
         if os.path.isdir(path):
             for root, _, files in os.walk(path):
                 for fn in sorted(files):
                     p = os.path.join(root, fn)
                     with open(p, "rb") as f:
-                        scan_bytes(f.read(), p, needles, hits, 0, counter)
+                        scan_bytes(f.read(), p, needles, hits, 0, counter, errors)
         elif os.path.isfile(path):
             with open(path, "rb") as f:
-                scan_bytes(f.read(), path, needles, hits, 0, counter)
+                scan_bytes(f.read(), path, needles, hits, 0, counter, errors)
         else:
             raise FileNotFoundError(path)
-    return hits, counter[0]
+    return hits, counter[0], errors
 
 
 def planted_control(needles):
-    """A zip inside a tar, each needle buried in filler: every one must be found."""
+    """A zip inside a tar, each needle buried in filler: every one must be found and read.
+
+    Returns (needle names not found, members that could not be read)."""
     inner = io.BytesIO()
     with zipfile.ZipFile(inner, "w", zipfile.ZIP_DEFLATED) as z:
         for i, (_, value) in enumerate(needles):
@@ -113,10 +127,10 @@ def planted_control(needles):
         info = tarfile.TarInfo("artifact/control.zip")
         info.size = len(payload)
         t.addfile(info, io.BytesIO(payload))
-    found = []
-    scan_bytes(outer.getvalue(), "<planted-control>", needles, found, 0, [0])
+    found, errors = [], []
+    scan_bytes(outer.getvalue(), "<planted-control>", needles, found, 0, [0], errors)
     names = {n for n, _ in found}
-    return [n for n, _ in needles if n not in names]
+    return [n for n, _ in needles if n not in names], errors
 
 
 def main():
@@ -146,23 +160,32 @@ def main():
         needles.append((name, value.encode("utf-8")))
 
     if a.plant_control:
-        missed = planted_control(needles)
-        if missed:
-            print("check_no_token: CONTROL FAILED - planted %s not found; the scan proves nothing"
-                  % ", ".join(missed))
+        missed, control_errors = planted_control(needles)
+        if missed or control_errors:
+            if missed:
+                print("check_no_token: CONTROL FAILED - planted %s not found; the scan proves nothing"
+                      % ", ".join(missed))
+            for label in control_errors:
+                print("check_no_token: CONTROL FAILED - UNREADABLE %s" % label)
             return 3
         print("check_no_token: control OK - every planted needle found (%d)" % len(needles))
 
     try:
-        hits, scanned = scan_paths(a.artifact, needles)
+        hits, scanned, errors = scan_paths(a.artifact, needles)
     except FileNotFoundError as e:
         print("check_no_token: no such file or directory: %s" % e)
         return 2
     for name, label in hits:
         print("check_no_token: HIT %s in %s" % (name, label))
+    for label in errors:
+        print("check_no_token: UNREADABLE %s" % label)
     if hits:
         print("check_no_token: FAIL - %d hit(s) across %d files/members" % (len(hits), scanned))
         return 1
+    if errors:
+        print("check_no_token: FAIL - %d member(s) could not be read; the scan is incomplete"
+              % len(errors))
+        return 2
     print("check_no_token: OK - %d files/members scanned, 0 hits for %d needle(s): %s"
           % (scanned, len(needles), ", ".join(n for n, _ in needles)))
     return 0
