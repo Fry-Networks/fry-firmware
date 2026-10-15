@@ -278,7 +278,7 @@ bool narrowAwayFromSta(uint32_t net, int prefix, uint32_t staIp, int staPrefix, 
 
     uint32_t mask = prefixToMask(p);
     uint32_t childMask = prefixToMask(p + 1);
-    uint32_t bit = mask & ~childMask;  // the single new distinguishing bit
+    uint32_t bit = childMask & ~mask;  // the single new distinguishing bit
     uint32_t lower = curNet;
     uint32_t upper = curNet | bit;
     if (staIn) {
