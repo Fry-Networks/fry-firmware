@@ -17,8 +17,9 @@ each NAME is an environment variable holding one value. The report names the var
 path, never the value. --plant-control first scans an in-memory zip-in-tar with every needle
 planted inside and fails unless the scanner finds each one: a clean result then means something.
 
-A zip member that cannot be read (bad CRC, encrypted, unsupported compression) is reported as
-UNREADABLE and the scan carries on; it is never silently skipped and never counts as clean.
+A zip or tar member that cannot be read (bad CRC, encrypted, unsupported compression, truncated
+archive) is reported as UNREADABLE and the scan carries on; it is never silently skipped and never
+counts as clean.
 
 Exit codes: 0 clean, 1 a token found (or the header is not empty), 2 usage error (missing or too
 short needle, unreadable path) or a member that could not be read and no token found, 3 the planted
@@ -85,15 +86,25 @@ def scan_bytes(data, label, needles, hits, depth, counter, errors):
         return
     bio.seek(0)
     try:
-        with tarfile.open(fileobj=bio, mode="r:*") as t:
-            for member in t:
-                if member.isfile():
-                    f = t.extractfile(member)
-                    if f is not None:
-                        scan_bytes(f.read(), "%s!%s" % (label, member.name), needles, hits,
-                                   depth + 1, counter, errors)
+        t = tarfile.open(fileobj=bio, mode="r:*")
     except (tarfile.TarError, EOFError, OSError):
-        pass  # not a tar: the raw bytes were already scanned
+        return  # not a tar: the raw bytes were already scanned
+    with t:
+        try:
+            for member in t:
+                if not member.isfile():
+                    continue
+                name = "%s!%s" % (label, member.name)
+                try:
+                    f = t.extractfile(member)
+                    payload = f.read() if f is not None else None
+                except Exception:
+                    errors.append(name)
+                    continue
+                if payload is not None:
+                    scan_bytes(payload, name, needles, hits, depth + 1, counter, errors)
+        except (tarfile.TarError, EOFError, OSError):
+            errors.append("%s!<tar read aborted>" % label)  # the rest of the archive is unread
 
 
 def scan_paths(paths, needles):
