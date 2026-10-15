@@ -17,7 +17,7 @@ WINPATH_RE = re.compile(rb"(?<![A-Za-z0-9])[A-Za-z]:\\[^\x00-\x1f]{0,200}")
 # very username it is meant to detect. Set FRY_SCAN_NEEDLES to a comma-separated list,
 # e.g. FRY_SCAN_NEEDLES=alice,bob. "Users\\" is always checked because it is generic.
 NEEDLES = tuple(
-    n.encode("utf-8")
+    n.strip().encode("utf-8")
     for n in os.environ.get("FRY_SCAN_NEEDLES", "").split(",")
     if n.strip()
 ) + (b"Users\\",)
