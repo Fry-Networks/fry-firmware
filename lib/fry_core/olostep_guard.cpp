@@ -32,6 +32,18 @@ bool hasControlChar(const std::string& s) {
   return false;
 }
 
+// RFC 9110 token: one or more tchar. Anything else (":", space, quotes, non-ASCII, empty) is not a
+// header name a socket writer may emit.
+bool isTokenName(const std::string& s) {
+  if (s.empty()) return false;
+  for (char c : s) {
+    const unsigned char u = static_cast<unsigned char>(c);
+    const bool alnum = (u >= '0' && u <= '9') || (u >= 'A' && u <= 'Z') || (u >= 'a' && u <= 'z');
+    if (!alnum && (u == 0 || !strchr("!#$%&'*+-.^_`|~", c))) return false;
+  }
+  return true;
+}
+
 bool endsWith(const std::string& s, const char* suffix) {
   size_t n = strlen(suffix);
   return s.size() >= n && s.compare(s.size() - n, n, suffix) == 0;
@@ -348,6 +360,7 @@ HeaderMap olostep_sanitize_outbound_headers(const HeaderMap& in, OlostepJobClass
   for (const auto& kv : in) {
     const std::string n = trimLower(kv.first);
     if (hasControlChar(n) || hasControlChar(kv.second)) continue;  // never emit CR/LF/NUL/control chars
+    if (!isTokenName(n)) continue;  // empty or non-token name ("Host: x", "Content-Length:", non-ASCII)
     if (cls == OlostepJobClass::AuthenticatedPartner) {
       static const char* const kFraming[] = {"host", "content-length", "connection", "transfer-encoding",
                                              "keep-alive", "proxy-connection", "te", "trailer", "upgrade"};
