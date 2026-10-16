@@ -144,6 +144,43 @@ def main():
     check("nested corrupt member: exit 2 and never OK",
           rc == 2 and "check_no_token: OK" not in out, "rc=%d out=%r" % (rc, out))
 
+    # A zip whose end-of-central-directory record was cut off is not recognised as a zip at all, so
+    # a token inside its deflated member is invisible to a raw scan: it must be reported, not OK.
+    whole = zip_bytes([clean, hit])
+    p = os.path.join(tmp, "truncated-eocd.zip")
+    with open(p, "wb") as f:
+        f.write(whole[:-30])
+    rc, out = scan(p)
+    check("truncated zip (no end record), token hidden: exit 2", rc == 2, "rc=%d out=%r" % (rc, out))
+    check("truncated zip: reported UNREADABLE and never OK",
+          "UNREADABLE" in out and "check_no_token: OK" not in out, out)
+    check("truncated zip: no traceback", "Traceback" not in out, out)
+    p = os.path.join(tmp, "truncated-stored-hit.zip")
+    with open(p, "wb") as f:
+        f.write(zip_bytes([("raw.bin", b"x" * 20 + token.encode())])[:-30])
+    rc, out = scan(p)
+    check("truncated zip with a visible token: exit 1, still reported UNREADABLE",
+          rc == 1 and "HIT T1" in out and "UNREADABLE" in out, "rc=%d out=%r" % (rc, out))
+
+    # A zip whose central directory cannot be read (the end record points at garbage).
+    broken = bytearray(whole)
+    struct.pack_into("<I", broken, len(broken) - 6, 4)  # central directory offset -> inside a member
+    p = os.path.join(tmp, "bad-central-directory.zip")
+    with open(p, "wb") as f:
+        f.write(bytes(broken))
+    rc, out = scan(p)
+    check("unreadable central directory: exit 2, UNREADABLE, never OK, no traceback",
+          rc == 2 and "UNREADABLE" in out and "check_no_token: OK" not in out
+          and "Traceback" not in out, "rc=%d out=%r" % (rc, out))
+
+    # Control: a blob that is NOT a zip but contains the zip signature mid-file is not flagged.
+    p = os.path.join(tmp, "not-a-zip.bin")
+    with open(p, "wb") as f:
+        f.write(b"\x00" * 100 + b"PK\x03\x04" + b"\x01" * 100 + b"PK" + b"\x02" * 50)
+    rc, out = scan(p)
+    check("control: non-zip blob with PK mid-file exits 0 with OK",
+          rc == 0 and "UNREADABLE" not in out and "check_no_token: OK" in out, "rc=%d out=%r" % (rc, out))
+
     # Controls: a clean zip is still OK, and the same zip with a hit still fails.
     p = os.path.join(tmp, "clean.zip")
     with open(p, "wb") as f:
@@ -158,8 +195,39 @@ def main():
     rc, out = scan(p)
     check("control: zip with a planted hit exits 1", rc == 1 and "HIT T1" in out, out)
 
-    # A read error inside the planted control means the scan cannot be trusted: exit 3.
+    # Open-time exceptions other than BadZipFile are reported UNREADABLE, never a traceback.
     mod = load_tool()
+    p = os.path.join(tmp, "open-time.zip")
+    with open(p, "wb") as f:
+        f.write(zip_bytes([clean]))
+    real_infolist = zipfile.ZipFile.infolist
+    for exc_type in (zipfile.BadZipFile, NotImplementedError, struct.error, OverflowError, ValueError):
+        def failing_infolist(self, _exc=exc_type):
+            raise _exc("simulated open-time failure")
+        old_argv, old_env = sys.argv, os.environ.get("T1")
+        buf = io.StringIO()
+        rc, err = None, ""
+        zipfile.ZipFile.infolist = failing_infolist
+        try:
+            sys.argv = ["check_no_token.py", "--artifact", p, "--needle-env", "T1"]
+            os.environ["T1"] = token
+            with contextlib.redirect_stdout(buf):
+                rc = mod.main()
+        except BaseException as e:  # a crash is a failure of the check below
+            err = "%s: %s" % (type(e).__name__, e)
+        finally:
+            zipfile.ZipFile.infolist = real_infolist
+            sys.argv = old_argv
+            if old_env is None:
+                os.environ.pop("T1", None)
+            else:
+                os.environ["T1"] = old_env
+        outputs.append(buf.getvalue())
+        check("%s at zip open: UNREADABLE, exit 2, never OK" % exc_type.__name__,
+              rc == 2 and "UNREADABLE" in buf.getvalue() and "check_no_token: OK" not in buf.getvalue(),
+              "rc=%r err=%s out=%r" % (rc, err, buf.getvalue()))
+
+    # A read error inside the planted control means the scan cannot be trusted: exit 3.
     p = os.path.join(tmp, "for-control.zip")
     with open(p, "wb") as f:
         f.write(zip_bytes([clean]))

@@ -17,12 +17,15 @@ each NAME is an environment variable holding one value. The report names the var
 path, never the value. --plant-control first scans an in-memory zip-in-tar with every needle
 planted inside and fails unless the scanner finds each one: a clean result then means something.
 
-A zip or tar member that cannot be read (bad CRC, encrypted, unsupported compression, truncated
-archive) is reported as UNREADABLE and the scan carries on; it is never silently skipped and never
-counts as clean.
+Reported as UNREADABLE, never silently skipped and never counted as clean (the scan carries on with
+everything else): a zip or tar member that cannot be read (bad CRC, encrypted, unsupported
+compression), a zip that cannot be opened (it starts with a zip header but its central directory is
+missing, truncated or corrupt), and a tar that breaks part-way. Anything that is not a recognised
+archive is scanned as raw bytes only; so is a damaged gzip/bzip2/xz stream whose tar cannot even be
+opened, which can therefore still read as clean. Archives nested deeper than 4 levels are not opened.
 
 Exit codes: 0 clean, 1 a token found (or the header is not empty), 2 usage error (missing or too
-short needle, unreadable path) or a member that could not be read and no token found, 3 the planted
+short needle, unreadable path) or something UNREADABLE and no token found, 3 the planted
 control was NOT found or could not be read (the scan cannot be trusted).
 """
 import argparse
@@ -68,21 +71,26 @@ def scan_bytes(data, label, needles, hits, depth, counter, errors):
     if depth >= MAX_DEPTH:
         return
     bio = io.BytesIO(data)
-    if zipfile.is_zipfile(bio):
+    if zipfile.is_zipfile(bio) or data.startswith(b"PK\x03\x04"):
+        # A blob that starts with a zip header but has no readable end record (a truncated zip) is
+        # still a zip: its deflated members are invisible to the raw scan above, so it is unreadable.
         try:
-            with zipfile.ZipFile(bio) as z:
-                for info in z.infolist():
-                    if info.is_dir():
-                        continue
-                    member = "%s!%s" % (label, info.filename)
-                    try:
-                        payload = z.read(info)
-                    except Exception:
-                        errors.append(member)
-                        continue
-                    scan_bytes(payload, member, needles, hits, depth + 1, counter, errors)
-        except zipfile.BadZipFile:
-            pass
+            z = zipfile.ZipFile(bio)
+            infos = z.infolist()
+        except Exception:
+            errors.append(label)
+            return
+        with z:
+            for info in infos:
+                if info.is_dir():
+                    continue
+                member = "%s!%s" % (label, info.filename)
+                try:
+                    payload = z.read(info)
+                except Exception:
+                    errors.append(member)
+                    continue
+                scan_bytes(payload, member, needles, hits, depth + 1, counter, errors)
         return
     bio.seek(0)
     try:
