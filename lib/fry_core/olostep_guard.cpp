@@ -32,6 +32,18 @@ bool hasControlChar(const std::string& s) {
   return false;
 }
 
+// RFC 9110 token: one or more tchar. Anything else (":", space, quotes, non-ASCII, empty) is not a
+// header name a socket writer may emit.
+bool isTokenName(const std::string& s) {
+  if (s.empty()) return false;
+  for (char c : s) {
+    const unsigned char u = static_cast<unsigned char>(c);
+    const bool alnum = (u >= '0' && u <= '9') || (u >= 'A' && u <= 'Z') || (u >= 'a' && u <= 'z');
+    if (!alnum && (u == 0 || !strchr("!#$%&'*+-.^_`|~", c))) return false;
+  }
+  return true;
+}
+
 bool endsWith(const std::string& s, const char* suffix) {
   size_t n = strlen(suffix);
   return s.size() >= n && s.compare(s.size() - n, n, suffix) == 0;
@@ -216,12 +228,19 @@ bool olostep_ip_is_blocked_v6(const uint8_t ip[16]) {
   bool mapped = true;
   for (int i = 0; i < 10; i++) mapped = mapped && ip[i] == 0;
   if (mapped && ip[10] == 0xFF && ip[11] == 0xFF) return olostep_ip_is_blocked_v4(ip + 12);
+  // SIIT ::ffff:0:a.b.c.d (::ffff:0:0/96) embeds a v4 address.
+  bool siit = true;
+  for (int i = 0; i < 8; i++) siit = siit && ip[i] == 0;
+  if (siit && ip[8] == 0xFF && ip[9] == 0xFF && ip[10] == 0 && ip[11] == 0)
+    return olostep_ip_is_blocked_v4(ip + 12);
   // NAT64 64:ff9b::/96 embeds a v4 address.
   if (ip[0] == 0x00 && ip[1] == 0x64 && ip[2] == 0xFF && ip[3] == 0x9B) {
     bool z = true;
     for (int i = 4; i < 12; i++) z = z && ip[i] == 0;
     if (z) return olostep_ip_is_blocked_v4(ip + 12);
   }
+  if (ip[0] == 0x00) return true;                                   // rest of 0000::/8 (reserved)
+  if (ip[0] == 0x3F && ip[1] == 0xFF && (ip[2] & 0xF0) == 0) return true;  // 3fff::/20 documentation (RFC 9637)
   if (ip[0] == 0x20 && ip[1] == 0x01 && ip[2] == 0 && ip[3] == 0) return true;  // 2001::/32 Teredo
   if (ip[0] == 0x00 && ip[1] == 0x64 && ip[2] == 0xFF && ip[3] == 0x9B && ip[4] == 0x00 && ip[5] == 0x01)
     return true;                                                    // 64:ff9b:1::/48 local-use NAT64
@@ -348,6 +367,7 @@ HeaderMap olostep_sanitize_outbound_headers(const HeaderMap& in, OlostepJobClass
   for (const auto& kv : in) {
     const std::string n = trimLower(kv.first);
     if (hasControlChar(n) || hasControlChar(kv.second)) continue;  // never emit CR/LF/NUL/control chars
+    if (!isTokenName(n)) continue;  // empty or non-token name ("Host: x", "Content-Length:", non-ASCII)
     if (cls == OlostepJobClass::AuthenticatedPartner) {
       static const char* const kFraming[] = {"host", "content-length", "connection", "transfer-encoding",
                                              "keep-alive", "proxy-connection", "te", "trailer", "upgrade"};

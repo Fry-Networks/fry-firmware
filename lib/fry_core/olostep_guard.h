@@ -62,6 +62,7 @@ bool olostep_job_is_permitted(const Job& job);
 // checks only. SSRF, CRLF/control-char and action-field checks apply to every class.
 OlostepJobClass olostep_job_classify_and_permit(const Job& job);
 
+// Every outbound header name must be a non-empty RFC 9110 token; any other name is dropped for every job class.
 // Allowlist: Accept, Accept-Language, Accept-Encoding, User-Agent, Referer (case-insensitive).
 // Everything else is dropped; Cookie / Authorization / any auth header can never be emitted.
 HeaderMap olostep_sanitize_outbound_headers(const HeaderMap& in);

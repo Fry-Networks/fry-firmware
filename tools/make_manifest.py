@@ -432,7 +432,8 @@ def main():
             if builds.pop(env, None) is not None:
                 print("make_manifest: %s left out of builds{} for channel %s (%s)" % (env, a.channel, reason))
 
-    manifest = {"firmware_version": a.version, "channel": a.channel, "builds": builds}
+    manifest = {"firmware_version": a.version, "channel": a.channel, "builds": builds,
+                "olostep_kill": False}
 
     out_dir = os.path.dirname(a.out)
     if out_dir:

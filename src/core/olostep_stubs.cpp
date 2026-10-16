@@ -9,5 +9,7 @@ extern "C" __attribute__((weak)) void fry_olostep_stop() {}
 extern "C" __attribute__((weak)) void fry_olostep_tick() {}
 extern "C" __attribute__((weak)) void fry_olostep_optin_changed() {}
 extern "C" __attribute__((weak)) bool fry_olostep_running() { return false; }
+extern "C" __attribute__((weak)) void fry_olostep_consent_write_failed(bool) {}
+extern "C" __attribute__((weak)) void fry_olostep_set_kill(bool) {}
 
 #endif  // FRY_HAS_OLOSTEP

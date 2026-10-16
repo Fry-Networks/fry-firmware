@@ -13,6 +13,8 @@ constexpr const char OLOSTEP_OWNER_DISCLOSURE[] =
 
 // NVS namespace "fry_olostep", key "optIn" (bool, default false).
 bool getOlostepOptIn();
-void setOlostepOptIn(bool v);
+// true only if the value reached storage. A failed OFF write also tells the executor to go dormant
+// (fry_olostep_consent_write_failed), so a stale stored ON can never keep the relay running.
+bool setOlostepOptIn(bool v);
 
 #endif  // FRY_HAS_OLOSTEP

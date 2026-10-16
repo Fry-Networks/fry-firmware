@@ -556,7 +556,7 @@ void factoryReset() {
   KvStore o;
   o.begin("fry_ota", false);
   o.clear();
-  o.end();
+  o.end(); FRY_OLOSTEP_ON_FACTORY_RESET()
 }
 
 }  // namespace fry_config

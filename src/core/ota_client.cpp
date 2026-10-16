@@ -500,7 +500,7 @@ bool checkNow() {
     return false;
   }
 
-  const char* latest = doc["firmware_version"] | "";
+  const char* latest = doc["firmware_version"] | ""; FRY_OLOSTEP_SET_KILL(doc)
   const char* channel = doc["channel"] | "";
   JsonObject build = doc["builds"][FRY_BUILD_ENV];
   const char* url = build["url"] | "";
