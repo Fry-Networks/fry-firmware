@@ -10,7 +10,8 @@
 namespace fry_wifi {
 
 // Blocks up to timeoutMs attempting to join ssid/pass. Returns true on success; on failure,
-// *errOut is set to WifiAuth, NoIp, or WifiAuth as a fallback for an undiagnosed failure.
+// *errOut is set to NoIp, BadSsid (no AP answered for the SSID) or WifiAuth (everything else,
+// including an undiagnosed failure); see lib/fry_core/wifi_reason.h.
 bool connect(const char* ssid, const char* pass, uint32_t timeoutMs, fry::ProvErr* errOut);
 
 bool isConnected();

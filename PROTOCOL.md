@@ -43,7 +43,7 @@ peripheral must still accept the 58-byte wallet via a long/prepared write.
 | Error | Meaning |
 |---|---|
 | 0 | none |
-| 1 | bad SSID (empty or over 32 bytes) |
+| 1 | bad SSID (empty or over 32 bytes), or the join found no AP with that SSID (WIFI_REASON_NO_AP_FOUND) |
 | 2 | WiFi authentication failed |
 | 3 | associated but no IP (DHCP timeout) |
 | 4 | hardwareapi registration failed |

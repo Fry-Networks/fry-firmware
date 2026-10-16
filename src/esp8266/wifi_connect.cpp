@@ -2,6 +2,7 @@
 // wifi_manager.cpp: softAP teardown before STA, forced 802.11g PHY, event-aware connect wait
 // with a DHCP-completion extension, disconnect-reason decoding, and a reconnect watchdog.
 #include "../core/wifi_station.h"
+#include "wifi_reason.h"
 
 #include <ESP8266WiFi.h>
 
@@ -69,12 +70,12 @@ bool connect(const char* ssid, const char* pass, uint32_t timeoutMs, fry::ProvEr
     if (s_l2Associated || s_dhcpTimedOut) {
       *errOut = fry::ProvErr::NoIp;
     } else {
-      *errOut = fry::ProvErr::WifiAuth;  // covers auth failures and the undiagnosed case alike
+      // 201 NO_AP_FOUND -> BadSsid; auth failures and the undiagnosed case -> WifiAuth.
+      *errOut = fry::classifyWifiDisconnect(s_lastDiscReason);
     }
   }
   // WIFI_REASON_* (e.g. 2 AUTH_EXPIRE, 15 4WAY_HANDSHAKE_TIMEOUT, 201 NO_AP_FOUND, 202
-  // AUTH_FAIL) is logged verbatim for diagnosis even though the mapping above only
-  // distinguishes "associated" (NoIp) from "never associated" (WifiAuth).
+  // AUTH_FAIL) is logged verbatim for diagnosis.
   Serial.printf("wifi connect failed reason=%u associated=%d\n", s_lastDiscReason, (int)s_l2Associated);
   return false;
 }

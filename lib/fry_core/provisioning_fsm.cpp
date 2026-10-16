@@ -111,6 +111,9 @@ bool ProvisioningFsm::feed(ProvEvent ev, const ProvInputs& in) {
       } else if (ev == ProvEvent::WifiAuthFail) {
         _state = ProvState::Error;
         _err = ProvErr::WifiAuth;
+      } else if (ev == ProvEvent::WifiNoAp) {
+        _state = ProvState::Error;
+        _err = ProvErr::BadSsid;
       } else if (ev == ProvEvent::WifiNoIp) {
         _state = ProvState::Error;
         _err = ProvErr::NoIp;

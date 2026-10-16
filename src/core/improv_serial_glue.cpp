@@ -204,7 +204,8 @@ void pollWifiOutcome() {
 
   if (fry_provisioning::state() == fry::ProvState::Error) {
     const fry::ProvErr err = fry_provisioning::lastError();
-    if (err == fry::ProvErr::WifiAuth || err == fry::ProvErr::NoIp) {
+    if (err == fry::ProvErr::WifiAuth || err == fry::ProvErr::NoIp ||
+        err == fry::ProvErr::BadSsid) {
       s_awaitingWifi = false;
       sendError(Error::UnableToConnect);
       sendState(State::Ready);  // back to ready so the client can offer another network

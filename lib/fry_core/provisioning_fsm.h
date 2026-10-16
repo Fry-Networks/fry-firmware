@@ -54,6 +54,8 @@ enum class ProvEvent : uint8_t {
   KeyMissing,
   // v1.1. A miner-key write refused; ProvInputs::detail says why (BadKey or KeyLocked).
   KeyRejected,
+  // Join failed because no AP answered for the SSID (WIFI_REASON_NO_AP_FOUND): reported as BadSsid.
+  WifiNoAp,
 };
 
 struct ProvInputs {

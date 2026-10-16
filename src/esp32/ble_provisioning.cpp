@@ -371,6 +371,10 @@ void notifyWifiNoIp() {
   s_fsm.feed(fry::ProvEvent::WifiNoIp, {});
   updateStatusChar();
 }
+void notifyWifiNoAp() {
+  s_fsm.feed(fry::ProvEvent::WifiNoAp, {});
+  updateStatusChar();
+}
 void notifyApiOk() {
   s_fsm.feed(fry::ProvEvent::ApiOk, {});
   updateStatusChar();

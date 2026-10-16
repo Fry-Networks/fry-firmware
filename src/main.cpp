@@ -123,6 +123,8 @@ void attemptWifiConnect() {
     setPhase(BootPhase::AwaitingProvisioning);
     if (err == fry::ProvErr::NoIp) {
       fry_provisioning::notifyWifiNoIp();
+    } else if (err == fry::ProvErr::BadSsid) {
+      fry_provisioning::notifyWifiNoAp();
     } else {
       fry_provisioning::notifyWifiAuthFail();
     }

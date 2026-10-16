@@ -347,6 +347,10 @@ void notifyWifiNoIp() {
   s_fsm.feed(fry::ProvEvent::WifiNoIp, {});
   restoreApAfterFailedJoin();
 }
+void notifyWifiNoAp() {
+  s_fsm.feed(fry::ProvEvent::WifiNoAp, {});
+  restoreApAfterFailedJoin();
+}
 void notifyApiOk() {
   if (s_fsm.feed(fry::ProvEvent::ApiOk, {}) && s_fsm.state() == fry::ProvState::Connected) {
     s_connectedAtMs = millis();

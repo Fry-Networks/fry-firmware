@@ -33,6 +33,7 @@ bool readyToConnect();
 void notifyWifiUp();
 void notifyWifiAuthFail();
 void notifyWifiNoIp();
+void notifyWifiNoAp();  // join failed: no AP with that SSID (reported as BadSsid)
 void notifyApiOk();
 // `detail` is the v1.1 registration code (Reg401..Unreachable); None reports the generic 4.
 void notifyApiFail(fry::ProvErr detail = fry::ProvErr::None);
