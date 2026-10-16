@@ -120,6 +120,11 @@ jobs:
           python3 tools/test_check_no_token.py
           python3 tools/test_check_prod_channel.py
           python3 tools/test_ble_key_write_security.py
+          python3 tools/test_check_no_token_unreadable_members.py
+          python3 tools/test_check_no_token_tar_members.py
+          python3 tools/test_scan_identity_needle_strip.py
+          python3 -m pip install pytest==9.0.2
+          python3 -m pytest tools/test_factory_reset_consent.py tools/test_make_manifest_olostep_kill.py -q
 
   flasher-assets:
     runs-on: ubuntu-latest
