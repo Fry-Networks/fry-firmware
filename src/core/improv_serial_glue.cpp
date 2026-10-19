@@ -171,7 +171,9 @@ void pollScan() {
   s_scanRunning = false;
 #if defined(ARDUINO_ARCH_ESP8266)
   // Reduced to one row per SSID, hidden dropped, bounded, strongest first (lib/fry_core/improv_scan).
-  fry::improv::ScanList list;
+  // static: ~1 KB would sit on the 4 KB ESP8266 cont stack. Reset, so a rescan starts empty.
+  static fry::improv::ScanList list;
+  list.clear();
   for (int i = 0; i < n; i++) {
     list.add(WiFi.SSID(i).c_str(), static_cast<int>(WiFi.RSSI(i)),
              WiFi.encryptionType(i) != ENC_TYPE_NONE);

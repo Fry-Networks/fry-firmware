@@ -73,6 +73,16 @@ void test_row_cells_match_the_esp32_path() {
   TEST_ASSERT_EQUAL_STRING("YES", fry::improv::authCell(l.at(1).secure));
 }
 
+void test_clear_empties_the_list_for_reuse() {
+  ScanList l;
+  l.add("a", -40, true);
+  l.clear();
+  TEST_ASSERT_EQUAL(0, (int)l.count());
+  l.add("b", -50, true);
+  TEST_ASSERT_EQUAL(1, (int)l.count());
+  TEST_ASSERT_EQUAL_STRING("b", l.at(0).ssid);
+}
+
 }  // namespace
 
 void setUp() {}
@@ -86,5 +96,6 @@ int main(int, char**) {
   RUN_TEST(test_list_is_bounded_and_keeps_the_strongest);
   RUN_TEST(test_over_long_ssid_is_truncated_to_32);
   RUN_TEST(test_row_cells_match_the_esp32_path);
+  RUN_TEST(test_clear_empties_the_list_for_reuse);
   return UNITY_END();
 }

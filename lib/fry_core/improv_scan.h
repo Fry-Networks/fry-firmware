@@ -22,6 +22,7 @@ class ScanList {
 
   // True when the sighting is kept. Over-long SSIDs are truncated to 32 bytes.
   bool add(const char* ssid, int rssi, bool secure);
+  void clear() { n_ = 0; }  // lets a long-lived instance be reused without a stack copy
   size_t count() const { return n_; }
   const ScanRow& at(size_t i) const { return rows_[i]; }
 
