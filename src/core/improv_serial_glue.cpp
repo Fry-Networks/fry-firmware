@@ -14,6 +14,7 @@
 #endif
 
 #include "fry_config.h"
+#include "improv_scan.h"
 #include "improv_serial.h"
 #include "key_policy.h"
 #include "miner_key.h"
@@ -51,8 +52,9 @@ unsigned long s_lastRpcMs = 0;  // when the last complete RPC arrived
 // this much Improv silence, so it never cuts that 0x01 off (a following 0x01 restarts anyway).
 const unsigned long kKeyRestartIdleMs = 3000;
 
-#if !defined(ARDUINO_ARCH_ESP8266)
 bool s_scanRunning = false;
+#if defined(ARDUINO_ARCH_ESP8266)
+WiFiMode_t s_scanPrevMode = WIFI_OFF;  // restored when the scan ends
 #endif
 
 void writePacket(size_t n) {
@@ -142,27 +144,49 @@ void handleGetStatus() {
 }
 
 void handleScanRequest() {
-#if defined(ARDUINO_ARCH_ESP8266)
-  // On ESP8266 the provisioning transport IS a softAP: the radio is in WIFI_AP and a scan would
-  // drop the portal the user may be standing in. Answer with the empty result that terminates a
-  // scan response — the Improv client then offers a manual SSID field.
-  sendResult(Command::RequestScannedWifi, nullptr, 0);
-#else
   if (s_scanRunning) return;  // the running scan will answer; a second request adds nothing
+#if defined(ARDUINO_ARCH_ESP8266)
+  // The provisioning transport on this chip is a softAP and the captive portal may be in use, so
+  // the AP is never dropped: AP_STA keeps it up while the station side scans. A join in flight owns
+  // the radio, so it gets the empty result that ends a scan.
+  if (s_awaitingWifi) {
+    sendResult(Command::RequestScannedWifi, nullptr, 0);
+    return;
+  }
+  s_scanPrevMode = WiFi.getMode();
+  WiFi.mode(static_cast<WiFiMode_t>(s_scanPrevMode | WIFI_STA));
+#else
   WiFi.mode(WIFI_STA);
+#endif
   WiFi.scanNetworks(true /* async */, true /* show hidden */);
   s_scanRunning = true;
-#endif
 }
 
 // An async scan is answered over later polls, so the loop is never blocked for the seconds a
 // scan takes. One RPC result per network, then the empty result that ends the list.
 void pollScan() {
-#if !defined(ARDUINO_ARCH_ESP8266)
   if (!s_scanRunning) return;
   const int n = WiFi.scanComplete();
   if (n == WIFI_SCAN_RUNNING) return;
   s_scanRunning = false;
+#if defined(ARDUINO_ARCH_ESP8266)
+  // Reduced to one row per SSID, hidden dropped, bounded, strongest first (lib/fry_core/improv_scan).
+  fry::improv::ScanList list;
+  for (int i = 0; i < n; i++) {
+    list.add(WiFi.SSID(i).c_str(), static_cast<int>(WiFi.RSSI(i)),
+             WiFi.encryptionType(i) != ENC_TYPE_NONE);
+  }
+  for (size_t i = 0; i < list.count(); i++) {
+    char rssi[8] = {0};
+    fry::improv::formatRssi(list.at(i).rssi, rssi, sizeof(rssi));
+    const char* row[] = {list.at(i).ssid, rssi, fry::improv::authCell(list.at(i).secure)};
+    sendResult(Command::RequestScannedWifi, row, 3);
+  }
+  sendResult(Command::RequestScannedWifi, nullptr, 0);
+  WiFi.scanDelete();
+  // Back to what it was, unless a join began meanwhile and has taken the mode over.
+  if (!s_awaitingWifi && WiFi.getMode() != s_scanPrevMode) WiFi.mode(s_scanPrevMode);
+#else
   if (n > 0) {
     for (int i = 0; i < n; i++) {
       char ssid[33] = {0};
