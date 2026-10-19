@@ -8,6 +8,7 @@
 #include <WiFi.h>
 #include <esp_wireguard.h>
 #include <lwip/opt.h>
+#include <lwip/sockets.h>
 
 #include <cstring>
 
@@ -49,6 +50,28 @@ volatile uint32_t s_relayedBytes = 0;
 String s_priv, s_pub, s_psk, s_addr, s_netmask, s_endpoint;
 
 #if !IP_NAPT
+// Block until either socket is readable (or closed) or maxMs elapses, instead of polling with
+// vTaskDelay. WiFiClient keeps its own read-ahead buffer, so buffered bytes short-circuit the
+// select(). Either argument may be null.
+void waitReadable(WiFiClient* a, WiFiClient* b, uint32_t maxMs) {
+  if ((a && a->available() > 0) || (b && b->available() > 0)) return;
+  fd_set rd;
+  FD_ZERO(&rd);
+  int maxFd = -1;
+  for (WiFiClient* c : {a, b}) {
+    if (c && c->fd() >= 0) {
+      FD_SET(c->fd(), &rd);
+      if (c->fd() > maxFd) maxFd = c->fd();
+    }
+  }
+  if (maxFd < 0) {
+    vTaskDelay(pdMS_TO_TICKS(5));
+    return;
+  }
+  struct timeval tv = {static_cast<time_t>(maxMs / 1000), static_cast<suseconds_t>((maxMs % 1000) * 1000)};
+  select(maxFd + 1, &rd, nullptr, nullptr, &tv);
+}
+
 // Fallback when this build's lwIP has no NAPT compiled in. This is not a build-flag choice we
 // could flip — it is structurally impossible on this framework, confirmed two independent ways
 // (v0.2.0):
@@ -76,7 +99,7 @@ void relayTaskFn(void*) {
   for (;;) {
     WiFiClient client = server.accept();
     if (!client) {
-      vTaskDelay(pdMS_TO_TICKS(50));
+      vTaskDelay(pdMS_TO_TICKS(5));  // WiFiServer's listen fd is private, so accept() stays polled
       continue;
     }
 
@@ -103,7 +126,7 @@ void relayTaskFn(void*) {
         client.write(fail, 2);
         break;
       }
-      vTaskDelay(pdMS_TO_TICKS(10));
+      waitReadable(&client, nullptr, 100);
     }
     if (!greeted) {
       client.stop();
@@ -132,7 +155,7 @@ void relayTaskFn(void*) {
         client.write(reply, sizeof(reply));
         break;
       }
-      vTaskDelay(pdMS_TO_TICKS(10));
+      waitReadable(&client, nullptr, 100);
     }
 
     if (connected) {
@@ -161,7 +184,7 @@ void relayTaskFn(void*) {
         if (activity) {
           lastActivity = millis();
         } else {
-          vTaskDelay(pdMS_TO_TICKS(5));
+          waitReadable(&client, &upstream, 100);
         }
       }
       upstream.stop();
