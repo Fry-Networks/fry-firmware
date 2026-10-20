@@ -7,6 +7,7 @@
 
 #include "config.h"
 #include "fry_config.h"
+#include "heartbeat_fields.h"
 #include "http_tls.h"
 #include "miner_key.h"
 #include "ota_client.h"
@@ -17,6 +18,10 @@
 #include "wifi_station.h"
 
 #include <generated/fry_secrets.h>
+
+#if !defined(ARDUINO_ARCH_ESP8266)
+#include <esp_flash.h>
+#endif
 
 #ifndef FRY_FIRMWARE_VERSION
 #define FRY_FIRMWARE_VERSION "0.0.0-dev"
@@ -31,6 +36,35 @@
 namespace fry_hwapi {
 
 namespace {
+
+// Flash facts for the heartbeat, read once and cached: the first call may touch flash (the sketch
+// size walks the image header) and nothing here changes while the board runs. This is the only
+// platform-specific part of the heartbeat body; the field set itself is lib/fry_core/heartbeat_fields.h.
+//   ESP8266: ESP.getFlashChipRealSize() is the JEDEC-id size, ESP.getFlashChipSize() the image
+//            header's (or the real one under FLASH_MAP_SUPPORT), ESP.getFreeSketchSpace() what
+//            Updater.begin() will accept (Esp.cpp).
+//   ESP32/C3: esp_flash_get_physical_size() reads the chip's own size (the pinned
+//            arduino-esp32 ESP.getFlashChipSize() is derived from the same JEDEC id, so it is the
+//            physical size there too); ESP.getFreeSketchSpace() is the next OTA partition's size.
+fry::FlashInfo flashInfo() {
+  static fry::FlashInfo cached{};
+  static bool have = false;
+  if (have) return cached;
+  fry::FlashInfo fi{};
+#if defined(ARDUINO_ARCH_ESP8266)
+  fi.flashRealSize = ESP.getFlashChipRealSize();
+#else
+  uint32_t physical = 0;
+  if (esp_flash_get_physical_size(nullptr, &physical) != ESP_OK) physical = 0;
+  fi.flashRealSize = physical;
+#endif
+  fi.flashIdeSize = ESP.getFlashChipSize();
+  fi.otaFreeBytes = ESP.getFreeSketchSpace();
+  fi.sketchSize = ESP.getSketchSize();
+  cached = fi;
+  have = true;
+  return cached;
+}
 
 // Updated unconditionally BEFORE every registration attempt (success or failure) so a rejected
 // or failed call backs off to INSTALL_HEARTBEAT_MS just like a successful heartbeat does — the
@@ -115,16 +149,18 @@ bool registerInstallation() {
   char deviceName[32];
   fry_identity::getDeviceName(deviceName, sizeof(deviceName));
 
+  fry::InstallationFields fields{};
+  fields.minerKey = minerKey;
+  fields.installId = installId;
+  fields.minerCode = FRY_MINER_CODE;
+  fields.softwareVersion = FRY_FIRMWARE_VERSION;
+  fields.pocVersion = "1.0.0";
+  fields.hostname = deviceName;
+  fields.os = FRY_BUILD_ENV;
+  fields.deviceName = deviceName;
+  fields.flash = flashInfo();
   JsonDocument doc;
-  doc["miner_key"] = minerKey;
-  doc["install_id"] = installId;
-  doc["minerCode"] = FRY_MINER_CODE;  // camelCase — every sibling key is snake_case (protocol)
-  doc["software_version_installed"] = FRY_FIRMWARE_VERSION;
-  doc["poc_version_installed"] = "1.0.0";
-  doc["hostname"] = deviceName;
-  doc["os"] = FRY_BUILD_ENV;
-  doc["is_installed"] = true;
-  doc["device_name"] = deviceName;
+  fry::buildInstallationDoc(doc, fields);
   String body;
   serializeJson(doc, body);
 
