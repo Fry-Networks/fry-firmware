@@ -7,12 +7,14 @@
 // time. On an ESP32-C3 that was "CORRUPT HEAP: Bad head ... multi_heap_free" called from
 // tcp_close_shutdown on the tcpip thread, a few seconds into a relay load test.
 //
-// So the core only allows a half-close toward a peer that has already sent its own FIN (the socket
-// is in CLOSE_WAIT and moves on to LAST_ACK, which lwIP reports to the netconn) and turns every
-// other FIN into a close of that descriptor. The first group pins that decision and the session
-// bookkeeping around it; the second drives whole sessions through a model of the shim's socket
-// handling and checks the invariants the firmware depends on, with a control run showing that the
-// model does flag the old behaviour.
+// So the core only allows a half-close toward a peer that has already sent its own FIN. Such a
+// socket was read to EOF, which makes lwIP apply SHUT_RD (TF_RXCLOSED), so the SHUT_WR that follows
+// takes the full-close branch and detaches the netconn from the pcb (IDF 4.4.7: api_lib.c:776,
+// tcp.c:526, api_msg.c:1011-1012, :1127). Every other FIN becomes a close of that descriptor. The
+// old code was wrong already on the EOF read, which touches the pcb as well (api_msg.c:1007).
+// The first group pins that decision and the session bookkeeping around it; the second drives whole
+// sessions through a model of the shim's socket handling and checks the invariants the firmware
+// depends on, with a control run showing that the model does flag the old behaviour.
 #include <unity.h>
 
 #include <algorithm>

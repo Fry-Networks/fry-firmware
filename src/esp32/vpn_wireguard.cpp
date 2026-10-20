@@ -87,16 +87,16 @@ String s_priv, s_pub, s_psk, s_addr, s_netmask, s_endpoint;
 // client because each task would pin its own >=4 KB stack, and the heap is the scarce resource on
 // both chips.
 //
-// Passing on a FIN: when one side finishes and the data it already delivered has been forwarded,
-// the other side is told. shutdown(SHUT_WR) is only used on a socket whose own peer has already
-// sent FIN; toward a peer that is still open the descriptor is closed instead (FinAction in
-// socks_relay_core.h). lwIP keeps a half-closed netconn attached to a pcb that becomes TIME_WAIT
-// once the peer closes as well, frees TIME_WAIT pcbs without telling the netconn when the pcb
-// budget runs out (ESP-IDF's tcp_alloc does that at 16 pcbs in total), and the close() that follows
-// frees the pcb a second time. On the bench that showed up under relay load as "CORRUPT HEAP: Bad
-// head" in multi_heap_free, called from tcp_close_shutdown on the tcpip thread. The price: a
-// client that half-closes and still waits for the answer does not get it (the 0.4.7 relay closed
-// both sides on the first FIN too).
+// Passing on a FIN: when one side finishes and its data has been forwarded, the other side is told.
+// shutdown(SHUT_WR) is only used on a socket that was read to EOF: recv() == 0 made lwIP apply
+// SHUT_RD (TF_RXCLOSED), so the SHUT_WR takes the full-close branch and detaches the netconn from
+// its pcb (IDF 4.4.7: api_lib.c:776, tcp.c:526, api_msg.c:1011-1012, :1127; the later free of the
+// pcb skips the error callback, tcp_in.c:611). Toward a peer that is still open the descriptor is
+// closed instead (FinAction): a half-close there leaves the netconn on a pcb that turns TIME_WAIT,
+// lwIP frees TIME_WAIT pcbs without telling the netconn once 16 pcbs exist (tcp_alloc), and the EOF
+// recv (api_msg.c:1007) and the close() then work on freed memory, the latter freeing it again:
+// "CORRUPT HEAP: Bad head" in multi_heap_free under relay load. Cost, as in 0.4.7: a client that
+// half-closes and waits for the reply loses it; unread client bytes go if the server ends first.
 //
 // Compile-time hypotheses, both default ON; -DFRY_RELAY_H5=0 / -DFRY_RELAY_H7=0 switch each one
 // off again (the previous behaviour), so they can still be measured one at a time:

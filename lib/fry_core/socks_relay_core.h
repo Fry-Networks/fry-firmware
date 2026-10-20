@@ -148,13 +148,13 @@ uint32_t slotRemainingMs(const Slot& s, const Timing& t, uint32_t now);  // kNoD
 // One-shot: true once when the shim must shutdown(fd of `side`, SHUT_WR) to forward a FIN.
 bool takeShutdown(Slot& s, Side side);
 
-// How the shim carries out that FIN. A half-closed lwIP socket is only safe when its own peer has
-// already sent FIN (the pcb is in CLOSE_WAIT and goes on to LAST_ACK, and lwIP reports its release
-// to the netconn). Half-closing a socket whose peer is still open leaves the netconn pointing at a
-// pcb that turns into TIME_WAIT once the peer's FIN arrives; lwIP frees TIME_WAIT pcbs without
-// telling the netconn (the ESP-IDF build does so from tcp_alloc as soon as the pcb budget is used
-// up), and the close() that follows then frees the same pcb a second time: heap corruption.
-// A FIN toward a peer that is still open is therefore carried out by closing the descriptor.
+// How the shim carries out that FIN. A shutdown(SHUT_WR) is only safe on a socket that was read to
+// EOF: recv() == 0 made lwIP apply SHUT_RD (TF_RXCLOSED), so the SHUT_WR takes its full-close
+// branch and detaches the netconn from the pcb. Toward a peer that is still open it would leave the
+// netconn on a pcb that becomes TIME_WAIT when the peer's FIN arrives; lwIP frees TIME_WAIT pcbs
+// without telling the netconn (ESP-IDF's tcp_alloc does, from 16 pcbs on), so the EOF recv and the
+// close() that follow touch freed memory and free the pcb a second time: heap corruption. A FIN
+// toward a peer that is still open is therefore carried out by closing the descriptor.
 enum class FinAction : uint8_t {
   None = 0,
   HalfClose,  // shutdown(fd, SHUT_WR): this socket's peer has already sent its FIN
