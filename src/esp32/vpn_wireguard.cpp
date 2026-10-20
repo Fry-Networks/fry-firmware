@@ -222,7 +222,9 @@ bool doSend(fry_relay::Slot& s, fry_relay::Side to, uint32_t now, RelayStats& st
 void startConnect(fry_relay::Slot& s, uint32_t now, RelayStats& st) {
   using namespace fry_relay;
   IPAddress ip;
-  if (!WiFi.hostByName(s.req.host, ip)) {
+  const bool resolved = WiFi.hostByName(s.req.host, ip);
+  now = millis();  // the DNS wait can take seconds: the connect budget and replies start after it
+  if (!resolved) {
     onConnectResult(s, false, now);
     return;
   }
@@ -252,7 +254,7 @@ void startConnect(fry_relay::Slot& s, uint32_t now, RelayStats& st) {
       break;
     case ConnectStart::InProgress:
 #if FRY_RELAY_H5
-      onConnectStarted(s, fd, now);  // the select loop finishes it, bounded by Timing::connectMs
+      onConnectStarted(s, fd, now);  // the select loop finishes it, bounded by Timing::connectMs (from now)
 #else
     {
       const int err = waitConnectInline(fd, Timing().connectMs);
@@ -323,6 +325,7 @@ bool serviceSlot(fry_relay::Slot& s, bool rdC, bool rdU, bool wrU, uint32_t now,
   if (rdC) progress |= doRecv(s, Side::Client, now, st);
   if (s.phase == Phase::NeedConnect) {
     startConnect(s, now, st);
+    now = millis();  // startConnect may have blocked (DNS, inline connect): never reuse a stale time
     progress = true;
   }
   progress |= doSend(s, Side::Up, now, st);
@@ -337,19 +340,24 @@ bool serviceSlot(fry_relay::Slot& s, bool rdC, bool rdU, bool wrU, uint32_t now,
 // valid and drop its slot; whatever remains is retried after a short backoff.
 bool fdAlive(int fd) { return fd < 0 || fcntl(fd, F_GETFL, 0) >= 0; }
 
-void acceptClients(int listenFd, fry_relay::Slot** slots, uint32_t now, RelayStats& st) {
+// Returns true once accept() has produced a descriptor, so a listener that stays readable while
+// accept() keeps failing (EMFILE, ECONNABORTED) does not count as progress and still gets the
+// anti-spin yield in the main loop.
+bool acceptClients(int listenFd, fry_relay::Slot** slots, uint32_t now, RelayStats& st) {
   using namespace fry_relay;
+  bool accepted = false;
   for (int i = 0; i < FRY_RELAY_SLOTS; i++) {
     // Only accept when there is room (or a stalled handshake to evict); otherwise the waiting
     // connection stays in the listen backlog instead of being accepted and dropped.
     if (poolFreeIndex(slots, FRY_RELAY_SLOTS) < 0 &&
         poolEvictIndex(slots, FRY_RELAY_SLOTS, now, kRelayEvictMinAgeMs) < 0) {
-      return;
+      return accepted;
     }
     struct sockaddr_in peer;
     socklen_t plen = sizeof(peer);
     const int fd = accept(listenFd, reinterpret_cast<struct sockaddr*>(&peer), &plen);
-    if (fd < 0) return;  // EAGAIN: backlog drained (or a transient error: select fires again)
+    if (fd < 0) return accepted;  // EAGAIN: backlog drained (or a transient error: select fires again)
+    accepted = true;
     int idx = poolFreeIndex(slots, FRY_RELAY_SLOTS);
     if (idx < 0) {
       idx = poolEvictIndex(slots, FRY_RELAY_SLOTS, now, kRelayEvictMinAgeMs);
@@ -372,6 +380,7 @@ void acceptClients(int listenFd, fry_relay::Slot** slots, uint32_t now, RelaySta
     slotInit(*s, fd, now);
     slots[idx] = s;
   }
+  return accepted;
 }
 
 void relayTaskFn(void*) {
@@ -471,16 +480,19 @@ void relayTaskFn(void*) {
     if (act != SelectAction::Ready) continue;  // timeout / EINTR: the timers run at the top
 
     bool progress = false;
-    if (watchListen && isSet(listenFd, &rd)) {
-      acceptClients(listenFd, slots, now, st);
-      progress = true;
-    }
     for (int i = 0; i < FRY_RELAY_SLOTS; i++) {
       Slot* s = slots[i];
       if (!s) continue;
+      now = millis();  // an earlier slot may have blocked in DNS / inline connect
       progress |= serviceSlot(*s, isSet(s->clientFd, &rd), isSet(s->upFd, &rd), isSet(s->upFd, &wr),
                               now, st);
       if (slotClosed(*s)) releaseSlot(slots[i], st);
+    }
+    // Existing slots are serviced BEFORE new connections are accepted: a handshake whose bytes are
+    // already queued must not be evicted as "stalled" because the loop was blocked in DNS.
+    if (watchListen && isSet(listenFd, &rd)) {
+      now = millis();
+      progress |= acceptClients(listenFd, slots, now, st);
     }
     if (!progress) vTaskDelay(1);  // readable/writable but nothing moved (e.g. ENOMEM): do not spin
   }
