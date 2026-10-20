@@ -84,6 +84,34 @@ size_t maskMinerKey(const char* key, char* out, size_t outCap) {
   return 9;
 }
 
+size_t maskMinerKeyLast4(const char* key, char* out, size_t outCap) {
+  if (!out || outCap == 0) return 0;
+  out[0] = 0;
+  if (!key || !key[0]) return 0;
+  const size_t n = strlen(key);
+  const bool showTail = n >= 12;  // below that, 4 characters would be too much of the value
+  const bool showPrefix =
+      showTail && (memcmp(key, "FEM-", 4) == 0 || memcmp(key, "IOT-", 4) == 0);
+  const size_t need = (showPrefix ? 4 : 0) + 3 + (showTail ? 4 : 0);
+  if (outCap < need + 1) return 0;  // never truncates: no half "FEM-", no split U+2026
+  size_t w = 0;
+  if (showPrefix) {
+    memcpy(out, key, 4);
+    w = 4;
+  }
+  out[w++] = static_cast<char>(0xE2);  // U+2026 HORIZONTAL ELLIPSIS
+  out[w++] = static_cast<char>(0x80);
+  out[w++] = static_cast<char>(0xA6);
+  if (showTail) {
+    for (size_t i = n - 4; i < n; i++) {
+      const unsigned char c = static_cast<unsigned char>(key[i]);
+      out[w++] = (c >= 0x21 && c <= 0x7E) ? static_cast<char>(c) : '?';
+    }
+  }
+  out[w] = 0;
+  return w;
+}
+
 bool makeSetupCode(uint32_t r0, uint32_t r1, char* out, size_t outCap) {
   if (!out || outCap < 9) return false;
   const uint64_t bits = (static_cast<uint64_t>(r0) << 32) | r1;

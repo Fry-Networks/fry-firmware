@@ -86,6 +86,17 @@ ProvErr keyVerdictProvErr(KeyWriteVerdict v);
 // under 10 bytes; otherwise returns 9.
 size_t maskMinerKey(const char* key, char* out, size_t outCap);
 
+// The form of the key every LOG line uses (boot banner, [identity] lines): "FEM-" + U+2026 + the
+// last 4 characters, e.g. "FEM-" U+2026 "2345" - 11 bytes, so outCap 12 holds it. A key that starts
+// with another public namespace prefix ("IOT-") keeps that prefix; any other value of 12+ characters
+// prints the ellipsis and its last 4 only (never its first characters); anything shorter prints the
+// ellipsis alone. A byte outside printable ASCII in the last 4 prints as '?', so a corrupt stored
+// value cannot inject a line break into the log. Returns the bytes written (11, 7 or 3) or, for a
+// NULL/empty key or a buffer too small for the whole form (it never truncates), writes "" and
+// returns 0. Callers print their own "NONE" for a missing key. maskMinerKey above is unchanged: the
+// non-log surfaces (status snapshot, Improv key-write result, ESP8266 /status) still use it.
+size_t maskMinerKeyLast4(const char* key, char* out, size_t outCap);
+
 // 8 characters from ABCDEFGHJKLMNPQRSTUVWXYZ23456789 (no 0/O/1/I), taken from 40 bits of r0/r1:
 // the WPA2 passphrase of the ESP8266 setup AP. Returns false if outCap < 9.
 bool makeSetupCode(uint32_t r0, uint32_t r1, char* out, size_t outCap);
