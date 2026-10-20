@@ -6,6 +6,7 @@
 #include "../core/vpn_relay.h"
 
 #include <WiFi.h>
+#include <esp_bt.h>
 #include <esp_wireguard.h>
 #include <fcntl.h>
 #include <lwip/opt.h>
@@ -90,13 +91,20 @@ String s_priv, s_pub, s_psk, s_addr, s_netmask, s_endpoint;
 // off again (the previous behaviour), so they can still be measured one at a time:
 //   FRY_RELAY_H5  upstream connect is asynchronous: connect() is started non-blocking and the
 //                 select loop finishes it, bounded by Timing::connectMs (3000 ms). A blackholed
-//                 upstream therefore no longer stalls the other clients: in the host shim harness
-//                 the other clients' delay was 295 ms with it ON against 2909 ms with it OFF. OFF
-//                 keeps the 0.4.7 behaviour of waiting for the connect inline (same 3000 ms bound)
-//                 while every other client waits.
+//                 upstream therefore no longer stalls the other clients: in a host harness (not
+//                 part of this repository) another client's request completed after 295 ms with
+//                 it ON against 2909 ms with it OFF, while the upstream was blackholed (267 ms
+//                 with no stalled upstream at all). OFF keeps the 0.4.7 behaviour of waiting for
+//                 the connect inline (same 3000 ms bound) while every other client waits.
 //   FRY_RELAY_H7  WiFi.setSleep(false) while the relay runs: no modem power-save, so a packet is
-//                 not held until the next beacon/DTIM. Bench ESP32 LAN ping: with modem sleep ON
-//                 5% loss and 123 ms average, with it OFF 0% loss and 30 ms.
+//                 not held until the next beacon/DTIM. One bench ESP32 pinged on the LAN at a
+//                 1 s cadence: with modem sleep ON 5% loss and 123 ms average, with it OFF 0%
+//                 loss and 30 ms. Constraint: the WiFi/Bluetooth coexistence code aborts the
+//                 firmware when modem sleep is switched off while the BT controller is enabled,
+//                 i.e. modem sleep is mandatory then. BLE provisioning enables the controller and
+//                 nothing disables it again within a boot, so setSleep(false) is only called
+//                 when the controller is not enabled; a boot that started BLE keeps modem sleep
+//                 on until the next boot without BLE.
 #ifndef FRY_RELAY_H5
 #define FRY_RELAY_H5 1
 #endif
@@ -402,8 +410,16 @@ void relayTaskFn(void*) {
   Serial.printf("socks5: listening :%u slots=%d h5=%d h7=%d\n", port, FRY_RELAY_SLOTS, FRY_RELAY_H5,
                 FRY_RELAY_H7);
 #if FRY_RELAY_H7
-  WiFi.setSleep(false);  // persists across reconnects (WiFiGenericClass::_sleepEnabled)
-  Serial.println("socks5: wifi modem-sleep off (H7)");
+  if (esp_bt_controller_get_status() != ESP_BT_CONTROLLER_STATUS_ENABLED) {
+    // persists across reconnects (WiFiGenericClass::_sleepEnabled)
+    if (WiFi.setSleep(false)) {
+      Serial.println("socks5: wifi modem-sleep off (H7)");
+    } else {
+      Serial.println("socks5: modem-sleep off failed");
+    }
+  } else {
+    Serial.println("socks5: modem-sleep kept on (BT controller enabled)");
+  }
 #endif
 
   Slot* slots[FRY_RELAY_SLOTS] = {};
