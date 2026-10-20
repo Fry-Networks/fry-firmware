@@ -98,6 +98,13 @@ String s_priv, s_pub, s_psk, s_addr, s_netmask, s_endpoint;
 // "CORRUPT HEAP: Bad head" in multi_heap_free under relay load. Cost, as in 0.4.7: a client that
 // half-closes and waits for the reply loses it; unread client bytes go if the server ends first.
 //
+// A close() is abortive: lwIP answers what the peer still sends afterwards (its TLS close_notify, its
+// FIN) with an RST. So when the client finishes first, the upstream gets Timing::finGraceMs to finish
+// on its own before the descriptor is closed (the upstream's data is dropped meanwhile). A server that
+// closes after the client's close_notify then ends the session with FINs only; one that waits for the
+// FIN is closed when the grace runs out. The timer arms that close, so the loop carries it out right
+// after onTimer (FinAction in socks_relay_core.h).
+//
 // Compile-time hypotheses, both default ON; -DFRY_RELAY_H5=0 / -DFRY_RELAY_H7=0 switch each one
 // off again (the previous behaviour), so they can still be measured one at a time:
 //   FRY_RELAY_H5  upstream connect is asynchronous: connect() is started non-blocking and the
@@ -452,6 +459,11 @@ bool acceptClients(int listenFd, fry_relay::Slot** slots, uint32_t now, RelaySta
     int one = 1;
     setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &one, sizeof(one));  // as WiFiServer::available did
     slotInit(*s, fd, now);
+#if FRY_RELAY_HALFCLOSE
+    s->finGraceMs = 0;  // the bench switch restores the old behaviour as a whole
+#else
+    s->finGraceMs = Timing().finGraceMs;
+#endif
     slots[idx] = s;
   }
   return accepted;
@@ -469,8 +481,8 @@ void relayTaskFn(void*) {
     if (tries % 10 == 0) Serial.printf("socks5: listen :%u failed errno=%d, retrying\n", port, errno);
     vTaskDelay(pdMS_TO_TICKS(1000));
   }
-  Serial.printf("socks5: listening :%u slots=%d h5=%d h7=%d hc=%d\n", port, FRY_RELAY_SLOTS, FRY_RELAY_H5,
-                FRY_RELAY_H7, FRY_RELAY_HALFCLOSE);
+  Serial.printf("socks5: listening :%u slots=%d h5=%d h7=%d hc=%d fg=%u\n", port, FRY_RELAY_SLOTS, FRY_RELAY_H5,
+                FRY_RELAY_H7, FRY_RELAY_HALFCLOSE, static_cast<unsigned>(FRY_RELAY_HALFCLOSE ? 0u : Timing().finGraceMs));
 #if FRY_RELAY_H7
   if (esp_bt_controller_get_status() != ESP_BT_CONTROLLER_STATUS_ENABLED) {
     // persists across reconnects (WiFiGenericClass::_sleepEnabled)
@@ -492,7 +504,12 @@ void relayTaskFn(void*) {
   for (;;) {
     uint32_t now = millis();
     for (int i = 0; i < FRY_RELAY_SLOTS; i++) {
-      if (slots[i]) onTimer(*slots[i], timing, now);
+      if (!slots[i]) continue;
+      onTimer(*slots[i], timing, now);
+      // A FIN whose grace time ran out is armed by the timer, not by a socket event: no select() result
+      // brings the slot to serviceSlot() for it, so it is carried out here.
+      forwardFin(*slots[i], Side::Up, now, st);
+      forwardFin(*slots[i], Side::Client, now, st);
     }
     for (int i = 0; i < FRY_RELAY_SLOTS; i++) {
       if (slots[i] && slotClosed(*slots[i])) releaseSlot(slots[i], st);

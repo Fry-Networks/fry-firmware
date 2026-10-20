@@ -38,6 +38,7 @@ struct Timing {
   uint32_t flushMs = 2000;      // time to push a final reply to a client before closing
   uint32_t idleMs = 30000;      // relaying: no byte moved in either direction
   uint32_t halfCloseMs = 5000;  // relaying: one side hit EOF; no byte may stay idle longer than this
+  uint32_t finGraceMs = 500;    // relaying: the client finished first; how long the upstream gets to finish on its own
 };
 
 enum class Phase : uint8_t {
@@ -114,6 +115,10 @@ struct Slot {
   bool pendShutClient = false;
   bool upWrShut = false;      // the FIN toward the upstream has been handed to the shim (one-shot)
   bool clientWrShut = false;  // likewise toward the client
+  uint32_t finGraceMs = 0;    // 0: the FIN toward the upstream is carried out at once; the shim copies Timing::finGraceMs here
+  bool graceUp = false;       // the client's FIN is waiting for the upstream's own FIN
+  bool dropUp = false;        // from the start of that wait on, what the upstream sends is read and dropped
+  uint32_t graceStartMs = 0;
   uint16_t c2uOff = 0, c2uLen = 0;  // client -> upstream pending bytes [off, len)
   uint16_t u2cOff = 0, u2cLen = 0;  // upstream -> client pending bytes (replies included)
   fry::Socks5ConnectRequest req;
@@ -155,6 +160,15 @@ bool takeShutdown(Slot& s, Side side);
 // without telling the netconn (ESP-IDF's tcp_alloc does, from 16 pcbs on), so the EOF recv and the
 // close() that follow touch freed memory and free the pcb a second time: heap corruption. A FIN
 // toward a peer that is still open is therefore carried out by closing the descriptor.
+//
+// A close() is abortive, though: lwIP answers whatever the peer still sends (its TLS close_notify, its
+// FIN) with an RST. In a host simulation of this relay on the ESP-IDF lwIP that was two RSTs per session
+// toward the upstream, where the old half-close ended every session with a plain FIN exchange. So when
+// the client finishes first, the FIN toward the upstream waits up to Slot::finGraceMs for the upstream's
+// own FIN; what the upstream sends meanwhile is read and dropped, as the close() would have discarded
+// it. A server that closes after the client's close_notify then ends the session with FINs toward two
+// peers that had already sent theirs; one that waits for the FIN is closed when the time runs out. The
+// upstream finishing first is unchanged.
 enum class FinAction : uint8_t {
   None = 0,
   HalfClose,  // shutdown(fd, SHUT_WR): this socket's peer has already sent its FIN
