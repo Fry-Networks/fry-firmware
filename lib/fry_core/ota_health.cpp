@@ -100,10 +100,11 @@ bool isSkippedBadVersion(const char* candidate, const char* badver) {
 
 OtaDecision decideOtaUpdate(const char* manifestChannel, const char* ownChannel, const char* latest,
                             const char* current, const char* badver, const char* url,
-                            const char* sha256) {
+                            const char* sha256, bool inRollout) {
   if (!otaChannelAccepted(manifestChannel, ownChannel)) return OtaDecision::WrongChannel;
   if (empty(latest) || !isNewerVersionOta(latest, current)) return OtaDecision::NotNewer;
   if (isSkippedBadVersion(latest, badver)) return OtaDecision::BadVersion;
+  if (!inRollout) return OtaDecision::NotInRollout;
   if (empty(url) || empty(sha256)) return OtaDecision::NoBuild;
   return OtaDecision::Update;
 }
@@ -120,6 +121,8 @@ const char* otaDecisionName(OtaDecision d) {
       return "bad_version";
     case OtaDecision::NoBuild:
       return "no_build";
+    case OtaDecision::NotInRollout:
+      return "not_in_rollout";
   }
   return "not_newer";
 }

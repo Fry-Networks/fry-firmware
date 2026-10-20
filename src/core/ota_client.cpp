@@ -19,6 +19,7 @@
 #include "miner_key.h"
 #include "ota_boot_counter.h"
 #include "ota_health.h"
+#include "ota_rollout_json.h"
 #include "sha256.h"
 #include "trigger_hooks.h"
 #include "wifi_station.h"
@@ -57,6 +58,8 @@ namespace fry_ota {
 namespace {
 
 fry::HeartbeatTracker s_heartbeat;
+// "ota: rollout field malformed - ignored" is logged once per boot, not at every 6-hour check.
+bool s_loggedRolloutMalformed = false;
 // Round 2 (PROTOCOL.md 11.8): the image is marked valid only once hardwareapi answered AND it ran
 // through the first PoC/lease cycle - a crash in the VPN start, telemetry or the first PoC must
 // still roll it back.
@@ -522,8 +525,34 @@ bool checkNow() {
   }
   const bool skip = fry::skipBadVersion(latest, badver.c_str(), badn, s_firstCheckAfterRollback);
   s_firstCheckAfterRollback = false;
+  // Staged rollout (lib/fry_core/ota_rollout.h): an optional manifest "rollout" object. Absent or
+  // malformed means no gate (0.4.7 behaviour); only a well-formed one that excludes this board
+  // closes it. Decided from SHA-256 of the miner key; the key and the hash are never logged. A
+  // board without a key yet cannot be bucketed and is not gated.
+  bool inRollout = true;
+  uint32_t rolloutBucketNo = 0;
+  {
+    char rolloutKey[40];
+    fry_identity::ensureMinerKey(rolloutKey, sizeof(rolloutKey));
+    if (rolloutKey[0] != 0) {
+      uint8_t digest[32];
+      fry::Sha256::hash(reinterpret_cast<const uint8_t*>(rolloutKey), strlen(rolloutKey), digest);
+      const fry::RolloutVerdict rv = fry::evaluateRollout(doc, digest);
+      inRollout = fry::rolloutAllows(rv);
+      if (rv == fry::RolloutVerdict::Malformed && !s_loggedRolloutMalformed) {
+        s_loggedRolloutMalformed = true;
+        Serial.println("ota: rollout field malformed - ignored");
+      }
+      rolloutBucketNo = fry::rolloutBucket(digest);
+    }
+    memset(rolloutKey, 0, sizeof(rolloutKey));
+  }
   const fry::OtaDecision decision = fry::decideOtaUpdate(
-      channel, FRY_OTA_CHANNEL, latest, FRY_FIRMWARE_VERSION, skip ? badver.c_str() : "", url, sha);
+      channel, FRY_OTA_CHANNEL, latest, FRY_FIRMWARE_VERSION, skip ? badver.c_str() : "", url, sha,
+      inRollout);
+  if (decision == fry::OtaDecision::NotInRollout) {
+    Serial.printf("ota: rollout skip bucket=%u\n", static_cast<unsigned>(rolloutBucketNo));
+  }
   const bool willUpdate = decision == fry::OtaDecision::Update;
   Serial.printf("ota: manifest check cur=%s latest=%s action=%s\n", FRY_FIRMWARE_VERSION,
                 strlen(latest) ? latest : "?", willUpdate ? "update" : "none");
