@@ -87,6 +87,17 @@ String s_priv, s_pub, s_psk, s_addr, s_netmask, s_endpoint;
 // client because each task would pin its own >=4 KB stack, and the heap is the scarce resource on
 // both chips.
 //
+// Passing on a FIN: when one side finishes and the data it already delivered has been forwarded,
+// the other side is told. shutdown(SHUT_WR) is only used on a socket whose own peer has already
+// sent FIN; toward a peer that is still open the descriptor is closed instead (FinAction in
+// socks_relay_core.h). lwIP keeps a half-closed netconn attached to a pcb that becomes TIME_WAIT
+// once the peer closes as well, frees TIME_WAIT pcbs without telling the netconn when the pcb
+// budget runs out (ESP-IDF's tcp_alloc does that at 16 pcbs in total), and the close() that follows
+// frees the pcb a second time. On the bench that showed up under relay load as "CORRUPT HEAP: Bad
+// head" in multi_heap_free, called from tcp_close_shutdown on the tcpip thread. The price: a
+// client that half-closes and still waits for the answer does not get it (the 0.4.7 relay closed
+// both sides on the first FIN too).
+//
 // Compile-time hypotheses, both default ON; -DFRY_RELAY_H5=0 / -DFRY_RELAY_H7=0 switch each one
 // off again (the previous behaviour), so they can still be measured one at a time:
 //   FRY_RELAY_H5  upstream connect is asynchronous: connect() is started non-blocking and the
@@ -111,6 +122,11 @@ String s_priv, s_pub, s_psk, s_addr, s_netmask, s_endpoint;
 #ifndef FRY_RELAY_H7
 #define FRY_RELAY_H7 1
 #endif
+// 1 forwards every FIN with shutdown(SHUT_WR), whatever state the peer is in. That is the
+// behaviour described above that corrupts the heap; it exists only to reproduce it on a bench board.
+#ifndef FRY_RELAY_HALFCLOSE
+#define FRY_RELAY_HALFCLOSE 0
+#endif
 #ifndef FRY_RELAY_SLOTS
 #define FRY_RELAY_SLOTS 4
 #endif
@@ -128,6 +144,7 @@ constexpr uint32_t kRelayFullSelectMs = 100;    // pool full: look again soon fo
 struct RelayStats {
   uint32_t closed = 0, done = 0, hsTimeout = 0, hsEof = 0, hsBad = 0, connFail = 0, connTimeout = 0;
   uint32_t idle = 0, ioErr = 0, evicted = 0, fdGuard = 0, selFail = 0, einprog = 0, noMem = 0;
+  uint32_t finHalf = 0, finClose = 0;
 };
 
 bool setNonBlocking(int fd) {
@@ -317,13 +334,58 @@ void logStats(const RelayStats& st) {
                 static_cast<unsigned>(st.hsTimeout), static_cast<unsigned>(st.hsEof),
                 static_cast<unsigned>(st.hsBad), static_cast<unsigned>(st.connFail),
                 static_cast<unsigned>(st.connTimeout), static_cast<unsigned>(st.idle));
-  Serial.printf("ioerr=%u evict=%u fdg=%u selfail=%u einprog=%u nomem=%u stack_free_min=%u/%u heap=%u minheap=%u\n",
+  Serial.printf("ioerr=%u evict=%u fdg=%u selfail=%u einprog=%u nomem=%u stack_free_min=%u/%u heap=%u minheap=%u "
+                "fin_half=%u fin_close=%u\n",
                 static_cast<unsigned>(st.ioErr), static_cast<unsigned>(st.evicted),
                 static_cast<unsigned>(st.fdGuard), static_cast<unsigned>(st.selFail),
                 static_cast<unsigned>(st.einprog), static_cast<unsigned>(st.noMem),
                 static_cast<unsigned>(uxTaskGetStackHighWaterMark(nullptr)),
                 static_cast<unsigned>(FRY_RELAY_STACK_BYTES),
-                static_cast<unsigned>(ESP.getFreeHeap()), static_cast<unsigned>(ESP.getMinFreeHeap()));
+                static_cast<unsigned>(ESP.getFreeHeap()), static_cast<unsigned>(ESP.getMinFreeHeap()),
+                static_cast<unsigned>(st.finHalf), static_cast<unsigned>(st.finClose));
+}
+
+#if !FRY_RELAY_HALFCLOSE
+constexpr int kRelayDrainReads = 8;  // reads discarded before a FIN toward an open peer becomes a close()
+
+// Closes `fd` after reading and discarding what it already holds: lwIP answers close() on a socket
+// with received-but-unread bytes by resetting the connection and dropping everything it has not
+// sent yet, which would cut off the reply that was just queued toward that peer. `scratch` is an
+// idle slot buffer.
+void drainAndClose(int& fd, uint8_t* scratch, size_t room) {
+  for (int i = 0; i < kRelayDrainReads; i++) {
+    if (recv(fd, scratch, room, MSG_DONTWAIT) <= 0) break;
+  }
+  closeFd(fd);
+}
+#endif
+
+// Passes on the FIN the core has armed toward `side`'s peer (see FinAction in socks_relay_core.h).
+void forwardFin(fry_relay::Slot& s, fry_relay::Side side, uint32_t now, RelayStats& st) {
+  using namespace fry_relay;
+  int& fd = side == Side::Client ? s.clientFd : s.upFd;
+#if FRY_RELAY_HALFCLOSE
+  (void)now;
+  (void)st;
+  if (takeShutdown(s, side) && fd >= 0) shutdown(fd, SHUT_WR);
+#else
+  switch (takeFinAction(s, side)) {
+    case FinAction::None:
+      break;
+    case FinAction::HalfClose:
+      if (fd >= 0) shutdown(fd, SHUT_WR);
+      st.finHalf++;
+      break;
+    case FinAction::Close:
+      if (fd >= 0) {
+        // The FIN is only armed once the buffer that feeds this side is empty, so it can serve as scratch.
+        drainAndClose(fd, side == Side::Client ? s.u2c : s.c2u, kBufSize);
+        st.finClose++;
+      }
+      onSideClosed(s, side, now);
+      break;
+  }
+#endif
 }
 
 // One socket-level service pass over a slot after select(). Returns true if anything happened.
@@ -343,8 +405,8 @@ bool serviceSlot(fry_relay::Slot& s, bool rdC, bool rdU, bool wrU, uint32_t now,
   progress |= doSend(s, Side::Up, now, st);
   if (rdU) progress |= doRecv(s, Side::Up, now, st);
   progress |= doSend(s, Side::Client, now, st);
-  if (takeShutdown(s, Side::Up) && s.upFd >= 0) shutdown(s.upFd, SHUT_WR);
-  if (takeShutdown(s, Side::Client) && s.clientFd >= 0) shutdown(s.clientFd, SHUT_WR);
+  forwardFin(s, Side::Up, now, st);
+  forwardFin(s, Side::Client, now, st);
   return progress;
 }
 
@@ -407,8 +469,8 @@ void relayTaskFn(void*) {
     if (tries % 10 == 0) Serial.printf("socks5: listen :%u failed errno=%d, retrying\n", port, errno);
     vTaskDelay(pdMS_TO_TICKS(1000));
   }
-  Serial.printf("socks5: listening :%u slots=%d h5=%d h7=%d\n", port, FRY_RELAY_SLOTS, FRY_RELAY_H5,
-                FRY_RELAY_H7);
+  Serial.printf("socks5: listening :%u slots=%d h5=%d h7=%d hc=%d\n", port, FRY_RELAY_SLOTS, FRY_RELAY_H5,
+                FRY_RELAY_H7, FRY_RELAY_HALFCLOSE);
 #if FRY_RELAY_H7
   if (esp_bt_controller_get_status() != ESP_BT_CONTROLLER_STATUS_ENABLED) {
     // persists across reconnects (WiFiGenericClass::_sleepEnabled)

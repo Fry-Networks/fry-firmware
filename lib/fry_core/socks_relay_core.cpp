@@ -409,6 +409,17 @@ bool takeShutdown(Slot& s, Side side) {
   return true;
 }
 
+FinAction takeFinAction(Slot& s, Side side) {
+  if (!takeShutdown(s, side)) return FinAction::None;
+  const bool peerFinSeen = side == Side::Client ? !s.clientRdOpen : !s.upRdOpen;
+  return peerFinSeen ? FinAction::HalfClose : FinAction::Close;
+}
+
+void onSideClosed(Slot& s, Side side, uint32_t now) {
+  (side == Side::Client ? s.clientRdOpen : s.upRdOpen) = false;
+  relayUpdate(s, now);
+}
+
 void slotForceClose(Slot& s, CloseReason why) { closeSlot(s, why); }
 
 int poolFreeIndex(Slot* const* slots, int n) {
