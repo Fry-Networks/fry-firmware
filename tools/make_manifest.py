@@ -323,6 +323,10 @@ def write_ewt_manifest(envs, version, build_dir, dist, asset_base, boot_app0, ou
           % (out_path, len(builds), sum(len(b["parts"]) for b in builds)))
 
 
+# The manifest is fetched by every board into RAM: keep the allow list small.
+MAX_ROLLOUT_ALLOW = 64
+
+
 def parse_rollout(lo, hi, allow_path):
     """The optional manifest "rollout" object (lib/fry_core/ota_rollout.h), or None when no
     --rollout-lo/--rollout-hi was given. The manifest is public: --rollout-allow takes only the
@@ -353,6 +357,9 @@ def parse_rollout(lo, hi, allow_path):
                 raise SystemExit("make_manifest: --rollout-allow %s:%d is not a 16-hex SHA-256 prefix "
                                  "(rollout allow entries are never raw keys or full digests)" % (allow_path, n))
             prefixes.add(entry.lower())
+        if len(prefixes) > MAX_ROLLOUT_ALLOW:
+            raise SystemExit("make_manifest: --rollout-allow has %d distinct entries; the rollout allow list "
+                             "is capped at %d" % (len(prefixes), MAX_ROLLOUT_ALLOW))
         rollout["allow"] = sorted(prefixes)
     return rollout
 

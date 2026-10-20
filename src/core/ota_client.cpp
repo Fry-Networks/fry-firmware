@@ -532,7 +532,7 @@ bool checkNow() {
   bool inRollout = true;
   uint32_t rolloutBucketNo = 0;
   {
-    char rolloutKey[40];
+    char rolloutKey[40] = {0};
     fry_identity::ensureMinerKey(rolloutKey, sizeof(rolloutKey));
     if (rolloutKey[0] != 0) {
       uint8_t digest[32];

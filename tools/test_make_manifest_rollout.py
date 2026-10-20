@@ -120,7 +120,23 @@ def main():
         check("an empty allow file gives allow: []", rc == 0 and r == {"bucket_lo": 0, "bucket_hi": 5, "allow": []},
               (log, r))
 
+        print("allow-list cap (64 entries after de-duplication):")
+        entries = ["%016x" % (0x1000 + i) for i in range(65)]
+        p64 = write(os.path.join(tmp, "allow64.txt"), "\n".join(entries[:64]) + "\n")
+        rc, log, raw = run(tmp, "--rollout-lo", "0", "--rollout-hi", "5", "--rollout-allow", p64)
+        r = json.loads(raw).get("rollout") if raw else None
+        check("64 entries accepted", rc == 0 and r is not None and r.get("allow") == sorted(entries[:64]), log)
+        dup = write(os.path.join(tmp, "allow64dup.txt"),
+                    "\n".join(entries[:64] + [entries[0].upper(), entries[1]]) + "\n")
+        rc, log, raw = run(tmp, "--rollout-lo", "0", "--rollout-hi", "5", "--rollout-allow", dup)
+        r = json.loads(raw).get("rollout") if raw else None
+        check("64 unique plus duplicates accepted (cap counts after de-duplication)",
+              rc == 0 and r is not None and len(r.get("allow", [])) == 64, log)
+
         print("refused input (non-zero exit, no manifest written):")
+        p65 = write(os.path.join(tmp, "allow65.txt"), "\n".join(entries) + "\n")
+        rc, log, raw = run(tmp, "--rollout-lo", "0", "--rollout-hi", "5", "--rollout-allow", p65)
+        check("65 entries refused with a clear error", refused(rc, log, raw) and "64" in log, (rc, log))
         bad_allow = {
             "15 hex chars": "ba7816bf8f01cfe\n",
             "17 hex chars": "ba7816bf8f01cfea0\n",
