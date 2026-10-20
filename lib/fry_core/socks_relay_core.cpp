@@ -105,7 +105,21 @@ void relayUpdate(Slot& s, uint32_t now) {
   if (s.phase != Phase::Relay) return;
   const bool c2uEmpty = s.c2uOff == s.c2uLen;
   const bool u2cEmpty = s.u2cOff == s.u2cLen;
-  if (!s.clientRdOpen && c2uEmpty && !s.upWrShut) s.pendShutUp = true;
+  if (!s.clientRdOpen && c2uEmpty && !s.upWrShut) {
+    if (s.upRdOpen && s.finGraceMs != 0 && !s.pendShutUp) {
+      // The client is done and the upstream is not: give the upstream finGraceMs to finish on its own
+      // before the descriptor is closed (see FinAction). onTimer arms the FIN when the time is up, and an
+      // armed FIN is never deferred again.
+      if (!s.graceUp) {
+        s.graceUp = true;
+        s.dropUp = true;  // never forwarded from here on: a hole in the stream the client sees is worse than a short one
+        s.graceStartMs = now;
+      }
+    } else {
+      s.graceUp = false;
+      s.pendShutUp = true;
+    }
+  }
   if (!s.upRdOpen && u2cEmpty && !s.clientWrShut) s.pendShutClient = true;
   if (!s.clientRdOpen && !s.upRdOpen && c2uEmpty && u2cEmpty) {
     closeSlot(s, CloseReason::Done);
@@ -184,6 +198,10 @@ void slotInit(Slot& s, int clientFd, uint32_t now) {
   s.pendShutClient = false;
   s.upWrShut = false;
   s.clientWrShut = false;
+  s.finGraceMs = 0;
+  s.graceUp = false;
+  s.dropUp = false;
+  s.graceStartMs = 0;
   s.c2uOff = s.c2uLen = 0;
   s.u2cOff = s.u2cLen = 0;
   s.req = fry::Socks5ConnectRequest();
@@ -272,9 +290,13 @@ void onRecv(Slot& s, Side from, long ret, int err, uint32_t now) {
           touch(s, now);
         }
       } else if (s.phase == Phase::Relay) {
-        if (n > kBufSize - s.u2cLen) n = kBufSize - s.u2cLen;
-        s.u2cLen = static_cast<uint16_t>(s.u2cLen + n);
-        touch(s, now);
+        if (s.dropUp) {
+          touch(s, now);  // the client has finished: what the upstream still says is read and dropped
+        } else {
+          if (n > kBufSize - s.u2cLen) n = kBufSize - s.u2cLen;
+          s.u2cLen = static_cast<uint16_t>(s.u2cLen + n);
+          touch(s, now);
+        }
       }
       break;
     }
@@ -366,6 +388,9 @@ void onTimer(Slot& s, const Timing& t, uint32_t now) {
         closeSlot(s, CloseReason::Idle);
       } else if (s.halfClosing && elapsed(now, s.halfCloseStartMs) >= t.halfCloseMs) {
         closeSlot(s, CloseReason::HalfCloseTimeout);
+      } else if (s.graceUp && elapsed(now, s.graceStartMs) >= s.finGraceMs) {
+        s.graceUp = false;  // the upstream did not finish: the FIN toward it becomes the close
+        s.pendShutUp = true;
       }
       break;
     case Phase::Flush:
@@ -390,6 +415,10 @@ uint32_t slotRemainingMs(const Slot& s, const Timing& t, uint32_t now) {
       if (s.halfClosing) {
         const uint32_t h = remaining(t.halfCloseMs, elapsed(now, s.halfCloseStartMs));
         if (h < r) r = h;
+      }
+      if (s.graceUp) {
+        const uint32_t g = remaining(s.finGraceMs, elapsed(now, s.graceStartMs));
+        if (g < r) r = g;
       }
       return r;
     }
