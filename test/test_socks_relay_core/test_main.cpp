@@ -666,6 +666,106 @@ void test_force_close_records_the_reason_once() {
   TEST_ASSERT_EQUAL((int)CloseReason::Evicted, (int)s.reason);
 }
 
+
+// ---- review follow-up (V-max-5): eviction by activity, inactivity-based half-close, one-shot FIN ---
+
+void test_handshake_bytes_refresh_the_activity_clock() {
+  Slot s;
+  slotInit(s, 50, 100);
+  TEST_ASSERT_EQUAL_UINT32(100, s.lastActivityMs);
+  const uint8_t one[1] = {0x05};
+  feed(s, Side::Client, one, 1, 4000);  // partial greeting: still Greeting, but not silent
+  TEST_ASSERT_EQUAL((int)Phase::Greeting, (int)s.phase);
+  TEST_ASSERT_EQUAL_UINT32(4000, s.lastActivityMs);
+}
+
+void test_pool_evicts_by_idle_time_not_by_accept_age() {
+  // `a` was accepted first but sent a byte 500 ms ago (its greeting was queued while the loop was
+  // blocked); `b` was accepted later and has been silent for 2000 ms. `b` is the stalled one.
+  Slot a, b;
+  slotInit(a, 50, 0);
+  const uint8_t one[1] = {0x05};
+  feed(a, Side::Client, one, 1, 9500);
+  slotInit(b, 51, 8000);
+  Slot* pool[kMaxSlots] = {&a, &b, nullptr, nullptr};
+  TEST_ASSERT_EQUAL(1, poolEvictIndex(pool, kMaxSlots, 10000, 1000));
+  pool[1] = nullptr;
+  TEST_ASSERT_EQUAL(-1, poolEvictIndex(pool, kMaxSlots, 10000, 1000));  // `a` is active: keep it
+  TEST_ASSERT_EQUAL(0, poolEvictIndex(pool, kMaxSlots, 10600, 1000));   // quiet for 1100 ms now
+}
+
+void test_half_close_deadline_is_inactivity_based() {
+  // A response that keeps flowing after the client's FIN must not be cut at halfCloseMs from the
+  // FIN: the deadline counts from the last byte that moved.
+  Slot s;
+  toRelay(s, 50, 51, 0);
+  onRecv(s, Side::Client, 0, 0, 1000);  // client FIN
+  const uint8_t d[2] = {1, 2};
+  uint8_t out[8];
+  feed(s, Side::Up, d, 2, 5900);  // upstream still talking 4900 ms after the FIN
+  drain(s, Side::Client, out, sizeof(out), 5900);
+  onTimer(s, kT, 6000);  // 5000 ms after the FIN, only 100 ms after the last byte
+  TEST_ASSERT_EQUAL((int)Phase::Relay, (int)s.phase);
+  feed(s, Side::Up, d, 2, 10800);
+  drain(s, Side::Client, out, sizeof(out), 10800);
+  onTimer(s, kT, 15799);
+  TEST_ASSERT_EQUAL((int)Phase::Relay, (int)s.phase);
+  TEST_ASSERT_EQUAL_UINT32(1, slotRemainingMs(s, kT, 15799));
+  onTimer(s, kT, 15800);
+  TEST_ASSERT_TRUE(slotClosed(s));
+  TEST_ASSERT_EQUAL((int)CloseReason::HalfCloseTimeout, (int)s.reason);
+}
+
+void test_half_close_deadline_also_follows_send_progress() {
+  // The client FINs with a request still queued for a slow upstream that accepts a byte at a time.
+  Slot s;
+  toRelay(s, 50, 51, 0);
+  const uint8_t req[3] = {'a', 'b', 'c'};
+  feed(s, Side::Client, req, 3, 10);
+  onRecv(s, Side::Client, 0, 0, 20);  // FIN with the request unsent
+  onSend(s, Side::Up, 1, 0, 4000);
+  onTimer(s, kT, 5020);  // would be 5000 ms after the FIN
+  TEST_ASSERT_EQUAL((int)Phase::Relay, (int)s.phase);
+  onSend(s, Side::Up, 1, 0, 8000);
+  onTimer(s, kT, 12999);
+  TEST_ASSERT_EQUAL((int)Phase::Relay, (int)s.phase);
+  onTimer(s, kT, 13000);  // 5000 ms after the last byte moved
+  TEST_ASSERT_TRUE(slotClosed(s));
+}
+
+void test_shutdown_toward_upstream_is_one_shot_across_later_events() {
+  // Every recv/send result re-runs the relay bookkeeping; none of them may re-arm a FIN that
+  // the shim has already forwarded.
+  Slot s;
+  toRelay(s, 50, 51, 0);
+  onRecv(s, Side::Client, 0, 0, 10);
+  TEST_ASSERT_TRUE(takeShutdown(s, Side::Up));
+  const uint8_t d[2] = {1, 2};
+  uint8_t out[8];
+  feed(s, Side::Up, d, 2, 11);
+  onRecv(s, Side::Client, -1, EAGAIN, 12);
+  drain(s, Side::Client, out, sizeof(out), 13);
+  onRecv(s, Side::Up, -1, EINPROGRESS, 14);
+  TEST_ASSERT_FALSE(takeShutdown(s, Side::Up));
+  TEST_ASSERT_FALSE(takeShutdown(s, Side::Client));  // the upstream has not closed
+  TEST_ASSERT_EQUAL((int)Phase::Relay, (int)s.phase);
+}
+
+void test_shutdown_toward_client_is_one_shot_too() {
+  Slot s;
+  toRelay(s, 50, 51, 0);
+  onRecv(s, Side::Up, 0, 0, 10);  // upstream FIN, nothing left to deliver
+  TEST_ASSERT_TRUE(takeShutdown(s, Side::Client));
+  const uint8_t d[2] = {1, 2};
+  uint8_t out[8];
+  feed(s, Side::Client, d, 2, 11);
+  drain(s, Side::Up, out, sizeof(out), 12);
+  onRecv(s, Side::Up, 0, ECONNRESET, 13);  // a second EOF report with a stale errno
+  onSend(s, Side::Up, -1, EAGAIN, 14);
+  TEST_ASSERT_FALSE(takeShutdown(s, Side::Client));
+  TEST_ASSERT_FALSE(takeShutdown(s, Side::Up));
+}
+
 }  // namespace
 
 void setUp() {}
@@ -717,5 +817,11 @@ int main(int, char**) {
   RUN_TEST(test_reset_in_relay_closes_immediately);
   RUN_TEST(test_transient_errno_in_relay_keeps_the_connection);
   RUN_TEST(test_force_close_records_the_reason_once);
+  RUN_TEST(test_handshake_bytes_refresh_the_activity_clock);
+  RUN_TEST(test_pool_evicts_by_idle_time_not_by_accept_age);
+  RUN_TEST(test_half_close_deadline_is_inactivity_based);
+  RUN_TEST(test_half_close_deadline_also_follows_send_progress);
+  RUN_TEST(test_shutdown_toward_upstream_is_one_shot_across_later_events);
+  RUN_TEST(test_shutdown_toward_client_is_one_shot_too);
   return UNITY_END();
 }

@@ -37,7 +37,7 @@ struct Timing {
   uint32_t connectMs = 3000;    // upstream connect budget (WiFiClient's default was 3000 too)
   uint32_t flushMs = 2000;      // time to push a final reply to a client before closing
   uint32_t idleMs = 30000;      // relaying: no byte moved in either direction
-  uint32_t halfCloseMs = 5000;  // relaying: one side hit EOF, the other must finish within this
+  uint32_t halfCloseMs = 5000;  // relaying: one side hit EOF; no byte may stay idle longer than this
 };
 
 enum class Phase : uint8_t {
@@ -112,6 +112,8 @@ struct Slot {
   bool upRdOpen = true;      // false once the upstream sent FIN
   bool pendShutUp = false;   // shim should shutdown(upFd, SHUT_WR)
   bool pendShutClient = false;
+  bool upWrShut = false;      // the FIN toward the upstream has been handed to the shim (one-shot)
+  bool clientWrShut = false;  // likewise toward the client
   uint16_t c2uOff = 0, c2uLen = 0;  // client -> upstream pending bytes [off, len)
   uint16_t u2cOff = 0, u2cLen = 0;  // upstream -> client pending bytes (replies included)
   fry::Socks5ConnectRequest req;
@@ -151,8 +153,10 @@ void slotForceClose(Slot& s, CloseReason why);  // eviction / fd guard / shim-si
 
 // ---- slot pool scheduling (slots[i] == nullptr means free) --------------------------------
 int poolFreeIndex(Slot* const* slots, int n);
-// Oldest handshake-stage (Greeting/Request) slot at least minAgeMs old, else -1. Relaying slots
-// are never evicted.
+// Handshake-stage (Greeting/Request) slot that has been idle the longest and for at least
+// minAgeMs, else -1. Idle time runs from accept or from the last byte received, so a client whose
+// bytes are queued behind a blocked loop iteration is not mistaken for a stalled one. Relaying
+// slots are never evicted.
 int poolEvictIndex(Slot* const* slots, int n, uint32_t now, uint32_t minAgeMs);
 // select() timeout: the nearest slot deadline, capped at maxMs. With no live slot this is maxMs:
 // the loop blocks on the listening fd instead of polling.

@@ -92,13 +92,21 @@ void advance(Slot& s, uint32_t now) {
   }
 }
 
-// Forward a FIN once the opposite buffer has drained, and finish when both sides are done.
+// A byte moved in the Relay phase. Besides the idle clock, a half-closed session's cutoff follows
+// it: halfCloseMs bounds the time without progress, not the total time after the first FIN.
+void touch(Slot& s, uint32_t now) {
+  s.lastActivityMs = now;
+  if (s.halfClosing) s.halfCloseStartMs = now;
+}
+
+// Forward each FIN once (the flags are one-shot: every later recv/send result re-runs this), once
+// the opposite buffer has drained, and finish when both sides are done.
 void relayUpdate(Slot& s, uint32_t now) {
   if (s.phase != Phase::Relay) return;
   const bool c2uEmpty = s.c2uOff == s.c2uLen;
   const bool u2cEmpty = s.u2cOff == s.u2cLen;
-  if (!s.clientRdOpen && c2uEmpty) s.pendShutUp = true;
-  if (!s.upRdOpen && u2cEmpty) s.pendShutClient = true;
+  if (!s.clientRdOpen && c2uEmpty && !s.upWrShut) s.pendShutUp = true;
+  if (!s.upRdOpen && u2cEmpty && !s.clientWrShut) s.pendShutClient = true;
   if (!s.clientRdOpen && !s.upRdOpen && c2uEmpty && u2cEmpty) {
     closeSlot(s, CloseReason::Done);
     return;
@@ -174,6 +182,8 @@ void slotInit(Slot& s, int clientFd, uint32_t now) {
   s.upRdOpen = true;
   s.pendShutUp = false;
   s.pendShutClient = false;
+  s.upWrShut = false;
+  s.clientWrShut = false;
   s.c2uOff = s.c2uLen = 0;
   s.u2cOff = s.u2cLen = 0;
   s.req = fry::Socks5ConnectRequest();
@@ -254,16 +264,17 @@ void onRecv(Slot& s, Side from, long ret, int err, uint32_t now) {
         if (isHandshake(s)) {
           if (n > kBufSize - s.c2uLen) n = kBufSize - s.c2uLen;
           s.c2uLen = static_cast<uint16_t>(s.c2uLen + n);
+          s.lastActivityMs = now;  // not silent: poolEvictIndex ages a slot by idle time
           advance(s, now);
         } else if (s.phase == Phase::Relay) {
           if (n > kBufSize - s.c2uLen) n = kBufSize - s.c2uLen;
           s.c2uLen = static_cast<uint16_t>(s.c2uLen + n);
-          s.lastActivityMs = now;
+          touch(s, now);
         }
       } else if (s.phase == Phase::Relay) {
         if (n > kBufSize - s.u2cLen) n = kBufSize - s.u2cLen;
         s.u2cLen = static_cast<uint16_t>(s.u2cLen + n);
-        s.lastActivityMs = now;
+        touch(s, now);
       }
       break;
     }
@@ -272,7 +283,7 @@ void onRecv(Slot& s, Side from, long ret, int err, uint32_t now) {
         closeSlot(s, CloseReason::HandshakeEof);
       } else if (s.phase == Phase::Relay) {
         (from == Side::Client ? s.clientRdOpen : s.upRdOpen) = false;
-        s.lastActivityMs = now;
+        touch(s, now);
       }
       break;
     case IoResult::WouldBlock:
@@ -300,7 +311,7 @@ void onSend(Slot& s, Side to, long ret, int err, uint32_t now) {
         if (s.u2cOff == s.u2cLen) s.u2cOff = s.u2cLen = 0;
         if (s.phase == Phase::Flush && s.u2cLen == 0) closeSlot(s, s.flushReason);
       }
-      if (s.phase == Phase::Relay) s.lastActivityMs = now;
+      if (s.phase == Phase::Relay) touch(s, now);
       break;
     }
     case IoResult::WouldBlock:
@@ -391,9 +402,11 @@ uint32_t slotRemainingMs(const Slot& s, const Timing& t, uint32_t now) {
 
 bool takeShutdown(Slot& s, Side side) {
   bool& pend = side == Side::Up ? s.pendShutUp : s.pendShutClient;
-  const bool was = pend;
+  bool& done = side == Side::Up ? s.upWrShut : s.clientWrShut;
+  if (!pend) return false;
   pend = false;
-  return was;
+  done = true;  // relayUpdate never re-arms a FIN that has been handed out
+  return true;
 }
 
 void slotForceClose(Slot& s, CloseReason why) { closeSlot(s, why); }
@@ -411,7 +424,7 @@ int poolEvictIndex(Slot* const* slots, int n, uint32_t now, uint32_t minAgeMs) {
   for (int i = 0; i < n; i++) {
     const Slot* s = slots[i];
     if (!s || !isHandshake(*s)) continue;
-    const uint32_t age = elapsed(now, s->acceptedMs);
+    const uint32_t age = elapsed(now, s->lastActivityMs);  // idle time, not time since accept
     if (age >= minAgeMs && (best < 0 || age > bestAge)) {
       best = i;
       bestAge = age;
