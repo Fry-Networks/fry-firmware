@@ -667,7 +667,7 @@ void test_force_close_records_the_reason_once() {
 }
 
 
-// ---- review follow-up (V-max-5): eviction by activity, inactivity-based half-close, one-shot FIN ---
+// ---- review follow-up: eviction by activity, inactivity-based half-close, one-shot FIN ---
 
 void test_handshake_bytes_refresh_the_activity_clock() {
   Slot s;
