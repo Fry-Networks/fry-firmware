@@ -52,14 +52,16 @@ size_t drain(Slot& s, Side to, uint32_t now) {
   return len;
 }
 
-// A relaying slot, with the grace time the shim would copy from Timing.
-void toRelay(Slot& s, uint32_t graceMs) {
-  slotInit(s, 50, 0);
-  feed(s, Side::Client, kGreet, sizeof(kGreet), 0);
-  feed(s, Side::Client, kConnV4, sizeof(kConnV4), 0);
-  onConnectStarted(s, 51, 0);
-  onConnectResult(s, true, 0);
-  drain(s, Side::Client, 0);
+// A relaying slot, with the grace time the shim would copy from Timing. `base` is the millisecond clock
+// at accept time; the board's millis() wraps after 49.7 days, so a base just below 2^32 puts the wrap
+// inside the session.
+void toRelay(Slot& s, uint32_t graceMs, uint32_t base = 0) {
+  slotInit(s, 50, base);
+  feed(s, Side::Client, kGreet, sizeof(kGreet), base);
+  feed(s, Side::Client, kConnV4, sizeof(kConnV4), base);
+  onConnectStarted(s, 51, base);
+  onConnectResult(s, true, base);
+  drain(s, Side::Client, base);
   TEST_ASSERT_EQUAL((int)Phase::Relay, (int)s.phase);
   s.finGraceMs = graceMs;
 }
@@ -210,6 +212,101 @@ void test_the_half_close_cutoff_still_applies_during_the_grace() {
   TEST_ASSERT_EQUAL((int)CloseReason::HalfCloseTimeout, (int)s.reason);
 }
 
+// ---- the grace and the wrap of the millisecond clock -------------------------------------------------
+// millis() wraps after 49.7 days. A grace that starts a few ms before the wrap has a deadline that lies
+// beyond it: `now >= start + grace` arms the close at once (the sum wrapped to a small number), and a
+// remaining time computed as `start + grace - now` is 0 before the wrap, so select() would not sleep.
+
+void test_the_grace_expires_exactly_on_time_across_the_clock_wrap() {
+  const uint32_t graceMs = 1000;
+  const uint32_t bases[] = {0u, 5000u, 0xFFFFFF00u, 0xFFFFFFFFu - 1000u, 0xFFFFFFFFu - 100u, 0xFFFFFFFFu - 10u,
+                            0xFFFFFFFFu};
+  for (size_t b = 0; b < sizeof(bases) / sizeof(bases[0]); b++) {
+    char msg[160];
+    Slot s;
+    toRelay(s, graceMs, bases[b]);
+    const uint32_t finAt = bases[b] + 100;  // may wrap
+    onRecv(s, Side::Client, 0, 0, finAt);
+    snprintf(msg, sizeof(msg), "base %08x: the grace did not start at the FIN", (unsigned)bases[b]);
+    TEST_ASSERT_TRUE_MESSAGE(s.graceUp && s.graceStartMs == finAt, msg);
+    for (uint32_t dt = 0; dt < graceMs; dt++) {
+      onTimer(s, kT, finAt + dt);
+      snprintf(msg, sizeof(msg), "base %08x: close armed %u ms after the FIN, grace is %u", (unsigned)bases[b],
+               (unsigned)dt, (unsigned)graceMs);
+      TEST_ASSERT_TRUE_MESSAGE(s.graceUp && !s.pendShutUp, msg);
+      snprintf(msg, sizeof(msg), "base %08x: %u ms after the FIN select() would wait %u ms, expected %u",
+               (unsigned)bases[b], (unsigned)dt, (unsigned)slotRemainingMs(s, kT, finAt + dt),
+               (unsigned)(graceMs - dt));
+      TEST_ASSERT_EQUAL_UINT32_MESSAGE(graceMs - dt, slotRemainingMs(s, kT, finAt + dt), msg);
+    }
+    onTimer(s, kT, finAt + graceMs);
+    snprintf(msg, sizeof(msg), "base %08x: close not armed when the grace ran out", (unsigned)bases[b]);
+    TEST_ASSERT_TRUE_MESSAGE(!s.graceUp && s.pendShutUp, msg);
+    TEST_ASSERT_EQUAL_MESSAGE((int)FinAction::Close, (int)takeFinAction(s, Side::Up), msg);
+    // a later timer run (the wake-up may be late) still finds nothing left to arm
+    onTimer(s, kT, finAt + graceMs + 7);
+    TEST_ASSERT_EQUAL_MESSAGE((int)FinAction::None, (int)takeFinAction(s, Side::Up), msg);
+  }
+}
+
+void test_the_wake_up_time_of_a_waiting_grace_is_right_before_and_after_the_wrap() {
+  Slot s;
+  toRelay(s, 1000, 0xFFFFFFF0u);
+  onRecv(s, Side::Client, 0, 0, 0xFFFFFFF0u);  // grace waits from 2^32 - 16: deadline at 984 after the wrap
+  TEST_ASSERT_EQUAL_UINT32(1000, slotRemainingMs(s, kT, 0xFFFFFFF0u));
+  TEST_ASSERT_EQUAL_UINT32(990, slotRemainingMs(s, kT, 0xFFFFFFFAu));  // still before the wrap
+  TEST_ASSERT_EQUAL_UINT32(984, slotRemainingMs(s, kT, 0u));           // 16 ms in, the clock just wrapped
+  TEST_ASSERT_EQUAL_UINT32(500, slotRemainingMs(s, kT, 484u));
+  TEST_ASSERT_EQUAL_UINT32(0, slotRemainingMs(s, kT, 984u));
+  TEST_ASSERT_EQUAL_UINT32(0, slotRemainingMs(s, kT, 3000u));
+}
+
+// ---- a slot object that is initialised again ----------------------------------------------------------
+// The glue allocates a Slot without constructing a session in it and slotInit() is the only thing that
+// sets one up; a grace left over from earlier use of the same memory must not leak into the next session.
+
+void test_slotInit_clears_what_the_grace_left_in_a_slot() {
+  Slot s;
+  toRelay(s, 1000);
+  onRecv(s, Side::Client, 0, 0, 100);
+  const uint8_t late[2] = {1, 2};
+  feed(s, Side::Up, late, sizeof(late), 200);  // dropped: dropUp is what made that so
+  TEST_ASSERT_TRUE(s.graceUp);
+  TEST_ASSERT_TRUE(s.dropUp);
+  TEST_ASSERT_EQUAL_UINT32(100, s.graceStartMs);
+  TEST_ASSERT_EQUAL_UINT32(1000, s.finGraceMs);
+
+  slotInit(s, 60, 5000);
+  TEST_ASSERT_EQUAL_UINT32_MESSAGE(0, s.finGraceMs, "the next session inherited the previous grace time");
+  TEST_ASSERT_FALSE_MESSAGE(s.graceUp, "the next session starts with a grace waiting");
+  TEST_ASSERT_FALSE_MESSAGE(s.dropUp, "the next session starts out dropping what the upstream sends");
+  TEST_ASSERT_EQUAL_UINT32_MESSAGE(0, s.graceStartMs, "grace start time not reset");
+}
+
+void test_a_reused_slot_behaves_like_a_fresh_one() {
+  Slot s;
+  toRelay(s, 1000);
+  onRecv(s, Side::Client, 0, 0, 100);
+  const uint8_t late[2] = {1, 2};
+  feed(s, Side::Up, late, sizeof(late), 200);
+  // the memory is used for the next session, whose shim sets no grace time (the bench switch)
+  slotInit(s, 50, 0);
+  feed(s, Side::Client, kGreet, sizeof(kGreet), 0);
+  feed(s, Side::Client, kConnV4, sizeof(kConnV4), 0);
+  onConnectStarted(s, 51, 0);
+  onConnectResult(s, true, 0);
+  drain(s, Side::Client, 0);
+  TEST_ASSERT_EQUAL((int)Phase::Relay, (int)s.phase);
+  const uint8_t resp[3] = {'O', 'K', '!'};
+  feed(s, Side::Up, resp, sizeof(resp), 10);
+  size_t len = 0;
+  sendSrc(s, Side::Client, len);
+  TEST_ASSERT_EQUAL_MESSAGE(3, (int)len, "the new session drops what its upstream sends");
+  onRecv(s, Side::Client, 0, 0, 20);  // the client finishes first, and no grace time is set: close at once
+  TEST_ASSERT_FALSE(s.graceUp);
+  TEST_ASSERT_EQUAL((int)FinAction::Close, (int)takeFinAction(s, Side::Up));
+}
+
 // ---- whole sessions against a model of the shim's socket handling --------------------------------
 //
 // Same idea as test_socks_relay_fin, now with the grace on: peers finish at random moments, the model
@@ -256,6 +353,18 @@ struct Tally {
   int graceful = 0;   // ended without a close() of either side
   int fallback = 0;   // the upstream was closed after the grace
   int lateClose = 0;  // closed although the upstream's FIN had been there long enough to be read
+  int armedEarly = 0;  // the timer armed the close before the grace time had passed
+  int armedLate = 0;   // the grace time had passed and the timer did not arm the close
+  int wrapEvals = 0;   // timer runs while a grace was waiting whose deadline lies beyond the clock's wrap
+};
+
+// The model's millisecond clock: step n of a session is at gClockBase + n (mod 2^32).
+uint32_t gClockBase = 0;
+uint32_t clk(int step) { return gClockBase + static_cast<uint32_t>(step); }
+
+struct ClockBase {
+  explicit ClockBase(uint32_t base) { gClockBase = base; }
+  ~ClockBase() { gClockBase = 0; }
 };
 
 void schedule(Peer& p, Rng& r, size_t total, int finAt) {
@@ -298,12 +407,12 @@ void relayRecv(Slot& s, Peer& p, Side from, int step, Rng& r, Tally& t) {
       dst[i] = p.rx.front();
       p.rx.pop_front();
     }
-    onRecv(s, from, static_cast<long>(n), 0, static_cast<uint32_t>(step));
+    onRecv(s, from, static_cast<long>(n), 0, clk(step));
   } else if (p.finDue) {
     if (p.eofSeenAt < 0) p.eofSeenAt = step;
-    onRecv(s, from, 0, ECONNRESET /* stale errno: must be ignored */, static_cast<uint32_t>(step));
+    onRecv(s, from, 0, ECONNRESET /* stale errno: must be ignored */, clk(step));
   } else {
-    onRecv(s, from, -1, EAGAIN, static_cast<uint32_t>(step));
+    onRecv(s, from, -1, EAGAIN, clk(step));
   }
 }
 
@@ -316,17 +425,17 @@ void relaySend(Slot& s, Peer& p, Side to, int step, Rng& r, Tally& t) {
     return;
   }
   if (r.below(5) == 0) {
-    onSend(s, to, -1, EAGAIN, static_cast<uint32_t>(step));
+    onSend(s, to, -1, EAGAIN, clk(step));
     return;
   }
   const size_t n = 1 + r.below(static_cast<uint32_t>(len));
   p.got.insert(p.got.end(), src, src + n);
-  onSend(s, to, static_cast<long>(n), 0, static_cast<uint32_t>(step));
+  onSend(s, to, static_cast<long>(n), 0, clk(step));
 }
 
 void relayFin(Slot& s, Peer& p, Side side, int step, Tally& t, bool& anyClose) {
   int& fd = side == Side::Client ? s.clientFd : s.upFd;
-  const uint32_t now = static_cast<uint32_t>(step);
+  const uint32_t now = clk(step);
   switch (takeFinAction(s, side)) {
     case FinAction::None:
       break;
@@ -358,8 +467,10 @@ constexpr uint32_t kModelGrace = 40;
 
 // finAfterTimer: carry out the armed FINs right after onTimer (what the glue does) as well as after the
 // socket pass; without it a FIN armed by the timer waits until the end of the step. The core must not
-// let a hole into the stream either way.
-void runSession(uint32_t seed, bool finAfterTimer, Tally& t) {
+// let a hole into the stream either way. wrapClock: the session's clock starts 0..149 ms below 2^32, so it
+// wraps while the grace is armed (the timer must neither arm the close early nor miss it).
+void runSession(uint32_t seed, bool finAfterTimer, bool wrapClock, Tally& t) {
+  const ClockBase clock(wrapClock ? 0xFFFFFFFFu - seed % 150u : 0u);
   Rng r(seed);
   Peer cl, up;
   cl.tag = 1;
@@ -370,14 +481,22 @@ void runSession(uint32_t seed, bool finAfterTimer, Tally& t) {
   schedule(up, r, r.below(3000), upFin);
 
   Slot s;
-  toRelay(s, kModelGrace);
+  toRelay(s, kModelGrace, gClockBase);
   Timing tm;
   tm.finGraceMs = kModelGrace;
   bool ended = false, anyClose = false;
   for (int step = 1; step <= 6000 && !ended; step++) {
     applyEvents(cl, step);
     applyEvents(up, step);
-    onTimer(s, tm, static_cast<uint32_t>(step));
+    const bool graceWas = s.graceUp;
+    const uint32_t graceStart = s.graceStartMs;
+    onTimer(s, tm, clk(step));
+    if (graceWas && !slotClosed(s)) {
+      const uint32_t waited = clk(step) - graceStart;
+      if (!s.graceUp && waited < kModelGrace) t.armedEarly++;
+      if (s.graceUp && waited >= kModelGrace) t.armedLate++;
+      if (graceStart + kModelGrace < graceStart) t.wrapEvals++;
+    }
     if (finAfterTimer) {
       relayFin(s, up, Side::Up, step, t, anyClose);
       relayFin(s, cl, Side::Client, step, t, anyClose);
@@ -407,9 +526,9 @@ void runSession(uint32_t seed, bool finAfterTimer, Tally& t) {
   if (clientFirst && up.closed) t.fallback++;
 }
 
-Tally runMany(int n, bool finAfterTimer) {
+Tally runMany(int n, bool finAfterTimer, bool wrapClock = false) {
   Tally t;
-  for (int i = 0; i < n; i++) runSession(5000u + static_cast<uint32_t>(i), finAfterTimer, t);
+  for (int i = 0; i < n; i++) runSession(5000u + static_cast<uint32_t>(i), finAfterTimer, wrapClock, t);
   return t;
 }
 
@@ -420,6 +539,8 @@ void checkModel(const Tally& t) {
   TEST_ASSERT_EQUAL_MESSAGE(0, t.unfinished, "a session never ended");
   TEST_ASSERT_EQUAL_MESSAGE(0, t.badStream, "data lost, duplicated or reordered");
   TEST_ASSERT_EQUAL_MESSAGE(0, t.lateClose, "closed although the upstream's FIN was already there");
+  TEST_ASSERT_EQUAL_MESSAGE(0, t.armedEarly, "the timer armed the close before the grace time had passed");
+  TEST_ASSERT_EQUAL_MESSAGE(0, t.armedLate, "the grace time had passed and the timer did not arm the close");
 }
 
 void test_sessions_with_a_grace_never_half_close_an_open_peer() { checkModel(runMany(3000, true)); }
@@ -434,10 +555,26 @@ void test_the_model_exercises_both_the_graceful_path_and_the_fallback() {
   TEST_ASSERT_TRUE_MESSAGE(t.fallback > 300, "the fallback close after the grace never ran");
 }
 
+// The same sessions with the clock wrapping inside them. The grace is measured from the FIN, so only an
+// unsigned difference gives the right answer on both sides of the wrap.
+void test_sessions_with_a_grace_survive_the_clock_wrapping() { checkModel(runMany(3000, true, true)); }
+
+void test_sessions_with_a_grace_survive_the_clock_wrapping_when_the_timers_fin_waits() {
+  checkModel(runMany(3000, false, true));
+}
+
+void test_the_wrapping_model_has_graces_whose_deadline_lies_beyond_the_wrap() {
+  const Tally t = runMany(3000, true, true);
+  TEST_ASSERT_TRUE_MESSAGE(t.wrapEvals > 1000, "too few timer runs with a deadline beyond the wrap");
+  TEST_ASSERT_TRUE_MESSAGE(t.graceful > 300, "no wrapping session ended gracefully");
+  TEST_ASSERT_TRUE_MESSAGE(t.fallback > 300, "the fallback never ran in a wrapping session");
+}
+
 // ---- the glue ------------------------------------------------------------------------------------
 // src/esp32/vpn_wireguard.cpp needs lwIP and the Arduino core, so the native tests cannot run it; what
 // the grace needs from it is read off the source: a FIN armed by the timer is carried out right after
-// the timers ran (no socket event wakes the slot then), and each new slot gets its grace time.
+// the timers ran (no socket event wakes the slot then), and each new slot gets its grace time. The pins
+// work on the source with comments and string contents blanked out.
 
 bool readFile(const std::string& path, std::string& out) {
   std::ifstream f(path.c_str(), std::ios::in | std::ios::binary);
@@ -464,30 +601,197 @@ bool loadRelaySource(std::string& out) {
   return false;
 }
 
+// Blanks comments and the contents of string and character literals; every newline survives, so offsets
+// and line numbers still match the source. (Copy of blank() in test/test_relay_source_pin/test_main.cpp.)
+// The pins below look at what the compiler sees: a call that was commented out is not a call.
+std::string blank(const std::string& s) {
+  std::string out(s.size(), ' ');
+  enum State { Code, LineComment, BlockComment, Str, Chr } st = Code;
+  for (size_t i = 0; i < s.size(); i++) {
+    const char c = s[i];
+    const char n = i + 1 < s.size() ? s[i + 1] : '\0';
+    if (c == '\n') out[i] = '\n';
+    switch (st) {
+      case Code:
+        if (c == '/' && n == '/') {
+          st = LineComment;
+          i++;
+        } else if (c == '/' && n == '*') {
+          st = BlockComment;
+          i++;
+        } else if (c == '"') {
+          st = Str;
+          out[i] = '"';
+        } else if (c == '\'') {
+          st = Chr;
+          out[i] = '\'';
+        } else if (c != '\n') {
+          out[i] = c;
+        }
+        break;
+      case LineComment:
+        if (c == '\n') st = Code;
+        break;
+      case BlockComment:
+        if (c == '*' && n == '/') {
+          st = Code;
+          i++;
+        }
+        break;
+      case Str:
+      case Chr: {
+        const char quote = st == Str ? '"' : '\'';
+        if (c == '\\' && i + 1 < s.size()) {
+          if (n == '\n') out[i + 1] = '\n';
+          i++;
+        } else if (c == quote) {
+          st = Code;
+          out[i] = quote;
+        }
+        break;
+      }
+    }
+  }
+  return out;
+}
+
+// Both return "" when the glue does what the grace needs, otherwise what is wrong with it.
+
+// The relay loop: after the timers ran, the FINs they armed are carried out, before closed slots are released.
+std::string checkTimerFins(const std::string& raw) {
+  const std::string src = blank(raw);
+  const size_t t = src.find("onTimer(*slots[i], timing, now);");
+  if (t == std::string::npos) return "the relay loop no longer runs onTimer for each slot";
+  // the release loop that follows must come after the FINs, or a closed slot would be released first
+  const size_t rel = src.find("releaseSlot(slots[i], st);", t);
+  if (rel == std::string::npos) return "no slot release after the timers";
+  const std::string between = src.substr(t, rel - t);
+  if (between.find("forwardFin(*slots[i], Side::Up") == std::string::npos)
+    return "no live forwardFin(Up) between onTimer and the slot release";
+  if (between.find("forwardFin(*slots[i], Side::Client") == std::string::npos)
+    return "no live forwardFin(Client) between onTimer and the slot release";
+  if (between.find('#') != std::string::npos)
+    return "a preprocessor conditional between onTimer and the slot release: the FINs may not be compiled";
+  return "";
+}
+
+// The accept path: slotInit() zeroes the grace time, so it has to be set after it, to Timing's value, and
+// to 0 only in the FRY_RELAY_HALFCLOSE bench build.
+std::string checkSlotGrace(const std::string& raw) {
+  const std::string src = blank(raw);
+  const size_t init = src.find("slotInit(*s, fd, now);");
+  if (init == std::string::npos) return "the accepted slot is not set up with slotInit(*s, fd, now)";
+  const size_t g = src.find("->finGraceMs = Timing().finGraceMs;");
+  if (g == std::string::npos) return "the accepted slot does not get Timing::finGraceMs";
+  if (g < init) return "the grace time is set before slotInit(), which zeroes it";
+  const size_t hc = src.find("#if FRY_RELAY_HALFCLOSE", init);
+  if (hc == std::string::npos) return "the grace is not tied to FRY_RELAY_HALFCLOSE";
+  const size_t els = src.find("#else", hc);
+  const size_t end = els == std::string::npos ? els : src.find("#endif", els);
+  if (end == std::string::npos) return "the FRY_RELAY_HALFCLOSE switch has no #else branch";
+  const std::string legacy = src.substr(hc, els - hc);   // compiled when FRY_RELAY_HALFCLOSE is 1
+  const std::string normal = src.substr(els, end - els);  // the normal build
+  if (legacy.find("->finGraceMs = 0;") == std::string::npos || legacy.find("Timing()") != std::string::npos)
+    return "the bench switch (FRY_RELAY_HALFCLOSE) must switch the grace off";
+  if (normal.find("->finGraceMs = Timing().finGraceMs;") == std::string::npos ||
+      normal.find("= 0;") != std::string::npos)
+    return "the normal build must set the grace to Timing::finGraceMs";
+  if (g < hc || g > end) return "the grace time is set outside the FRY_RELAY_HALFCLOSE switch";
+  return "";
+}
+
 void test_the_glue_carries_out_the_fins_the_timer_armed() {
   std::string src;
   TEST_ASSERT_TRUE_MESSAGE(loadRelaySource(src), "cannot read src/esp32/vpn_wireguard.cpp");
-  const size_t t = src.find("onTimer(*slots[i], timing, now);");
-  TEST_ASSERT_TRUE_MESSAGE(t != std::string::npos, "the relay loop no longer runs onTimer for each slot");
-  // the release loop that follows must come after the FINs, or a closed slot would be released first
-  const size_t rel = src.find("releaseSlot(slots[i], st);", t);
-  TEST_ASSERT_TRUE_MESSAGE(rel != std::string::npos, "no slot release after the timers");
-  const std::string between = src.substr(t, rel - t);
-  TEST_ASSERT_TRUE_MESSAGE(between.find("forwardFin(*slots[i], Side::Up") != std::string::npos,
-                           "no forwardFin(Up) between onTimer and the slot release");
-  TEST_ASSERT_TRUE_MESSAGE(between.find("forwardFin(*slots[i], Side::Client") != std::string::npos,
-                           "no forwardFin(Client) between onTimer and the slot release");
+  const std::string why = checkTimerFins(src);
+  TEST_ASSERT_TRUE_MESSAGE(why.empty(), why.c_str());
 }
 
 void test_the_glue_gives_each_slot_the_grace_time() {
   std::string src;
   TEST_ASSERT_TRUE_MESSAGE(loadRelaySource(src), "cannot read src/esp32/vpn_wireguard.cpp");
-  TEST_ASSERT_TRUE_MESSAGE(src.find("->finGraceMs = Timing().finGraceMs;") != std::string::npos,
-                           "the accepted slot does not get Timing::finGraceMs");
-  // the bench switch that restores the old behaviour must also switch the grace off
-  const size_t g = src.find("->finGraceMs = Timing().finGraceMs;");
-  const size_t hc = src.rfind("FRY_RELAY_HALFCLOSE", g);
-  TEST_ASSERT_TRUE_MESSAGE(hc != std::string::npos && g - hc < 400, "the grace is not tied to FRY_RELAY_HALFCLOSE");
+  const std::string why = checkSlotGrace(src);
+  TEST_ASSERT_TRUE_MESSAGE(why.empty(), why.c_str());
+}
+
+// The checks above must not pass because they see nothing: a model of the two places in the glue, which they
+// accept, and the wrong variants of it, which they must reject. (Mutating the real file is the same
+// experiment, run by hand when the checks change.)
+
+const char kGlueLoop[] = R"(
+    for (int i = 0; i < FRY_RELAY_SLOTS; i++) {
+      if (!slots[i]) continue;
+      onTimer(*slots[i], timing, now);
+      // A FIN whose grace time ran out is armed by the timer, not by a socket event.
+      forwardFin(*slots[i], Side::Up, now, st);
+      forwardFin(*slots[i], Side::Client, now, st);
+    }
+    for (int i = 0; i < FRY_RELAY_SLOTS; i++) {
+      if (slots[i] && slotClosed(*slots[i])) releaseSlot(slots[i], st);
+    }
+)";
+
+const char kGlueAccept[] = R"(
+    slotInit(*s, fd, now);
+#if FRY_RELAY_HALFCLOSE
+    s->finGraceMs = 0;  // the bench switch restores the old behaviour as a whole
+#else
+    s->finGraceMs = Timing().finGraceMs;
+#endif
+    slots[idx] = s;
+)";
+
+std::string replaceOnce(std::string text, const std::string& from, const std::string& to) {
+  const size_t at = text.find(from);
+  TEST_ASSERT_TRUE_MESSAGE(at != std::string::npos, "the decoy text changed: nothing to replace");
+  text.replace(at, from.size(), to);
+  return text;
+}
+
+void test_the_glue_checks_accept_the_model_and_reject_each_wrong_variant() {
+  const std::string loop = kGlueLoop;
+  const std::string accept = kGlueAccept;
+  const std::string fin = "      forwardFin(*slots[i], Side::Client, now, st);\n";
+  const std::string finUp = "      forwardFin(*slots[i], Side::Up, now, st);\n";
+  const std::string both = finUp + fin;
+  const std::string tm = "      onTimer(*slots[i], timing, now);\n";
+
+  TEST_ASSERT_EQUAL_STRING_MESSAGE("", checkTimerFins(loop).c_str(), "the model of the loop is rejected");
+  TEST_ASSERT_EQUAL_STRING_MESSAGE("", checkSlotGrace(accept).c_str(), "the model of the accept path is rejected");
+
+  const std::string badLoops[] = {
+      replaceOnce(loop, fin, "      // forwardFin(*slots[i], Side::Client, now, st);\n"),  // commented out
+      replaceOnce(loop, finUp, "      /* forwardFin(*slots[i], Side::Up, now, st); */\n"),
+      replaceOnce(loop, both, ""),                                                              // removed
+      replaceOnce(replaceOnce(loop, both, ""), tm, both + tm),                                  // before the timer
+      replaceOnce(loop, fin, "#if 0\n" + fin + "#endif\n"),                                     // compiled out
+      replaceOnce(loop, "forwardFin(*slots[i], Side::Up", "forwardFin(*slots[i], Side::Client"),  // wrong side
+      replaceOnce(loop, "releaseSlot(slots[i], st);", "{}"),                                    // no release
+      replaceOnce(loop, "onTimer(*slots[i], timing, now);", "onTimer(*slots[i], timing, 0);"),
+  };
+  for (size_t i = 0; i < sizeof(badLoops) / sizeof(badLoops[0]); i++) {
+    char msg[64];
+    snprintf(msg, sizeof(msg), "wrong loop variant %u was accepted", (unsigned)i);
+    TEST_ASSERT_FALSE_MESSAGE(checkTimerFins(badLoops[i]).empty(), msg);
+  }
+
+  const std::string init = "    slotInit(*s, fd, now);\n";
+  const std::string sw = accept.substr(accept.find("#if FRY_RELAY_HALFCLOSE"),
+                                       accept.find("#endif") + 7 - accept.find("#if FRY_RELAY_HALFCLOSE"));
+  const std::string badAccepts[] = {
+      replaceOnce(replaceOnce(accept, init, ""), sw, sw + init),  // slotInit() after the grace time: it zeroes it
+      replaceOnce(accept, "s->finGraceMs = 0;  // the bench switch restores the old behaviour as a whole\n#else\n    s->finGraceMs = Timing().finGraceMs;",
+                  "s->finGraceMs = Timing().finGraceMs;\n#else\n    s->finGraceMs = 0;"),  // branches swapped
+      replaceOnce(accept, "    s->finGraceMs = Timing().finGraceMs;\n", "    // s->finGraceMs = Timing().finGraceMs;\n"),
+      replaceOnce(accept, "    s->finGraceMs = Timing().finGraceMs;\n", "    s->finGraceMs = 100000;\n"),
+      replaceOnce(accept, sw, "    s->finGraceMs = Timing().finGraceMs;\n"),  // no switch at all
+      replaceOnce(accept, init, "    // slotInit(*s, fd, now);\n"),
+  };
+  for (size_t i = 0; i < sizeof(badAccepts) / sizeof(badAccepts[0]); i++) {
+    char msg[64];
+    snprintf(msg, sizeof(msg), "wrong accept variant %u was accepted", (unsigned)i);
+    TEST_ASSERT_FALSE_MESSAGE(checkSlotGrace(badAccepts[i]).empty(), msg);
+  }
 }
 
 }  // namespace
@@ -508,10 +812,18 @@ int main(int, char**) {
   RUN_TEST(test_an_upstream_fin_that_comes_first_is_still_a_close_toward_the_client);
   RUN_TEST(test_a_client_fin_after_the_upstream_fin_does_not_wait);
   RUN_TEST(test_the_half_close_cutoff_still_applies_during_the_grace);
+  RUN_TEST(test_the_grace_expires_exactly_on_time_across_the_clock_wrap);
+  RUN_TEST(test_the_wake_up_time_of_a_waiting_grace_is_right_before_and_after_the_wrap);
+  RUN_TEST(test_slotInit_clears_what_the_grace_left_in_a_slot);
+  RUN_TEST(test_a_reused_slot_behaves_like_a_fresh_one);
   RUN_TEST(test_sessions_with_a_grace_never_half_close_an_open_peer);
   RUN_TEST(test_sessions_with_a_grace_are_safe_when_the_timers_fin_waits_for_the_socket_pass);
   RUN_TEST(test_the_model_exercises_both_the_graceful_path_and_the_fallback);
+  RUN_TEST(test_sessions_with_a_grace_survive_the_clock_wrapping);
+  RUN_TEST(test_sessions_with_a_grace_survive_the_clock_wrapping_when_the_timers_fin_waits);
+  RUN_TEST(test_the_wrapping_model_has_graces_whose_deadline_lies_beyond_the_wrap);
   RUN_TEST(test_the_glue_carries_out_the_fins_the_timer_armed);
   RUN_TEST(test_the_glue_gives_each_slot_the_grace_time);
+  RUN_TEST(test_the_glue_checks_accept_the_model_and_reject_each_wrong_variant);
   return UNITY_END();
 }
