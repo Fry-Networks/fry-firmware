@@ -42,6 +42,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 
@@ -322,6 +323,47 @@ def write_ewt_manifest(envs, version, build_dir, dist, asset_base, boot_app0, ou
           % (out_path, len(builds), sum(len(b["parts"]) for b in builds)))
 
 
+# The manifest is fetched by every board into RAM: keep the allow list small.
+MAX_ROLLOUT_ALLOW = 64
+
+
+def parse_rollout(lo, hi, allow_path):
+    """The optional manifest "rollout" object (lib/fry_core/ota_rollout.h), or None when no
+    --rollout-lo/--rollout-hi was given. The manifest is public: --rollout-allow takes only the
+    16-hex SHA-256 prefixes of miner keys (one per line, blank lines ignored), never keys."""
+    if lo is None and hi is None:
+        if allow_path is not None:
+            raise SystemExit("make_manifest: --rollout-allow needs --rollout-lo and --rollout-hi")
+        return None
+    if lo is None or hi is None:
+        raise SystemExit("make_manifest: --rollout-lo and --rollout-hi must be given together")
+    if not (0 <= lo <= 99 and 0 <= hi <= 99):
+        raise SystemExit("make_manifest: --rollout-lo/--rollout-hi must be 0..99 (got %d, %d)" % (lo, hi))
+    if lo > hi:
+        raise SystemExit("make_manifest: --rollout-lo (%d) must not exceed --rollout-hi (%d)" % (lo, hi))
+    rollout = {"bucket_lo": lo, "bucket_hi": hi}
+    if allow_path is not None:
+        try:
+            with open(allow_path, encoding="utf-8") as f:
+                lines = f.read().splitlines()
+        except OSError as e:
+            raise SystemExit("make_manifest: cannot read --rollout-allow file: %s" % e)
+        prefixes = set()
+        for n, line in enumerate(lines, 1):
+            entry = line.strip()
+            if not entry:
+                continue
+            if not re.fullmatch(r"[0-9a-fA-F]{16}", entry):
+                raise SystemExit("make_manifest: --rollout-allow %s:%d is not a 16-hex SHA-256 prefix "
+                                 "(rollout allow entries are never raw keys or full digests)" % (allow_path, n))
+            prefixes.add(entry.lower())
+        if len(prefixes) > MAX_ROLLOUT_ALLOW:
+            raise SystemExit("make_manifest: --rollout-allow has %d distinct entries; the rollout allow list "
+                             "is capped at %d" % (len(prefixes), MAX_ROLLOUT_ALLOW))
+        rollout["allow"] = sorted(prefixes)
+    return rollout
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--version", required=True, help="firmware_version to embed, e.g. 0.2.0")
@@ -357,7 +399,17 @@ def main():
     ap.add_argument("--ewt-merge", default=None,
                     help="with --ewt-out: carry over this EWT manifest's builds for chip families "
                          "not built here (held chips keep their previous parts)")
+    ap.add_argument("--rollout-lo", type=int, default=None,
+                    help="staged rollout: lowest device bucket (0..99) that may take this update; "
+                         "needs --rollout-hi. Without both flags the manifest has no rollout key.")
+    ap.add_argument("--rollout-hi", type=int, default=None,
+                    help="staged rollout: highest device bucket (0..99) that may take this update")
+    ap.add_argument("--rollout-allow", default=None,
+                    help="with --rollout-lo/--rollout-hi: file of 16-hex SHA-256 key prefixes "
+                         "(one per line) that may take the update whatever their bucket")
     a = ap.parse_args()
+
+    rollout = parse_rollout(a.rollout_lo, a.rollout_hi, a.rollout_allow)
 
     if a.only and a.envs:
         raise SystemExit("make_manifest: --only and --envs are mutually exclusive")
@@ -434,6 +486,8 @@ def main():
 
     manifest = {"firmware_version": a.version, "channel": a.channel, "builds": builds,
                 "olostep_kill": False}
+    if rollout is not None:
+        manifest["rollout"] = rollout
 
     out_dir = os.path.dirname(a.out)
     if out_dir:

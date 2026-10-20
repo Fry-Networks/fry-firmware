@@ -91,13 +91,16 @@ bool otaChannelAccepted(const char* manifestChannel, const char* ownChannel);
 // True when `candidate` is exactly the version recorded as rolled back on this board.
 bool isSkippedBadVersion(const char* candidate, const char* badver);
 
-enum class OtaDecision : uint8_t { Update, NotNewer, WrongChannel, BadVersion, NoBuild };
+// NotInRollout is appended (values of the older enumerators never change).
+enum class OtaDecision : uint8_t { Update, NotNewer, WrongChannel, BadVersion, NoBuild, NotInRollout };
 
-// Channel first, then forward-only SemVer precedence, then the bad version, then a build entry for
-// this environment with both url and sha256 (a chip left out of the manifest never updates).
+// Channel first, then forward-only SemVer precedence, then the bad version, then the staged-rollout
+// gate (ota_rollout.h; `inRollout` false = a well-formed manifest rollout excludes this device),
+// then a build entry for this environment with both url and sha256 (a chip left out of the
+// manifest never updates). `inRollout` defaults to true: no gate, the 0.4.7 behaviour.
 OtaDecision decideOtaUpdate(const char* manifestChannel, const char* ownChannel, const char* latest,
                             const char* current, const char* badver, const char* url,
-                            const char* sha256);
+                            const char* sha256, bool inRollout = true);
 const char* otaDecisionName(OtaDecision d);
 
 }  // namespace fry
