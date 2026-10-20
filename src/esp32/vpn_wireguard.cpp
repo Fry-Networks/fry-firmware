@@ -7,14 +7,19 @@
 
 #include <WiFi.h>
 #include <esp_wireguard.h>
+#include <fcntl.h>
 #include <lwip/opt.h>
 #include <lwip/sockets.h>
+#include <unistd.h>
 
+#include <cerrno>
 #include <cstring>
+#include <new>
 
 #include "../core/fry_config.h"
 #include "../core/hardwareapi_client.h"
 #include "socks5_parse.h"
+#include "socks_relay_core.h"
 #include "wg_provision.h"
 #include "wg_provision_client.h"
 
@@ -50,28 +55,6 @@ volatile uint32_t s_relayedBytes = 0;
 String s_priv, s_pub, s_psk, s_addr, s_netmask, s_endpoint;
 
 #if !IP_NAPT
-// Block until either socket is readable (or closed) or maxMs elapses, instead of polling with
-// vTaskDelay. WiFiClient keeps its own read-ahead buffer, so buffered bytes short-circuit the
-// select(). Either argument may be null.
-void waitReadable(WiFiClient* a, WiFiClient* b, uint32_t maxMs) {
-  if ((a && a->available() > 0) || (b && b->available() > 0)) return;
-  fd_set rd;
-  FD_ZERO(&rd);
-  int maxFd = -1;
-  for (WiFiClient* c : {a, b}) {
-    if (c && c->fd() >= 0) {
-      FD_SET(c->fd(), &rd);
-      if (c->fd() > maxFd) maxFd = c->fd();
-    }
-  }
-  if (maxFd < 0) {
-    vTaskDelay(pdMS_TO_TICKS(5));
-    return;
-  }
-  struct timeval tv = {static_cast<time_t>(maxMs / 1000), static_cast<suseconds_t>((maxMs % 1000) * 1000)};
-  select(maxFd + 1, &rd, nullptr, nullptr, &tv);
-}
-
 // Fallback when this build's lwIP has no NAPT compiled in. This is not a build-flag choice we
 // could flip — it is structurally impossible on this framework, confirmed two independent ways
 // (v0.2.0):
@@ -85,111 +68,421 @@ void waitReadable(WiFiClient* a, WiFiClient* b, uint32_t maxMs) {
 //      this static library, so no #define or build_flag on our side can turn NAPT on; it would
 //      need a rebuilt liblwip.a, which is outside this firmware repo.
 // Since transparent IP-level NAT isn't possible, this runs a "simple in-tunnel TCP forwarder": a
-// SOCKS5 CONNECT relay (the same
-// tested parser as the ESP8266 endpoint) on its own FreeRTOS task so it can block on socket I/O
-// without stalling the main loop(). A tunnel peer that knows the device's WG address can reach
-// this relay and ask it to CONNECT out via the STA uplink — a reduced-scope substitute for full
-// transparent NAT, not a general-purpose router.
+// SOCKS5 CONNECT relay (the same tested parser as the ESP8266 endpoint) on its own FreeRTOS task,
+// so it can block on socket I/O without stalling the main loop(). A tunnel peer that knows the
+// device's WG address can reach this relay and ask it to CONNECT out via the STA uplink — a
+// reduced-scope substitute for full transparent NAT, not a general-purpose router.
+//
+// Structure: ONE task, ONE select() loop, up to FRY_RELAY_SLOTS clients at once. All protocol and
+// scheduling decisions live in lib/fry_core/socks_relay_core.* (pure C++, covered by
+// test/test_socks_relay_core); this file only performs the system calls and reports each result,
+// together with errno captured right after the call, back to that core. Raw lwIP sockets are used
+// instead of WiFiServer/WiFiClient on purpose: WiFiClient::connected()/available() decide a socket
+// is dead from an errno that may belong to an older call, and WiFiServer::accept() cannot be
+// waited on (its listening fd is private), which forced the old 5 ms poll.
+//
+// Per-client slots are heap-allocated on accept and freed on close, so an idle relay holds no
+// buffers (about 2.3 KB per active client). One task with a select loop was chosen over a task per
+// client because each task would pin its own >=4 KB stack, and the heap is the scarce resource on
+// both chips.
+//
+// Compile-time hypotheses, both default OFF so they can be measured one at a time:
+//   FRY_RELAY_H5  upstream connect is asynchronous: connect() is started non-blocking and the
+//                 select loop finishes it, bounded by Timing::connectMs (3000 ms). OFF keeps the
+//                 0.4.7 behaviour of waiting for the connect inline (same 3000 ms bound) while
+//                 every other client waits.
+//   FRY_RELAY_H7  WiFi.setSleep(false) while the relay runs: no modem power-save, so a packet is
+//                 not held until the next beacon/DTIM.
+#ifndef FRY_RELAY_H5
+#define FRY_RELAY_H5 0
+#endif
+#ifndef FRY_RELAY_H7
+#define FRY_RELAY_H7 0
+#endif
+#ifndef FRY_RELAY_SLOTS
+#define FRY_RELAY_SLOTS 4
+#endif
+#ifndef FRY_RELAY_STACK_BYTES
+#define FRY_RELAY_STACK_BYTES 4096
+#endif
+static_assert(FRY_RELAY_SLOTS >= 1 && FRY_RELAY_SLOTS <= fry_relay::kMaxSlots,
+              "FRY_RELAY_SLOTS must be 1..fry_relay::kMaxSlots");
+
+constexpr uint32_t kRelayStatEvery = 20;       // log the stack high-water mark every N closes
+constexpr uint32_t kRelayEvictMinAgeMs = 1000;  // a stalled handshake may be evicted after this
+constexpr uint32_t kRelayMaxSelectMs = 1000;
+constexpr uint32_t kRelayFullSelectMs = 100;    // pool full: look again soon for an evictable slot
+
+struct RelayStats {
+  uint32_t closed = 0, done = 0, hsTimeout = 0, hsEof = 0, hsBad = 0, connFail = 0, connTimeout = 0;
+  uint32_t idle = 0, ioErr = 0, evicted = 0, fdGuard = 0, selFail = 0, einprog = 0, noMem = 0;
+};
+
+bool setNonBlocking(int fd) {
+  const int fl = fcntl(fd, F_GETFL, 0);
+  return fl >= 0 && fcntl(fd, F_SETFL, fl | O_NONBLOCK) == 0;
+}
+
+void closeFd(int& fd) {
+  if (fd >= 0) close(fd);
+  fd = -1;
+}
+
+int openListener(uint16_t port) {
+  const int fd = socket(AF_INET, SOCK_STREAM, 0);
+  if (fd < 0) return -1;
+  int one = 1;
+  setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+  struct sockaddr_in sa;
+  memset(&sa, 0, sizeof(sa));
+  sa.sin_family = AF_INET;
+  sa.sin_addr.s_addr = htonl(INADDR_ANY);
+  sa.sin_port = htons(port);
+  if (bind(fd, reinterpret_cast<struct sockaddr*>(&sa), sizeof(sa)) < 0 || listen(fd, 4) < 0 ||
+      !setNonBlocking(fd) || !fry_relay::fdInRange(fd, FD_SETSIZE)) {
+    close(fd);
+    return -1;
+  }
+  return fd;
+}
+
+bool isSet(int fd, fd_set* set) { return fry_relay::fdInRange(fd, FD_SETSIZE) && FD_ISSET(fd, set); }
+
+int sockError(int fd) {
+  int so = 0;
+  socklen_t len = sizeof(so);
+  if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &so, &len) < 0) return errno ? errno : EIO;
+  return so;
+}
+
+#if !FRY_RELAY_H5
+// Inline wait for a non-blocking connect to finish, bounded by budgetMs. Returns 0 on success or
+// the errno-style reason. Blocks the whole relay task, exactly as WiFiClient::connect did.
+int waitConnectInline(int fd, uint32_t budgetMs) {
+  const uint32_t t0 = millis();
+  for (;;) {
+    const uint32_t spent = millis() - t0;
+    if (spent >= budgetMs) return ETIMEDOUT;
+    const uint32_t left = budgetMs - spent;
+    fd_set wr;
+    FD_ZERO(&wr);
+    FD_SET(fd, &wr);
+    struct timeval tv = {static_cast<time_t>(left / 1000), static_cast<suseconds_t>((left % 1000) * 1000)};
+    errno = 0;
+    const int r = select(fd + 1, nullptr, &wr, nullptr, &tv);
+    const int e = errno;
+    switch (fry_relay::classifySelect(r, e)) {
+      case fry_relay::SelectAction::Ready:
+        return sockError(fd);
+      case fry_relay::SelectAction::Timeout:
+        return ETIMEDOUT;
+      case fry_relay::SelectAction::Interrupted:
+        break;
+      case fry_relay::SelectAction::Failed:
+        return e ? e : EIO;
+    }
+  }
+}
+#endif
+
+int sideFd(const fry_relay::Slot& s, fry_relay::Side x) {
+  return x == fry_relay::Side::Client ? s.clientFd : s.upFd;
+}
+
+// recv() into the slot's destination and report the result. True if anything but "would block".
+bool doRecv(fry_relay::Slot& s, fry_relay::Side from, uint32_t now, RelayStats& st) {
+  size_t room = 0;
+  uint8_t* dst = fry_relay::recvDest(s, from, room);
+  if (room == 0) return false;
+  const bool relaying = s.phase == fry_relay::Phase::Relay;
+  errno = 0;
+  const long n = recv(sideFd(s, from), dst, room, MSG_DONTWAIT);
+  const int e = errno;
+  if (n < 0 && (e == EINPROGRESS || e == EALREADY)) st.einprog++;
+  if (n > 0 && relaying) s_relayedBytes += static_cast<uint32_t>(n);
+  fry_relay::onRecv(s, from, n, e, now);
+  return fry_relay::classifyRecv(n, e) != fry_relay::IoResult::WouldBlock;
+}
+
+bool doSend(fry_relay::Slot& s, fry_relay::Side to, uint32_t now, RelayStats& st) {
+  size_t len = 0;
+  const uint8_t* src = fry_relay::sendSrc(s, to, len);
+  if (len == 0) return false;
+  errno = 0;
+  const long n = send(sideFd(s, to), src, len, MSG_DONTWAIT);
+  const int e = errno;
+  if (n < 0 && (e == EINPROGRESS || e == EALREADY)) st.einprog++;
+  if (n < 0 && e == ENOMEM) st.noMem++;
+  fry_relay::onSend(s, to, n, e, now);
+  return fry_relay::classifySend(n, e) != fry_relay::IoResult::WouldBlock;
+}
+
+// Phase::NeedConnect: resolve (synchronously: DNS goes through WiFi.hostByName, as before) and
+// start the upstream connect.
+void startConnect(fry_relay::Slot& s, uint32_t now, RelayStats& st) {
+  using namespace fry_relay;
+  IPAddress ip;
+  if (!WiFi.hostByName(s.req.host, ip)) {
+    onConnectResult(s, false, now);
+    return;
+  }
+  const int fd = socket(AF_INET, SOCK_STREAM, 0);
+  if (fd < 0) {
+    onConnectResult(s, false, now);
+    return;
+  }
+  if (!fdInRange(fd, FD_SETSIZE) || !setNonBlocking(fd)) {
+    close(fd);
+    st.fdGuard++;
+    onConnectResult(s, false, now);
+    return;
+  }
+  struct sockaddr_in sa;
+  memset(&sa, 0, sizeof(sa));
+  sa.sin_family = AF_INET;
+  sa.sin_port = htons(s.req.port);
+  sa.sin_addr.s_addr = static_cast<uint32_t>(ip);
+  errno = 0;
+  const int r = connect(fd, reinterpret_cast<struct sockaddr*>(&sa), sizeof(sa));
+  const int e = errno;
+  switch (classifyConnectStart(r, e)) {
+    case ConnectStart::Done:
+      onConnectStarted(s, fd, now);
+      onConnectResult(s, true, millis());
+      break;
+    case ConnectStart::InProgress:
+#if FRY_RELAY_H5
+      onConnectStarted(s, fd, now);  // the select loop finishes it, bounded by Timing::connectMs
+#else
+    {
+      const int err = waitConnectInline(fd, Timing().connectMs);
+      onConnectStarted(s, fd, now);
+      onConnectResult(s, err == 0, millis());
+    }
+#endif
+      break;
+    case ConnectStart::Failed:
+      close(fd);
+      onConnectResult(s, false, now);
+      break;
+  }
+}
+
+void tally(RelayStats& st, const fry_relay::Slot& s) {
+  using fry_relay::CloseReason;
+  st.closed++;
+  switch (s.reason) {
+    case CloseReason::Done: st.done++; break;
+    case CloseReason::HandshakeTimeout: st.hsTimeout++; break;
+    case CloseReason::HandshakeEof: st.hsEof++; break;
+    case CloseReason::HandshakeBad: st.hsBad++; break;
+    case CloseReason::ConnectFail: st.connFail++; break;
+    case CloseReason::ConnectTimeout: st.connTimeout++; break;
+    case CloseReason::Idle:
+    case CloseReason::HalfCloseTimeout: st.idle++; break;
+    case CloseReason::Evicted: st.evicted++; break;
+    case CloseReason::FdGuard: st.fdGuard++; break;
+    default: st.ioErr++; break;
+  }
+}
+
+void releaseSlot(fry_relay::Slot*& s, RelayStats& st) {
+  tally(st, *s);
+  closeFd(s->clientFd);
+  closeFd(s->upFd);
+  delete s;
+  s = nullptr;
+}
+
+// One line every kRelayStatEvery closed connections (and after the first), so the stack
+// high-water mark and the close-reason mix can be read off a bench board. No addresses, keys or
+// tokens.
+void logStats(const RelayStats& st) {
+  Serial.printf("socks5: stat closed=%u done=%u hs_to=%u hs_eof=%u hs_bad=%u cfail=%u cto=%u idle=%u ",
+                static_cast<unsigned>(st.closed), static_cast<unsigned>(st.done),
+                static_cast<unsigned>(st.hsTimeout), static_cast<unsigned>(st.hsEof),
+                static_cast<unsigned>(st.hsBad), static_cast<unsigned>(st.connFail),
+                static_cast<unsigned>(st.connTimeout), static_cast<unsigned>(st.idle));
+  Serial.printf("ioerr=%u evict=%u fdg=%u selfail=%u einprog=%u nomem=%u stack_free_min=%u/%u heap=%u minheap=%u\n",
+                static_cast<unsigned>(st.ioErr), static_cast<unsigned>(st.evicted),
+                static_cast<unsigned>(st.fdGuard), static_cast<unsigned>(st.selFail),
+                static_cast<unsigned>(st.einprog), static_cast<unsigned>(st.noMem),
+                static_cast<unsigned>(uxTaskGetStackHighWaterMark(nullptr)),
+                static_cast<unsigned>(FRY_RELAY_STACK_BYTES),
+                static_cast<unsigned>(ESP.getFreeHeap()), static_cast<unsigned>(ESP.getMinFreeHeap()));
+}
+
+// One socket-level service pass over a slot after select(). Returns true if anything happened.
+bool serviceSlot(fry_relay::Slot& s, bool rdC, bool rdU, bool wrU, uint32_t now, RelayStats& st) {
+  using namespace fry_relay;
+  bool progress = false;
+  if (s.phase == Phase::Connecting && wrU) {
+    onConnectResult(s, sockError(s.upFd) == 0, now);
+    progress = true;
+  }
+  if (rdC) progress |= doRecv(s, Side::Client, now, st);
+  if (s.phase == Phase::NeedConnect) {
+    startConnect(s, now, st);
+    progress = true;
+  }
+  progress |= doSend(s, Side::Up, now, st);
+  if (rdU) progress |= doRecv(s, Side::Up, now, st);
+  progress |= doSend(s, Side::Client, now, st);
+  if (takeShutdown(s, Side::Up) && s.upFd >= 0) shutdown(s.upFd, SHUT_WR);
+  if (takeShutdown(s, Side::Client) && s.clientFd >= 0) shutdown(s.clientFd, SHUT_WR);
+  return progress;
+}
+
+// After a failed select() the fd_sets are indeterminate. Find the descriptor that is no longer
+// valid and drop its slot; whatever remains is retried after a short backoff.
+bool fdAlive(int fd) { return fd < 0 || fcntl(fd, F_GETFL, 0) >= 0; }
+
+void acceptClients(int listenFd, fry_relay::Slot** slots, uint32_t now, RelayStats& st) {
+  using namespace fry_relay;
+  for (int i = 0; i < FRY_RELAY_SLOTS; i++) {
+    // Only accept when there is room (or a stalled handshake to evict); otherwise the waiting
+    // connection stays in the listen backlog instead of being accepted and dropped.
+    if (poolFreeIndex(slots, FRY_RELAY_SLOTS) < 0 &&
+        poolEvictIndex(slots, FRY_RELAY_SLOTS, now, kRelayEvictMinAgeMs) < 0) {
+      return;
+    }
+    struct sockaddr_in peer;
+    socklen_t plen = sizeof(peer);
+    const int fd = accept(listenFd, reinterpret_cast<struct sockaddr*>(&peer), &plen);
+    if (fd < 0) return;  // EAGAIN: backlog drained (or a transient error: select fires again)
+    int idx = poolFreeIndex(slots, FRY_RELAY_SLOTS);
+    if (idx < 0) {
+      idx = poolEvictIndex(slots, FRY_RELAY_SLOTS, now, kRelayEvictMinAgeMs);
+      slotForceClose(*slots[idx], CloseReason::Evicted);
+      releaseSlot(slots[idx], st);
+    }
+    if (!fdInRange(fd, FD_SETSIZE) || !setNonBlocking(fd)) {
+      st.fdGuard++;
+      close(fd);
+      continue;
+    }
+    Slot* s = new (std::nothrow) Slot;
+    if (!s) {
+      st.noMem++;
+      close(fd);
+      continue;
+    }
+    int one = 1;
+    setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &one, sizeof(one));  // as WiFiServer::available did
+    slotInit(*s, fd, now);
+    slots[idx] = s;
+  }
+}
+
 void relayTaskFn(void*) {
-  uint16_t port = static_cast<uint16_t>(fry_config::getSocksPort());
-  WiFiServer server(port);
-  server.begin();
-  Serial.printf("socks5: listening :%u\n", port);
+  using namespace fry_relay;
+  const Timing timing;
+  const uint16_t port = static_cast<uint16_t>(fry_config::getSocksPort());
+
+  int listenFd = -1;
+  for (uint32_t tries = 0; listenFd < 0; tries++) {
+    listenFd = openListener(port);
+    if (listenFd >= 0) break;
+    if (tries % 10 == 0) Serial.printf("socks5: listen :%u failed errno=%d, retrying\n", port, errno);
+    vTaskDelay(pdMS_TO_TICKS(1000));
+  }
+  Serial.printf("socks5: listening :%u slots=%d h5=%d h7=%d\n", port, FRY_RELAY_SLOTS, FRY_RELAY_H5,
+                FRY_RELAY_H7);
+#if FRY_RELAY_H7
+  WiFi.setSleep(false);  // persists across reconnects (WiFiGenericClass::_sleepEnabled)
+  Serial.println("socks5: wifi modem-sleep off (H7)");
+#endif
+
+  Slot* slots[FRY_RELAY_SLOTS] = {};
+  RelayStats st;
+  uint32_t selFails = 0;
+  uint32_t lastLoggedClosed = 0;
 
   for (;;) {
-    WiFiClient client = server.accept();
-    if (!client) {
-      vTaskDelay(pdMS_TO_TICKS(5));  // WiFiServer's listen fd is private, so accept() stays polled
+    uint32_t now = millis();
+    for (int i = 0; i < FRY_RELAY_SLOTS; i++) {
+      if (slots[i]) onTimer(*slots[i], timing, now);
+    }
+    for (int i = 0; i < FRY_RELAY_SLOTS; i++) {
+      if (slots[i] && slotClosed(*slots[i])) releaseSlot(slots[i], st);
+    }
+    if (st.closed != lastLoggedClosed && (st.closed == 1 || st.closed % kRelayStatEvery == 0)) {
+      lastLoggedClosed = st.closed;
+      logStats(st);
+    }
+
+    const bool poolFull = poolFreeIndex(slots, FRY_RELAY_SLOTS) < 0;
+    const bool watchListen = !poolFull || poolEvictIndex(slots, FRY_RELAY_SLOTS, now, kRelayEvictMinAgeMs) >= 0;
+    WatchList wl;
+    buildWatchList(slots, FRY_RELAY_SLOTS, listenFd, watchListen, FD_SETSIZE, wl);
+    bool dropped = false;
+    for (int i = 0; i < FRY_RELAY_SLOTS; i++) {
+      if (slots[i] && wl.slotBad[i]) {
+        slotForceClose(*slots[i], CloseReason::FdGuard);
+        releaseSlot(slots[i], st);
+        dropped = true;
+      }
+    }
+    if (wl.listenBad) {
+      closeFd(listenFd);
+      while ((listenFd = openListener(port)) < 0) vTaskDelay(pdMS_TO_TICKS(1000));
+      dropped = true;
+    }
+    if (dropped) continue;
+
+    fd_set rd, wr;
+    FD_ZERO(&rd);
+    FD_ZERO(&wr);
+    for (int i = 0; i < wl.n; i++) {
+      if (wl.w[i].rd) FD_SET(wl.w[i].fd, &rd);
+      if (wl.w[i].wr) FD_SET(wl.w[i].fd, &wr);
+    }
+    const uint32_t tmo = poolSelectTimeoutMs(slots, FRY_RELAY_SLOTS, timing, now,
+                                             poolFull ? kRelayFullSelectMs : kRelayMaxSelectMs);
+    int sr = 0;
+    int se = 0;
+    if (wl.n == 0) {
+      vTaskDelay(pdMS_TO_TICKS(tmo ? tmo : 1));
+    } else {
+      struct timeval tv = {static_cast<time_t>(tmo / 1000), static_cast<suseconds_t>((tmo % 1000) * 1000)};
+      errno = 0;
+      sr = select(wl.maxFd + 1, &rd, &wr, nullptr, &tv);
+      se = errno;
+    }
+    now = millis();
+    const SelectAction act = classifySelect(sr, se);
+    if (act == SelectAction::Failed) {
+      st.selFail++;
+      selFails++;
+      for (int i = 0; i < FRY_RELAY_SLOTS; i++) {
+        if (slots[i] && (!fdAlive(slots[i]->clientFd) || !fdAlive(slots[i]->upFd))) {
+          slotForceClose(*slots[i], CloseReason::IoError);
+          releaseSlot(slots[i], st);
+        }
+      }
+      if (!fdAlive(listenFd)) {
+        closeFd(listenFd);
+        while ((listenFd = openListener(port)) < 0) vTaskDelay(pdMS_TO_TICKS(1000));
+      }
+      vTaskDelay(pdMS_TO_TICKS(selectFailBackoffMs(selFails)));
       continue;
     }
+    selFails = 0;
+    if (act != SelectAction::Ready) continue;  // timeout / EINTR: the timers run at the top
 
-    uint8_t buf[262];
-    size_t bufLen = 0;
-    bool greeted = false;
-    unsigned long start = millis();
-    while (client.connected() && millis() - start < 5000) {
-      if (client.available()) {
-        int n = client.read(buf + bufLen, sizeof(buf) - bufLen);
-        if (n > 0) bufLen += n;
-      }
-      fry::Socks5Greeting greeting;
-      size_t consumed = 0;
-      fry::Socks5Result r = fry::parseGreeting(buf, bufLen, greeting, consumed);
-      if (r == fry::Socks5Result::Ok) {
-        uint8_t ok[2] = {0x05, 0x00};
-        client.write(ok, 2);
-        bufLen = 0;
-        greeted = true;
-        break;
-      } else if (r != fry::Socks5Result::NeedMoreData) {
-        uint8_t fail[2] = {0x05, 0xFF};
-        client.write(fail, 2);
-        break;
-      }
-      waitReadable(&client, nullptr, 100);
+    bool progress = false;
+    if (watchListen && isSet(listenFd, &rd)) {
+      acceptClients(listenFd, slots, now, st);
+      progress = true;
     }
-    if (!greeted) {
-      client.stop();
-      continue;
+    for (int i = 0; i < FRY_RELAY_SLOTS; i++) {
+      Slot* s = slots[i];
+      if (!s) continue;
+      progress |= serviceSlot(*s, isSet(s->clientFd, &rd), isSet(s->upFd, &rd), isSet(s->upFd, &wr),
+                              now, st);
+      if (slotClosed(*s)) releaseSlot(slots[i], st);
     }
-
-    WiFiClient upstream;
-    bool connected = false;
-    start = millis();
-    while (client.connected() && millis() - start < 5000) {
-      if (client.available()) {
-        int n = client.read(buf + bufLen, sizeof(buf) - bufLen);
-        if (n > 0) bufLen += n;
-      }
-      fry::Socks5ConnectRequest req;
-      size_t consumed = 0;
-      fry::Socks5Result r = fry::parseConnectRequest(buf, bufLen, req, consumed);
-      if (r == fry::Socks5Result::Ok) {
-        connected = upstream.connect(req.host, req.port);
-        uint8_t reply[10] = {0x05, static_cast<uint8_t>(connected ? 0x00 : 0x01), 0x00, 0x01,
-                              0, 0, 0, 0, 0, 0};
-        client.write(reply, sizeof(reply));
-        break;
-      } else if (r != fry::Socks5Result::NeedMoreData) {
-        uint8_t reply[10] = {0x05, 0x01, 0x00, 0x01, 0, 0, 0, 0, 0, 0};
-        client.write(reply, sizeof(reply));
-        break;
-      }
-      waitReadable(&client, nullptr, 100);
-    }
-
-    if (connected) {
-      uint8_t copyBuf[512];
-      unsigned long lastActivity = millis();
-      while (client.connected() && upstream.connected() && (millis() - lastActivity) < 30000) {
-        bool activity = false;
-        int avail = client.available();
-        if (avail > 0) {
-          int n = client.read(copyBuf, avail > 512 ? 512 : avail);
-          if (n > 0) {
-            upstream.write(copyBuf, n);
-            s_relayedBytes += n;
-            activity = true;
-          }
-        }
-        avail = upstream.available();
-        if (avail > 0) {
-          int n = upstream.read(copyBuf, avail > 512 ? 512 : avail);
-          if (n > 0) {
-            client.write(copyBuf, n);
-            s_relayedBytes += n;
-            activity = true;
-          }
-        }
-        if (activity) {
-          lastActivity = millis();
-        } else {
-          waitReadable(&client, &upstream, 100);
-        }
-      }
-      upstream.stop();
-    }
-    client.stop();
+    if (!progress) vTaskDelay(1);  // readable/writable but nothing moved (e.g. ENOMEM): do not spin
   }
 }
 #endif  // !IP_NAPT
@@ -341,7 +634,7 @@ bool bringUp() {
 #else
   Serial.println("wg: NAPT not compiled into this framework's liblwip.a (CONFIG_LWIP_IP_FORWARD "
                   "unset) - falling back to the SOCKS5 tunnel-only relay");
-  xTaskCreate(relayTaskFn, "fry_relay", 4096, nullptr, 1, nullptr);
+  xTaskCreate(relayTaskFn, "fry_relay", FRY_RELAY_STACK_BYTES, nullptr, 1, nullptr);
 #endif
   return true;
 }
