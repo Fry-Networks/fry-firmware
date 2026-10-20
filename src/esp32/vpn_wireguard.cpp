@@ -86,18 +86,22 @@ String s_priv, s_pub, s_psk, s_addr, s_netmask, s_endpoint;
 // client because each task would pin its own >=4 KB stack, and the heap is the scarce resource on
 // both chips.
 //
-// Compile-time hypotheses, both default OFF so they can be measured one at a time:
+// Compile-time hypotheses, both default ON; -DFRY_RELAY_H5=0 / -DFRY_RELAY_H7=0 switch each one
+// off again (the previous behaviour), so they can still be measured one at a time:
 //   FRY_RELAY_H5  upstream connect is asynchronous: connect() is started non-blocking and the
-//                 select loop finishes it, bounded by Timing::connectMs (3000 ms). OFF keeps the
-//                 0.4.7 behaviour of waiting for the connect inline (same 3000 ms bound) while
-//                 every other client waits.
+//                 select loop finishes it, bounded by Timing::connectMs (3000 ms). A blackholed
+//                 upstream therefore no longer stalls the other clients: in the host shim harness
+//                 the other clients' delay was 295 ms with it ON against 2909 ms with it OFF. OFF
+//                 keeps the 0.4.7 behaviour of waiting for the connect inline (same 3000 ms bound)
+//                 while every other client waits.
 //   FRY_RELAY_H7  WiFi.setSleep(false) while the relay runs: no modem power-save, so a packet is
-//                 not held until the next beacon/DTIM.
+//                 not held until the next beacon/DTIM. Bench ESP32 LAN ping: with modem sleep ON
+//                 5% loss and 123 ms average, with it OFF 0% loss and 30 ms.
 #ifndef FRY_RELAY_H5
-#define FRY_RELAY_H5 0
+#define FRY_RELAY_H5 1
 #endif
 #ifndef FRY_RELAY_H7
-#define FRY_RELAY_H7 0
+#define FRY_RELAY_H7 1
 #endif
 #ifndef FRY_RELAY_SLOTS
 #define FRY_RELAY_SLOTS 4
