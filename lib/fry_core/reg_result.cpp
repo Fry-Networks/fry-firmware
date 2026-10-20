@@ -2,6 +2,8 @@
 
 #include <cstring>
 
+#include "key_policy.h"
+
 namespace fry {
 
 namespace {
@@ -78,7 +80,28 @@ const char* regClassText(RegClass c) {
   return "unknown";
 }
 
-size_t sanitizeServerDetail(const char* in, const char* minerKey, char* out, size_t outCap) {
+namespace {
+
+// maskMinerKeyLast4 of the token src[0..len) without copying it whole: the mask depends only on the
+// length, the first 4 and the last 4 bytes, so a long token goes in as a 12-byte stand-in with the
+// same first 4, the same last 4 and the same "12 or more" length. `out` holds 12 bytes.
+size_t maskTokenLast4(const char* src, size_t len, char* out) {
+  char standIn[13];
+  if (len <= 11) {
+    memcpy(standIn, src, len);
+    standIn[len] = 0;
+  } else {
+    memcpy(standIn, src, 4);
+    memset(standIn + 4, 'x', 4);
+    memcpy(standIn + 8, src + len - 4, 4);
+    standIn[12] = 0;
+  }
+  return maskMinerKeyLast4(standIn, out, 12);
+}
+
+// Shared by sanitizeServerDetail (last4 == false: the original behaviour, byte for byte) and
+// sanitizeServerDetailLast4 (last4 == true: key-shaped tokens become the maskMinerKeyLast4 form).
+size_t sanitizeDetail(const char* in, const char* minerKey, char* out, size_t outCap, bool last4) {
   if (!out || outCap == 0) return 0;
   out[0] = 0;
   if (!in) return 0;
@@ -93,6 +116,17 @@ size_t sanitizeServerDetail(const char* in, const char* minerKey, char* out, siz
       tokenLen = keyLen;
     } else if (prefixed && alnumRun(in + i + 4) >= 8) {
       tokenLen = 4 + alnumRun(in + i + 4);
+    }
+    if (tokenLen && last4) {
+      // FEM-<U+2026>last4, all or nothing: a mask that no longer fits ends the text here, so the
+      // 3-byte ellipsis is never cut and the raw token is never copied
+      char masked[12];
+      const size_t m = maskTokenLast4(in + i, tokenLen, masked);
+      if (m == 0 || n + m > cap) break;
+      memcpy(out + n, masked, m);
+      n += m;
+      i += tokenLen;
+      continue;
     }
     if (tokenLen) {
       // prefix + 2 characters + "...", or as much of it as still fits
@@ -119,6 +153,16 @@ size_t sanitizeServerDetail(const char* in, const char* minerKey, char* out, siz
   }
   out[n] = 0;
   return n;
+}
+
+}  // namespace
+
+size_t sanitizeServerDetail(const char* in, const char* minerKey, char* out, size_t outCap) {
+  return sanitizeDetail(in, minerKey, out, outCap, false);
+}
+
+size_t sanitizeServerDetailLast4(const char* in, const char* minerKey, char* out, size_t outCap) {
+  return sanitizeDetail(in, minerKey, out, outCap, true);
 }
 
 }  // namespace fry

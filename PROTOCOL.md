@@ -167,7 +167,7 @@ board resets on every connect.
 ## 9. Serial log lines that the QA gates grep for
 
 ```
-FRY boot v<ver> chip=<CHIP> mac=<MAC> minerkey=FEM-<32HEX>
+FRY boot v<ver> chip=<CHIP> mac=<MAC> minerkey=FEM-…<last4> (or IOT-…<last4>, NONE, FEM-PENDING)
 [boot] ready
 BLE advertising name=<devname> svc=46525900
 AP started FRY-SETUP-<MAC6> ip=192.168.4.1

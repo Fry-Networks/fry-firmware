@@ -164,8 +164,18 @@ void setup() {
   fry_identity::ensureMinerKey(s_minerKey, sizeof(s_minerKey));
   fry_identity::getDeviceName(s_deviceName, sizeof(s_deviceName));
 
+  // The log only ever shows FEM-<U+2026>last4 (key_policy.h); NONE and the compiled-in FEM-PENDING
+  // placeholder stay readable.
+  char keyMasked[12];
+  const char* keyForLog = "NONE";
+  if (strcmp(s_minerKey, "FEM-PENDING") == 0) {
+    keyForLog = "FEM-PENDING";
+  } else if (s_minerKey[0]) {
+    fry::maskMinerKeyLast4(s_minerKey, keyMasked, sizeof(keyMasked));
+    keyForLog = keyMasked;
+  }
   Serial.printf("FRY boot v%s chip=%s mac=%s minerkey=%s\n", FRY_FIRMWARE_VERSION, FRY_CHIP, mac,
-                s_minerKey[0] ? s_minerKey : "NONE");
+                keyForLog);
 
 #if defined(FRY_TEST_FAULT) && FRY_TEST_FAULT == 1
   // Test channel only (src/core/ota_client.h #errors otherwise): an image that dies before it can

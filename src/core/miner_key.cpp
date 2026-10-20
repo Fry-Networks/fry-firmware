@@ -168,7 +168,7 @@ fry::KeyWriteVerdict setOwnerKey(const char* key, fry::KeyTransport transport, b
   bool same = false;
   const fry::KeyWriteVerdict verdict = evaluate(key, transport, stored, sizeof(stored), &same);
   char masked[12];
-  fry::maskMinerKey(key, masked, sizeof(masked));
+  fry::maskMinerKeyLast4(key, masked, sizeof(masked));  // log form: FEM-<U+2026>last4
   if (verdict != fry::KeyWriteVerdict::Accept) {
     const char* why = verdict == fry::KeyWriteVerdict::BadKey          ? "bad_key"
                       : verdict == fry::KeyWriteVerdict::NeedsSecureAp ? "key_needs_secure_ap"
