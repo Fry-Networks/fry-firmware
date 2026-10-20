@@ -1,4 +1,4 @@
-# Boot gate: reset the board and assert the boot banner appears with a well-formed miner key
+# Boot gate: reset the board and assert the boot banner appears with a masked/NONE/PENDING miner key
 # and no crash marker within the window.
 #   py -3 tools/gate_boot.py [--port COMx] [--seconds 20] [--out FILE]
 # Exit 0 = PASS, 1 = FAIL.
@@ -7,7 +7,18 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import _serialutil as su
 
 BANNER_RE = re.compile(r"FRY boot v\S+ chip=\S+ mac=[0-9A-Fa-f:]+ minerkey=(\S+)")
-MINERKEY_RE = re.compile(r"^FEM-[0-9A-F]{32}$")
+# Accepted banner forms: masked key (prefix + U+2026 + last 4), NONE, or FEM-PENDING.
+MINERKEY_RE = re.compile("^(?:(?:FEM|IOT)-\u2026[0-9A-Za-z?]{4}|NONE|FEM-PENDING)$")
+RAWKEY_RE = re.compile(r"^(?:FEM|IOT)-[0-9A-Za-z]{8,}$")
+
+
+def check_minerkey(key):
+    """Return None if the banner key form is accepted, else a FAIL message (never contains the key)."""
+    if key and MINERKEY_RE.match(key):
+        return None
+    if key and RAWKEY_RE.match(key) and key != "FEM-PENDING":
+        return "raw miner key in banner (len=%d)" % len(key)
+    return "miner key form not recognised (len=%d)" % len(key or "")
 CRASH_MARKERS = ("Exception (", "Fatal exception", "wdt reset", "Soft WDT", "abort()",
                   "rst cause:2", "rst cause:3", "Guru Meditation Error", "Panic", "CORRUPT HEAP")
 
@@ -44,14 +55,15 @@ def main():
                 if m:
                     banner_ok = True
                     miner_key = m.group(1)
-                    print("[gate_boot] banner: %s" % text, flush=True)
+                    shown = text if check_minerkey(miner_key) is None else text.replace(miner_key, "<redacted len=%d>" % len(miner_key))
+                    print("[gate_boot] banner: %s" % shown, flush=True)
 
         if not banner_ok:
             print("[gate_boot] FAIL: no boot banner in %ds" % a.seconds, flush=True)
             sys.exit(1)
-        if not miner_key or not MINERKEY_RE.match(miner_key):
-            print("[gate_boot] FAIL: miner key '%s' does not match ^FEM-[0-9A-F]{32}$" % miner_key,
-                  flush=True)
+        err = check_minerkey(miner_key)
+        if err:
+            print("[gate_boot] FAIL: %s" % err, flush=True)
             sys.exit(1)
         print("[gate_boot] PASS minerkey=%s" % miner_key, flush=True)
         sys.exit(0)
