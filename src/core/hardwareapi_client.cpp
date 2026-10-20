@@ -61,7 +61,7 @@ void readServerDetail(HTTPClient& http, const char* minerKey, char* out, size_t 
   if (deserializeJson(rdoc, http.getString())) return;
   const char* d = rdoc["detail"].is<const char*>() ? rdoc["detail"].as<const char*>()
                                                    : (rdoc["error"] | "");
-  fry::sanitizeServerDetail(d, minerKey, out, outLen);
+  fry::sanitizeServerDetailLast4(d, minerKey, out, outLen);
 }
 
 // Authorization header per PROTOCOL.md section 5: the per-device token once issued, else the

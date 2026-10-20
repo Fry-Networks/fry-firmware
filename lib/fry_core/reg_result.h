@@ -41,6 +41,13 @@ const char* regClassText(RegClass c);
 // "...". Always NUL-terminates; returns the length written.
 size_t sanitizeServerDetail(const char* in, const char* minerKey, char* out, size_t outCap);
 
+// The log-line form of the same: identical rules and 120-byte cap, but every key-shaped token
+// becomes maskMinerKeyLast4's "FEM-" U+2026 "0001" (prefix, ellipsis, last 4 characters), so the log
+// never shows more of a key than its last 4. The ellipsis is 3 bytes: a mask that does not fit in the
+// room left ends the text there (never a partial UTF-8 sequence, never the raw token). Output is
+// printable ASCII plus whole U+2026 sequences. Always NUL-terminates; returns the bytes written.
+size_t sanitizeServerDetailLast4(const char* in, const char* minerKey, char* out, size_t outCap);
+
 // Whether a 4xx body of `contentLength` bytes (HTTPClient::getSize()) is buffered to quote its
 // "detail"/"error" at all: anything over 2048 bytes is not, and neither is a negative size - -1 is
 // a chunked body of unknown length, which getString() would buffer in full (round 2 F10).
