@@ -251,4 +251,16 @@ void loop() {
       emitHealthLogIfDue();
       break;
   }
+
+  // Sleep one RTOS tick at the end of every pass, whatever the phase. Arduino's loopTask calls
+  // loop() back to back and never blocks, so on the ESP32 family it spins its core and keeps the
+  // flash bus busy; the Wi-Fi/lwIP code on the other core then stalls on instruction fetches.
+  // Measured on an ESP32 without the yield: core-1 idle hook ~15 runs/30 s, LAN ping 540-846 ms,
+  // relay median 7-10 s; with it: idle hook at 1 kHz, ping 28-43 ms, relay median 0.5-0.7 s.
+  // vTaskDelay(1), not delay(1): delay(1) is vTaskDelay(1 / portTICK_PERIOD_MS), a bare yield if
+  // the tick rate ever drops below 1 kHz. The ESP8266 has no RTOS, so its loop() is unchanged.
+  // test/test_loop_yield pins this to the end of loop().
+#if !defined(ARDUINO_ARCH_ESP8266)
+  vTaskDelay(1);
+#endif
 }
