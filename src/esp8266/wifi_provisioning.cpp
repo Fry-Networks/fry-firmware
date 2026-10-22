@@ -29,8 +29,11 @@ namespace {
 const int kMaxScanEntries = 24;
 
 fry::ProvisioningFsm s_fsm;
-ESP8266WebServer s_server(80);
-DNSServer s_dns;
+// The transport's objects live on the heap only while it runs: allocated in init() (a board that joined with stored credentials never calls it),
+// given back in tick() when the AP is torn down. As statics they were 820 B of RAM that the image download's TLS session did not have
+// (test/test_prov_heap).
+ESP8266WebServer* s_server = nullptr;
+DNSServer* s_dns = nullptr;
 bool s_apActive = false;
 unsigned long s_connectedAtMs = 0;
 bool s_connectedAtMsSet = false;
@@ -48,7 +51,7 @@ struct ScanEntry {
   int32_t rssi;
   bool enc;
 };
-ScanEntry s_scanCache[kMaxScanEntries];
+ScanEntry* s_scanCache = nullptr;
 int s_scanCount = 0;
 
 // <4KB, zero external resources — required by PROTOCOL.md section 3.
@@ -94,6 +97,7 @@ function submitForm(){
 </script></body></html>)HTML";
 
 void cacheScan() {
+  if (!s_scanCache) return;
   int n = WiFi.scanNetworks(false, true);
   s_scanCount = 0;
   for (int i = 0; i < n && s_scanCount < kMaxScanEntries; i++) {
@@ -105,7 +109,7 @@ void cacheScan() {
   WiFi.scanDelete();
 }
 
-void handleRoot() { s_server.send_P(200, PSTR("text/html"), PORTAL_HTML); }
+void handleRoot() { s_server->send_P(200, PSTR("text/html"), PORTAL_HTML); }
 
 void handleInfo() {
   fry::DeviceStatus st;
@@ -118,23 +122,25 @@ void handleInfo() {
            "\"caps\":[\"key_write\",\"error_reset\",\"errs_v2\"],\"keySet\":");
   out += st.keySet ? F("true") : F("false");
   out += F("}");
-  s_server.send(200, String(F("application/json; charset=utf-8")), out);
+  s_server->send(200, String(F("application/json; charset=utf-8")), out);
 }
 
 void handleScan() {
   String out = F("{\"nets\":[");
-  for (int i = 0; i < s_scanCount; i++) {
-    if (i) out += F(",");
-    out += F("{\"ssid\":\"");
-    out += s_scanCache[i].ssid;
-    out += F("\",\"rssi\":");
-    out += String(s_scanCache[i].rssi);
-    out += F(",\"enc\":");
-    out += (s_scanCache[i].enc ? F("true") : F("false"));
-    out += F("}");
+  if (s_scanCache) {
+    for (int i = 0; i < s_scanCount; i++) {
+      if (i) out += F(",");
+      out += F("{\"ssid\":\"");
+      out += s_scanCache[i].ssid;
+      out += F("\",\"rssi\":");
+      out += String(s_scanCache[i].rssi);
+      out += F(",\"enc\":");
+      out += (s_scanCache[i].enc ? F("true") : F("false"));
+      out += F("}");
+    }
   }
   out += F("]}");
-  s_server.send(200, String(F("application/json")), out);
+  s_server->send(200, String(F("application/json")), out);
 }
 
 void sendProvisionError(int http, const char* reason) {
@@ -143,7 +149,7 @@ void sendProvisionError(int http, const char* reason) {
   out += F("\",\"status\":");
   out += String(static_cast<unsigned>(s_fsm.state()));
   out += F("}");
-  s_server.send(http, String(F("application/json")), out);
+  s_server->send(http, String(F("application/json")), out);
 }
 
 // A refused key write: the FSM reports it (status 4, detail 7/8) and the response says which.
@@ -175,10 +181,10 @@ void handleProvision() {
     return;
   }
 
-  String ssid = s_server.arg("ssid");
-  String pass = s_server.arg("pass");
-  String wallet = s_server.arg("wallet");
-  String key = s_server.arg("key");  // byte-exact (C-1): the portal trims, the firmware never does
+  String ssid = s_server->arg("ssid");
+  String pass = s_server->arg("pass");
+  String wallet = s_server->arg("wallet");
+  String key = s_server->arg("key");  // byte-exact (C-1): the portal trims, the firmware never does
 
   fry::ProvInputs ssidIn;
   ssidIn.ssidValid = (ssid.length() >= 1 && ssid.length() <= 32);
@@ -223,7 +229,7 @@ void handleProvision() {
     fry_config::setWallet(wallet.c_str());
     optimistic_yield(1000);
   });
-  s_server.send_P(200, PSTR("application/json"), PSTR("{\"ok\":true,\"status\":2}"));
+  s_server->send_P(200, PSTR("application/json"), PSTR("{\"ok\":true,\"status\":2}"));
 }
 
 void handleStatus() {
@@ -238,7 +244,7 @@ void handleStatus() {
            static_cast<unsigned>(fry::statusDetailErr(st)), st.keyMasked, st.keySet ? "true" : "false",
            st.regHttp, static_cast<long>(st.hbAgeS), st.fw, st.ota,
            WiFi.localIP().toString().c_str());
-  s_server.send(200, String(F("application/json; charset=utf-8")), buf);
+  s_server->send(200, String(F("application/json; charset=utf-8")), buf);
 }
 
 void ensureApCode() {
@@ -257,8 +263,8 @@ void startAp() {
   // Open without a key question to ask (matches the BLE-without-PIN trust model of v1); WPA2 with
   // the setup code while the owner still has to type a key in.
   WiFi.softAP(s_apName, s_apSecure ? s_apCode : nullptr);
-  s_dns.setErrorReplyCode(DNSReplyCode::NoError);
-  s_dns.start(53, "*", IPAddress(192, 168, 4, 1));
+  s_dns->setErrorReplyCode(DNSReplyCode::NoError);
+  s_dns->start(53, "*", IPAddress(192, 168, 4, 1));
 }
 
 }  // namespace
@@ -267,6 +273,22 @@ void init(const char* deviceName, const char* minerKey) {
   strncpy(s_deviceName, deviceName, sizeof(s_deviceName) - 1);
   s_apSecure = !fry::keyAllowsJoin(fry::kBuildKeyModel, minerKey && minerKey[0]);
   if (s_apSecure) ensureApCode();
+
+  // The scan cache, the DNS catch-all and the web server exist from here to the AP teardown in tick() (the boot has the heap for them; an
+  // allocation that fails leaves the transport off rather than a null dereference).
+  if (!s_scanCache) s_scanCache = new (std::nothrow) ScanEntry[kMaxScanEntries];
+  if (!s_dns) s_dns = new (std::nothrow) DNSServer();
+  if (!s_server) s_server = new (std::nothrow) ESP8266WebServer(80);
+  if (!s_scanCache || !s_dns || !s_server) {
+    FRY_PRINTLN("[prov] no memory for the setup server - transport off");
+    delete[] s_scanCache;
+    s_scanCache = nullptr;
+    delete s_dns;
+    s_dns = nullptr;
+    delete s_server;
+    s_server = nullptr;
+    return;
+  }
 
   // Pre-scan in STA mode BEFORE bringing the AP up — scanning after the AP starts is unreliable
   // on ESP8266 (the radio is already busy servicing the softAP).
@@ -280,13 +302,13 @@ void init(const char* deviceName, const char* minerKey) {
   startAp();
   s_apActive = true;
 
-  s_server.on("/", HTTP_GET, handleRoot);
-  s_server.on("/info", HTTP_GET, handleInfo);
-  s_server.on("/api/scan", HTTP_GET, handleScan);
-  s_server.on("/provision", HTTP_POST, handleProvision);
-  s_server.on("/status", HTTP_GET, handleStatus);
-  s_server.onNotFound(handleRoot);  // captive-portal catch-all
-  s_server.begin();
+  s_server->on("/", HTTP_GET, handleRoot);
+  s_server->on("/info", HTTP_GET, handleInfo);
+  s_server->on("/api/scan", HTTP_GET, handleScan);
+  s_server->on("/provision", HTTP_POST, handleProvision);
+  s_server->on("/status", HTTP_GET, handleStatus);
+  s_server->onNotFound(handleRoot);  // captive-portal catch-all
+  s_server->begin();
 
   if (s_apSecure) {
     // The one place the setup code is shown besides Improv 0xF1: this is the USB serial log.
@@ -320,10 +342,10 @@ bool commitWifiOnlyCredentials(const char* ssid, const char* pass) {
 }
 
 void loop() {
-  if (s_apActive) {
-    for (int i = 0; i < 8; i++) s_dns.processNextRequest();  // bounded — never blocks the loop
+  if (s_dns && s_apActive) {
+    for (int i = 0; i < 8; i++) s_dns->processNextRequest();  // bounded — never blocks the loop
   }
-  s_server.handleClient();
+  if (s_server) s_server->handleClient();
 }
 
 fry::ProvState state() { return s_fsm.state(); }
@@ -370,9 +392,17 @@ void notifyKeyMissing() {
 
 void tick() {
   if (s_apActive && s_connectedAtMsSet && (millis() - s_connectedAtMs) >= AP_TEARDOWN_MS) {
-    s_dns.stop();
+    s_dns->stop();
     WiFi.softAPdisconnect(true);
     s_apActive = false;
+    // The transport is done (provisioning_transport.h: tick() tears it down): give its objects back, so nothing of it is held at OTA time.
+    s_server->close();
+    delete s_server;
+    s_server = nullptr;
+    delete s_dns;
+    s_dns = nullptr;
+    delete[] s_scanCache;
+    s_scanCache = nullptr;
     FRY_PRINTLN("AP torn down (status=3, teardown window elapsed)");
   }
 }

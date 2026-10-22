@@ -120,8 +120,8 @@ void test_wifi_provisioning_keeps_its_text_in_flash() {
   TEST_ASSERT_TRUE(loadSource(f, src));
   // out += cond ? F("true") : F("false") in the two JSON builders; the one left is the %s argument of the status snprintf (a RAM pointer).
   TEST_ASSERT_EQUAL_INT_MESSAGE(1, countOf(src, "? \"true\" : \"false\""), "only the %s argument of the status snprintf keeps its RAM literals");
-  TEST_ASSERT_EQUAL_INT_MESSAGE(0, callsWithLiteralSecondArg(src, "s_server.send("), "send(): the content type is a temporary String from F(), not a RAM literal");
-  TEST_ASSERT_EQUAL_INT_MESSAGE(0, callsWithLiteralSecondArg(src, "s_server.send_P("), "send_P(): PSTR() for the content type");
+  TEST_ASSERT_EQUAL_INT_MESSAGE(0, callsWithLiteralSecondArg(src, "s_server->send("), "send(): the content type is a temporary String from F(), not a RAM literal");
+  TEST_ASSERT_EQUAL_INT_MESSAGE(0, callsWithLiteralSecondArg(src, "s_server->send_P("), "send_P(): PSTR() for the content type");
 }
 
 void test_fry_text_is_a_flash_string_on_the_esp8266_and_the_plain_pointer_elsewhere() {
