@@ -93,6 +93,7 @@ void test_main_prints_its_text_from_flash() { expectNoDramLiteralPrints("src/mai
 void test_miner_key_prints_its_text_from_flash() { expectNoDramLiteralPrints("src/core/miner_key.cpp"); }
 void test_wifi_connect_prints_its_text_from_flash() { expectNoDramLiteralPrints("src/esp8266/wifi_connect.cpp"); }
 void test_http_tls_prints_its_text_from_flash() { expectNoDramLiteralPrints("src/esp8266/http_tls.cpp"); }
+void test_vpn_socks5_prints_its_text_from_flash() { expectNoDramLiteralPrints("src/esp8266/vpn_socks5.cpp"); }
 
 // Unity's setUp/tearDown have C linkage, so they must sit at global scope.
 void setUp() {}
@@ -109,5 +110,6 @@ int main(int, char**) {
   RUN_TEST(test_miner_key_prints_its_text_from_flash);
   RUN_TEST(test_wifi_connect_prints_its_text_from_flash);
   RUN_TEST(test_http_tls_prints_its_text_from_flash);
+  RUN_TEST(test_vpn_socks5_prints_its_text_from_flash);
   return UNITY_END();
 }
