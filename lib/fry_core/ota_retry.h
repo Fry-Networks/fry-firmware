@@ -5,7 +5,9 @@
 // first check (blk 29.1 K at the 8 s boot sample, lo/c1-p3-125815.lines.txt) lost its update window for 6 h. A refusal by a heap
 // gate opens no connection (the gate is one free-heap sample taken before the clients exist; beginHttpsUrl's Refuse is decided
 // before http.begin), so asking again soon costs nothing on the wire. Everything else - an answer, a parse failure, HTTP -1 -
-// keeps the 6 h cadence, because those cost a handshake and a TIME_WAIT pcb.
+// keeps the 6 h cadence, because those cost a handshake and a TIME_WAIT pcb. One exception: a 200 whose manifest body did not arrive
+// whole (lib/fry_core/ota_manifest_read.h) is asked again on the same short cadence, as its own run with its own counter, because the
+// next fetch is as likely to succeed as the last one was to fail and 6 h is a long time to wait on a transient.
 //
 // Bounded: kOtaHeapRetryMax shorter waits in a row, then the normal cadence until a check gets past the heap gates.
 // Pure and header-only so it is tested natively; tick() calls it on ESP8266 only (the ESP32 family is untouched).

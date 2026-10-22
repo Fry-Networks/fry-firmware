@@ -23,6 +23,7 @@
 #include "ota_boot_counter.h"
 #include "ota_health.h"
 #include "ota_heap_budget.h"
+#include "ota_manifest_read.h"
 #include "ota_retry.h"
 #include "ota_rollout_json.h"
 #include "ota_session.h"
@@ -112,6 +113,9 @@ unsigned long s_lastCheckMs = 0;
 // The last checkNow() was refused by a heap gate before any connection opened (lib/fry_core/ota_retry.h).
 bool s_heapRefused = false;
 uint8_t s_heapRetries = 0;
+// The last checkNow()'s manifest body did not arrive whole (lib/fry_core/ota_manifest_read.h): asked again soon, in a run of its own.
+bool s_readFailed = false;
+uint8_t s_readRetries = 0;
 #endif
 // PROTOCOL.md section 6 wants a check "on boot and every 6 h". tick() is only reached
 // once WiFi is up, but with s_lastCheckMs seeded at 0 the elapsed-time gate is false at
@@ -570,11 +574,80 @@ void confirmGood() {
 
 #if defined(ARDUINO_ARCH_ESP8266)
 FRY_OTA_ESP8266_NOINLINE static bool evaluateManifest(const String& body, OtaPlan& plan);
+
+// What fry::readManifestBody() (lib/fry_core/ota_manifest_read.h) needs of the connection and of the String it fills.
+struct ManifestConn {
+  WiFiClient& c;
+  bool connected() { return c.connected(); }
+  int available() { return c.available(); }
+  int read(uint8_t* b, size_t n) { return c.read(b, n); }
+  uint32_t nowMs() { return millis(); }
+  void idle() { delay(1); }
+};
+
+// A String that stops at the manifest cap: the sink for the sized read, and the Print HTTPClient::writeToPrint() fills for a body
+// of unknown length.
+class ManifestSink : public Print {
+ public:
+  explicit ManifestSink(String& s) : s_(s) {}
+  size_t write(uint8_t b) override { return write(&b, 1); }
+  size_t write(const uint8_t* p, size_t n) override {
+    if (s_.length() + n > fry::kManifestMaxBytes) return 0;
+    return s_.concat(reinterpret_cast<const char*>(p), static_cast<unsigned int>(n)) ? n : 0;
+  }
+  bool append(const uint8_t* p, size_t n) { return write(p, n) == n; }
+
+ private:
+  String& s_;
+};
+
+// The manifest body after a 200: read exactly Content-Length bytes by our own loop; a body of unknown length goes through
+// HTTPClient's bounded stream copy with its result checked. Prints its own line when the body did not arrive whole.
+// A frame of its own (the GET is over, no connection opens under it), like evaluateManifest().
+FRY_OTA_ESP8266_NOINLINE static fry::ManifestRead readManifest(HTTPClient& http, WiFiClientSecure& sec, String& body) {
+  const int size = http.getSize();
+  fry::ManifestRead r = fry::ManifestRead::Ok;
+  int err = 0;
+  switch (fry::classifyManifestSize(size)) {
+    case fry::ManifestSize::TooBig:
+      r = fry::ManifestRead::TooBig;
+      break;
+    case fry::ManifestSize::Sized: {
+      WiFiClient* stream = http.getStreamPtr();
+      if (!stream) {
+        r = fry::ManifestRead::Closed;
+      } else if (!body.reserve(static_cast<unsigned int>(size) + 1)) {
+        r = fry::ManifestRead::NoRoom;
+      } else {
+        ManifestConn conn{*stream};
+        ManifestSink sink(body);
+        r = fry::readManifestBody(conn, static_cast<size_t>(size), fry::kManifestReadTimeoutMs, sink);
+      }
+      break;
+    }
+    case fry::ManifestSize::Unsized: {
+      ManifestSink sink(body);
+      err = http.writeToPrint(&sink);
+      if (err <= 0) r = fry::ManifestRead::Closed;
+      break;
+    }
+  }
+  if (r != fry::ManifestRead::Ok) {
+    // got/of say how much arrived, err is HTTPClient's own code (unsized only), ssl is BearSSL's last error (0 = none).
+    Serial.printf("ota: manifest read failed (%s) got=%u of %d err=%d ssl=%d blk=%u\n", fry::manifestReadName(r),
+                  static_cast<unsigned>(body.length()), size, err, sec.getLastSSLError(),
+                  static_cast<unsigned>(fry::queryMaxFreeBlock()));
+  }
+  return r;
+}
 #endif
 
 bool checkNow() {
 #if defined(ARDUINO_ARCH_ESP8266)
   s_heapRefused = false;
+#endif
+#if defined(ARDUINO_ARCH_ESP8266)
+  s_readFailed = false;
 #endif
 #if !defined(ARDUINO_ARCH_ESP8266)
   // esp_ota_begin() refuses while the running image is unconfirmed, and the other slot is the
@@ -663,7 +736,18 @@ bool checkNow() {
     http.end();
     return false;
   }
+#if defined(ARDUINO_ARCH_ESP8266)
+  // Not getString(): it hands back "" when the body is lost (readManifest()).
+  String body;
+  const fry::ManifestRead rd = readManifest(http, sec, body);
+  if (rd != fry::ManifestRead::Ok) {
+    if (fry::manifestReadRetrySoon(rd)) s_readFailed = true;
+    http.end();
+    return false;
+  }
+#else
   String body = http.getString();
+#endif
   http.end();
 
 #if defined(ARDUINO_ARCH_ESP8266)
@@ -789,9 +873,12 @@ static bool holdForTimeWait(unsigned long now) {
 #endif
 
 #if defined(ARDUINO_ARCH_ESP8266)
-// After a check: the normal wait, or the bounded shorter one when a heap gate refused it (lib/fry_core/ota_retry.h).
+// After a check: the normal wait, or the bounded shorter one when a heap gate refused it or its manifest body did not arrive whole
+// (lib/fry_core/ota_retry.h). Each has its own run of retries; a check is at most one of the two.
 static void afterCheck(unsigned long now) {
-  const uint32_t wait = fry::otaNextCheckDelayMs(s_heapRefused, s_heapRetries, OTA_CHECK_MS);
+  uint32_t wait = fry::otaNextCheckDelayMs(s_heapRefused, s_heapRetries, OTA_CHECK_MS);
+  const uint32_t readWait = fry::otaNextCheckDelayMs(s_readFailed, s_readRetries, OTA_CHECK_MS);
+  if (readWait < wait) wait = readWait;
   s_lastCheckMs = now - (OTA_CHECK_MS - wait);  // the next check fires `wait` after `now`
 }
 #endif
