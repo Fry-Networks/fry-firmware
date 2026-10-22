@@ -10,6 +10,7 @@
 #endif
 
 #include "config.h"
+#include "flash_print.h"
 #include "fry_config.h"
 #include "heartbeat_fields.h"
 #include "http_tls.h"
@@ -170,7 +171,7 @@ bool registerInstallation() {
 #if defined(ARDUINO_ARCH_ESP8266)
   std::unique_ptr<RegText> text(new (std::nothrow) RegText());
   if (!text) {
-    Serial.println("api: no memory for the registration");
+    FRY_PRINTLN("api: no memory for the registration");
     return false;
   }
   char (&minerKey)[40] = text->minerKey;
@@ -182,7 +183,7 @@ bool registerInstallation() {
     // USER_SUPPLIED board without a key: there is nothing to register as. Not an API failure.
     if (!s_loggedNoKey) {
       s_loggedNoKey = true;
-      Serial.println("api: registration skipped - no miner key yet");
+      FRY_PRINTLN("api: registration skipped - no miner key yet");
     }
     fry_provisioning::notifyKeyMissing();
     return false;
@@ -233,7 +234,7 @@ bool registerInstallation() {
 #if defined(ARDUINO_ARCH_ESP8266)
     std::unique_ptr<RegClients> clients(new (std::nothrow) RegClients());
     if (!clients) {
-      Serial.println("api: no memory for the registration client");
+      FRY_PRINTLN("api: no memory for the registration client");
       break;  // code -1, Unreachable: the failure bookkeeping below backs off as for an unreachable server
     }
     WiFiClientSecure& sec = clients->sec;
@@ -258,7 +259,7 @@ bool registerInstallation() {
       const char* token = rdoc["device_token"] | "";
       if (strlen(token) > 0) fry_config::setDeviceToken(token);
       http.end();
-      Serial.printf("api: registered install=%s token=%s\n", installId,
+      FRY_PRINTF("api: registered install=%s token=%s\n", installId,
                     strlen(token) > 0 ? "present" : "none");
       if (!fry_config::getKeyOk()) fry_config::setKeyOk(true);  // the key is now confirmed
       s_regFailures = 0;
@@ -282,11 +283,11 @@ bool registerInstallation() {
   s_nextRegisterDelayMs = fry::nextRegisterDelayMs(cls, s_regFailures);
   const fry::ProvErr err = fry::regClassProvErr(cls);
   if (cls == fry::RegClass::Unreachable) {
-    Serial.printf("api: registration failed install=%s http=%d detail=%u (%s) next=%lus\n", installId,
+    FRY_PRINTF("api: registration failed install=%s http=%d detail=%u (%s) next=%lus\n", installId,
                   code, static_cast<unsigned>(err), fry::regClassText(cls),
                   s_nextRegisterDelayMs / 1000UL);
   } else {
-    Serial.printf("api: register rejected http=%d detail=%u (%s) server=\"%s\" next=%lus\n", code,
+    FRY_PRINTF("api: register rejected http=%d detail=%u (%s) server=\"%s\" next=%lus\n", code,
                   static_cast<unsigned>(err), fry::regClassText(cls), detail,
                   s_nextRegisterDelayMs / 1000UL);
   }
@@ -364,7 +365,7 @@ bool getVersions(String& outJson) {
   } else if (code >= 400 && code < 500) {
     // Terminal, same as registration — e.g. a 422 because FRY_MINER_CODE isn't in the server's
     // accepted enum yet. Not retried here; the caller's own cadence decides when to try again.
-    Serial.printf("api: version check rejected http=%d - server does not accept this miner code yet\n",
+    FRY_PRINTF("api: version check rejected http=%d - server does not accept this miner code yet\n",
                   code);
   }
   http.end();
@@ -404,7 +405,7 @@ void tick() {
     int slot = computeSlot();
     int putCode = putPoc();
     bool leaseOk = renewLease();
-    Serial.printf("poc: slot=%d put=%d lease=%s\n", slot, putCode, leaseOk ? "true" : "false");
+    FRY_PRINTF("poc: slot=%d put=%d lease=%s\n", slot, putCode, leaseOk ? "true" : "false");
   }
 }
 
