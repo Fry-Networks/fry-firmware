@@ -11,8 +11,14 @@
 #define FRY_PRINTF(fmt, ...) Serial.printf_P(PSTR(fmt), ##__VA_ARGS__)
 #define FRY_PRINTLN(text) Serial.println(F(text))
 #define FRY_PRINT(text) Serial.print(F(text))
+// A text handed to a function: FryText is the flash string on the ESP8266 and the const char* the ESP32 family always passed, FRY_TEXT("..") makes
+// one, and Serial.println(text) takes either. (The ESP32 images do not change.)
+typedef const __FlashStringHelper* FryText;
+#define FRY_TEXT(text) F(text)
 #else
 #define FRY_PRINTF(fmt, ...) Serial.printf(fmt, ##__VA_ARGS__)
 #define FRY_PRINTLN(text) Serial.println(text)
 #define FRY_PRINT(text) Serial.print(text)
+typedef const char* FryText;
+#define FRY_TEXT(text) text
 #endif

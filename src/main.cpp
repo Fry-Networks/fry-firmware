@@ -20,6 +20,7 @@
 #include "core/vpn_relay.h"
 #include "core/wifi_station.h"
 #include "heap_gate.h"
+#include "flash_fmt.h"
 #include "key_policy.h"
 #include "reset_button.h"
 
@@ -80,8 +81,8 @@ void pollFactoryResetButton() {
 void print_mac(char* out, size_t outLen) {
   uint8_t mac[6];
   WiFi.macAddress(mac);
-  snprintf(out, outLen, "%02X:%02X:%02X:%02X:%02X:%02X", mac[0], mac[1], mac[2], mac[3], mac[4],
-           mac[5]);
+  FRY_SNPRINTF(out, outLen, "%02X:%02X:%02X:%02X:%02X:%02X", mac[0], mac[1], mac[2], mac[3], mac[4],
+               mac[5]);
 }
 
 // PROTOCOL.md section 9: `[health] up=<s> heap=<free> blk=<maxblock> rssi=<dbm> vpn=<up|down>
@@ -135,7 +136,7 @@ void attemptWifiConnect() {
 // A 0xF0 write over USB stored a different key. A board still provisioning simply registers with
 // it after the join; one that is already Ready restarts so every subsystem (registration, lease,
 // PoC, WireGuard) starts over under the new identity.
-void restartToApply(const char* why) {
+void restartToApply(FryText why) {
   Serial.println(why);
   // Not a failure: if this image is still pending, the bootloader rolls it back on this restart,
   // and the previous image must not count that as a strike against it (PROTOCOL.md 11.8).
@@ -148,7 +149,7 @@ void restartToApply(const char* why) {
 void onOwnerKeyChanged() {
   fry_identity::ensureMinerKey(s_minerKey, sizeof(s_minerKey));
   if (s_phase != BootPhase::Ready) return;
-  restartToApply("[prov] miner key changed - restarting to register with the new key");
+  restartToApply(FRY_TEXT("[prov] miner key changed - restarting to register with the new key"));
 }
 
 }  // namespace
@@ -245,7 +246,7 @@ void loop() {
       // running, e.g. the app after a Wi-Fi-only Improv setup. They are persisted; nothing in this
       // phase would ever act on them, so boot into them.
       if (fry_provisioning::readyToConnect()) {
-        restartToApply("[prov] new settings committed while running - restarting to join with them");
+        restartToApply(FRY_TEXT("[prov] new settings committed while running - restarting to join with them"));
       }
       fry_vpn::tick();  // ESP8266: pumps the SOCKS5 relay; ESP32: polls the WG handshake state
       fry_trigger_report_loop_tick(); FRY_OLOSTEP_TICK()  // T5 overrides; weak default is a no-op

@@ -124,6 +124,30 @@ void test_wifi_provisioning_keeps_its_text_in_flash() {
   TEST_ASSERT_EQUAL_INT_MESSAGE(0, callsWithLiteralSecondArg(src, "s_server.send_P("), "send_P(): PSTR() for the content type");
 }
 
+void test_fry_text_is_a_flash_string_on_the_esp8266_and_the_plain_pointer_elsewhere() {
+  std::string h;
+  TEST_ASSERT_TRUE_MESSAGE(loadSource("src/core/flash_print.h", h), "cannot read src/core/flash_print.h");
+  const size_t esp8266 = h.find("#if defined(ARDUINO_ARCH_ESP8266)");
+  const size_t other = h.find("#else");
+  TEST_ASSERT_TRUE_MESSAGE(esp8266 != std::string::npos && other != std::string::npos && esp8266 < other, "ESP8266 branch, then the rest");
+  const std::string a = h.substr(esp8266, other - esp8266);
+  const std::string b = h.substr(other);
+  TEST_ASSERT_EQUAL_INT(1, countOf(a, "typedef const __FlashStringHelper* FryText;"));
+  TEST_ASSERT_EQUAL_INT(1, countOf(a, "#define FRY_TEXT(text) F(text)"));
+  TEST_ASSERT_EQUAL_INT_MESSAGE(1, countOf(b, "typedef const char* FryText;"), "the ESP32 family keeps the const char* it passed");
+  TEST_ASSERT_EQUAL_INT(1, countOf(b, "#define FRY_TEXT(text) text"));
+}
+
+void test_main_keeps_its_text_in_flash() {
+  const char* f = "src/main.cpp";
+  expectNoRawCall(f, "snprintf");
+  expectNoPiece(f, "restartToApply(\"");        // restartToApply(FRY_TEXT("..")): the message is a flash string
+  expectNoPiece(f, "restartToApply(const char*");
+  std::string src;
+  TEST_ASSERT_TRUE(loadSource(f, src));
+  TEST_ASSERT_EQUAL_INT_MESSAGE(1, countOf(src, "void restartToApply(FryText why) {"), "the helper takes the text as FryText");
+}
+
 // Unity's setUp/tearDown have C linkage, so they must sit at global scope.
 void setUp() {}
 void tearDown() {}
@@ -133,5 +157,7 @@ int main(int, char**) {
   RUN_TEST(test_the_macro_reads_its_format_from_flash_on_the_esp8266_and_keeps_snprintf_elsewhere);
   RUN_TEST(test_telemetry_body_formats_from_flash);
   RUN_TEST(test_wifi_provisioning_keeps_its_text_in_flash);
+  RUN_TEST(test_fry_text_is_a_flash_string_on_the_esp8266_and_the_plain_pointer_elsewhere);
+  RUN_TEST(test_main_keeps_its_text_in_flash);
   return UNITY_END();
 }
