@@ -89,6 +89,7 @@ void test_ota_client_prints_its_text_from_flash() { expectNoDramLiteralPrints("s
 void test_telemetry_prints_its_text_from_flash() { expectNoDramLiteralPrints("src/core/telemetry.cpp"); }
 void test_hardwareapi_prints_its_text_from_flash() { expectNoDramLiteralPrints("src/core/hardwareapi_client.cpp"); }
 void test_wifi_provisioning_prints_its_text_from_flash() { expectNoDramLiteralPrints("src/esp8266/wifi_provisioning.cpp"); }
+void test_main_prints_its_text_from_flash() { expectNoDramLiteralPrints("src/main.cpp"); }
 
 // Unity's setUp/tearDown have C linkage, so they must sit at global scope.
 void setUp() {}
@@ -101,5 +102,6 @@ int main(int, char**) {
   RUN_TEST(test_telemetry_prints_its_text_from_flash);
   RUN_TEST(test_hardwareapi_prints_its_text_from_flash);
   RUN_TEST(test_wifi_provisioning_prints_its_text_from_flash);
+  RUN_TEST(test_main_prints_its_text_from_flash);
   return UNITY_END();
 }

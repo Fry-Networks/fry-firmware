@@ -10,6 +10,7 @@
 #include "boot_policy.h"
 #include "config.h"
 #include "core/fry_config.h"
+#include "core/flash_print.h"
 #include "core/improv_serial_glue.h"
 #include "core/miner_key.h"
 #include "core/ota_client.h"
@@ -60,7 +61,7 @@ void pollFactoryResetButton() {
   bool pressed = digitalRead(FRY_RESET_BUTTON_PIN) == LOW;
 
   if (s_resetButton.update(pressed, static_cast<uint32_t>(now))) {
-    Serial.println("[reset] factory reset - clearing wifi + wallet, identity preserved");
+    FRY_PRINTLN("[reset] factory reset - clearing wifi + wallet, identity preserved");
     Serial.flush();
     fry_config::factoryReset();
     ESP.restart();
@@ -71,7 +72,7 @@ void pollFactoryResetButton() {
   uint32_t held = s_resetButton.heldMs(static_cast<uint32_t>(now));
   if (held >= 1000 && now - s_lastResetHintMs >= 1000) {
     s_lastResetHintMs = now;
-    Serial.printf("[reset] hold %lus/%lus\n", (unsigned long)(held / 1000),
+    FRY_PRINTF("[reset] hold %lus/%lus\n", (unsigned long)(held / 1000),
                   (unsigned long)(fry::kFactoryResetHoldMs / 1000));
   }
 }
@@ -93,7 +94,7 @@ void emitHealthLogIfDue() {
   // for both, so the field that the OTA gate actually decides on was invisible in every log we
   // have — a board could report blk=149668 while refusing an update for want of a 36 KB block.
   // fry::queryMaxFreeBlock() is the same source the gate reads.
-  Serial.printf("[health] up=%lus heap=%u blk=%u rssi=%d vpn=%s relayed=%u temp=na\n",
+  FRY_PRINTF("[health] up=%lus heap=%u blk=%u rssi=%d vpn=%s relayed=%u temp=na\n",
                 now / 1000, static_cast<unsigned>(ESP.getFreeHeap()),
                 static_cast<unsigned>(fry::queryMaxFreeBlock()),
                 fry_wifi::isConnected() ? fry_wifi::rssi() : 0, fry_vpn::isUp() ? "up" : "down",
@@ -174,13 +175,13 @@ void setup() {
     fry::maskMinerKeyLast4(s_minerKey, keyMasked, sizeof(keyMasked));
     keyForLog = keyMasked;
   }
-  Serial.printf("FRY boot v%s chip=%s mac=%s minerkey=%s\n", FRY_FIRMWARE_VERSION, FRY_CHIP, mac,
+  FRY_PRINTF("FRY boot v%s chip=%s mac=%s minerkey=%s\n", FRY_FIRMWARE_VERSION, FRY_CHIP, mac,
                 keyForLog);
 
 #if defined(FRY_TEST_FAULT) && FRY_TEST_FAULT == 1
   // Test channel only (src/core/ota_client.h #errors otherwise): an image that dies before it can
   // prove itself, so the bootloader must roll it back.
-  Serial.println("[fault] FRY_TEST_FAULT=1 - aborting in setup() after the banner");
+  FRY_PRINTLN("[fault] FRY_TEST_FAULT=1 - aborting in setup() after the banner");
   Serial.flush();
   abort();
 #endif
@@ -202,11 +203,11 @@ void setup() {
       fry_config::hasWifi(), fry_config::hasWallet(), fry_config::hasProvDone());
   const bool keyOk = fry::keyAllowsJoin(fry::kBuildKeyModel, s_minerKey[0] != 0);
   if (hasCredentials && !keyOk) {
-    Serial.println("[boot] wifi credentials stored but no miner key - staying provisionable");
+    FRY_PRINTLN("[boot] wifi credentials stored but no miner key - staying provisionable");
   }
   setPhase(fry::initialBootPhase(hasCredentials && keyOk));
 
-  Serial.println("[boot] ready");
+  FRY_PRINTLN("[boot] ready");
 }
 
 void loop() {
