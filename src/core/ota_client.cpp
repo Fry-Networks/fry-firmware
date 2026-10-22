@@ -3,6 +3,9 @@
 #include <ArduinoJson.h>
 #if defined(ARDUINO_ARCH_ESP8266)
 #include <Updater.h>  // ESP8266 core header is named Updater.h, not Update.h
+
+#include <memory>
+#include <new>
 #else
 #include <Update.h>
 #endif
@@ -53,6 +56,20 @@
 #define FRY_OTA_DEFAULT_MANIFEST OTA_MANIFEST_URL
 #define FRY_OTA_CHANNEL "prod"
 #define FRY_OTA_VERIFY_DEADLINE_MS fry::kOtaVerifyDeadlineProdMs
+#endif
+
+#if defined(ARDUINO_ARCH_ESP8266)
+// The ESP8266 runs loop() on a 4096 B stack (core cont.h CONT_STACKSIZE) and everything below it - the TLS
+// connect chain and a level-1 interrupt frame (XTOS reserves 256 B, ~350 B with the WiFi handler) - has to fit
+// in what checkNow() leaves. downloadAndApply() is called once, so the compiler inlines it, and its locals
+// (second HTTPClient + WiFiClientSecure + WiFiClient, Sha256, the read buffer) then sit in checkNow()'s frame for
+// the whole manifest GET: 1920 B. With ~2272 B used when the GET starts, the connect overran the stack by ~430 B
+// on the bench board, overwrote cont_t's pc_suspend/sp_suspend (so nothing could yield any more: no send, no
+// ACK, no timer for 15 s), and the soft WDT fired. Keep the download out of checkNow()'s frame.
+// Not applied on the ESP32 (RTOS task stacks): its image must not change.
+#define FRY_OTA_ESP8266_NOINLINE __attribute__((noinline))
+#else
+#define FRY_OTA_ESP8266_NOINLINE
 #endif
 
 namespace fry_ota {
@@ -172,7 +189,8 @@ bool otaBeginUrl(HTTPClient& http, WiFiClientSecure& sec, WiFiClient& plain, con
   return true;
 }
 
-bool downloadAndApply(const String& url, const String& shaExpect, const String& newVersion) {
+FRY_OTA_ESP8266_NOINLINE bool downloadAndApply(const String& url, const String& shaExpect,
+                                               const String& newVersion) {
   HTTPClient http;
   WiFiClientSecure sec;
   WiFiClient plain;
@@ -223,14 +241,28 @@ bool downloadAndApply(const String& url, const String& shaExpect, const String& 
 
   fry::Sha256 sha;
   WiFiClient* stream = http.getStreamPtr();
-  uint8_t buf[1024];
+  constexpr size_t kBufBytes = 1024;
+#if defined(ARDUINO_ARCH_ESP8266)
+  // On the heap, not the 4 KB loop stack: this frame is on the stack (below checkNow()) while the TLS
+  // session opens, and 1 KB of it is what took the connect past the end of the stack.
+  std::unique_ptr<uint8_t[]> bufHeap(new (std::nothrow) uint8_t[kBufBytes]);
+  if (!bufHeap) {
+    Serial.println("ota: no memory for the download buffer");
+    Update.end(false);
+    http.end();
+    return false;
+  }
+  uint8_t* const buf = bufHeap.get();
+#else
+  uint8_t buf[kBufBytes];
+#endif
   size_t done = 0;
   unsigned long lastData = millis();
   unsigned long lastLog = 0;
   while (done < static_cast<size_t>(len)) {
     size_t avail = stream->available();
     if (avail) {
-      int r = stream->readBytes(buf, avail > sizeof(buf) ? sizeof(buf) : avail);
+      int r = stream->readBytes(buf, avail > kBufBytes ? kBufBytes : avail);
       if (r <= 0) break;
       sha.update(buf, r);
       if (Update.write(buf, r) != static_cast<size_t>(r)) {
