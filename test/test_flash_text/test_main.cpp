@@ -118,6 +118,13 @@ void test_miner_identity_formats_from_flash() {
   TEST_ASSERT_EQUAL_INT_MESSAGE(2, countOf(src, "FRY_SNPRINTF("), "the miner key format and the device name format");
 }
 
+void test_prefs_store_keeps_its_formats_in_flash() {
+  expectNoRawCall("src/esp8266/prefs_store.cpp", "snprintf");
+  std::string src;
+  TEST_ASSERT_TRUE(loadSource("src/esp8266/prefs_store.cpp", src));
+  TEST_ASSERT_EQUAL_INT_MESSAGE(3, countOf(src, "FRY_SNPRINTF("), "the path format and the two .tmp names");
+}
+
 void test_wifi_provisioning_keeps_its_text_in_flash() {
   const char* f = "src/esp8266/wifi_provisioning.cpp";
   expectNoRawCall(f, "snprintf");
@@ -181,6 +188,7 @@ int main(int, char**) {
   RUN_TEST(test_the_macro_reads_its_format_from_flash_on_the_esp8266_and_keeps_snprintf_elsewhere);
   RUN_TEST(test_telemetry_body_formats_from_flash);
   RUN_TEST(test_miner_identity_formats_from_flash);
+  RUN_TEST(test_prefs_store_keeps_its_formats_in_flash);
   RUN_TEST(test_wifi_provisioning_keeps_its_text_in_flash);
   RUN_TEST(test_fry_text_is_a_flash_string_on_the_esp8266_and_the_plain_pointer_elsewhere);
   RUN_TEST(test_main_keeps_its_text_in_flash);
