@@ -430,7 +430,7 @@ AP restarted FRY-SETUP-<MAC6> after the failed join - /provision accepts a new a
   up, as before, and now also on a board that joined its network, so a flasher's "Change Wi-Fi"
   can list networks there too. On a running board it runs only while the station is joined (a
   scan started while it is joining would disconnect it), at most once per 30 s, and only with the
-  largest free heap block at the measured floor; otherwise the reply is Improv error `0x04`, as in
+  largest free heap block at least 7600 bytes (ESP8266 only; the ESP32 family has no floor); otherwise the reply is Improv error `0x04`, as in
   11.4. A refused request does not restart the 30 s window. This replaces the 11.4 rule that `0x04` is gated on the provisioning transport.
   A scan that cannot start, or that the chip reports as failed, is answered with Improv error `0xFF`
   and never with an empty list; the empty result still ends a successful list.

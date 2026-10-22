@@ -62,10 +62,13 @@ WiFiMode_t s_scanPrevMode = WIFI_OFF;  // restored when the scan ends
 unsigned long s_lastRunningScanMs = 0;
 bool s_haveLastRunningScan = false;
 
-// Smallest contiguous free block a running board may scan with. TODO(measure): 0 disables the
-// check until it is measured on hardware; the measured value and method go in the commit message.
-#ifndef FRY_IMPROV_SCAN_MIN_BLOCK
-#define FRY_IMPROV_SCAN_MIN_BLOCK 0
+// Smallest contiguous free block a running board may scan with. Only the ESP8266 has one: its
+// scan took up to 3.5 KB of the largest block, while the ESP32 family showed no drop (see
+// kRunningScanMinBlockEsp8266).
+#if defined(ARDUINO_ARCH_ESP8266)
+const uint32_t kScanMinBlock = fry::improv::kRunningScanMinBlockEsp8266;
+#else
+const uint32_t kScanMinBlock = 0;
 #endif
 
 void writePacket(size_t n) {
@@ -290,7 +293,7 @@ void dispatch(bool transportRunning) {
       // A board that joined its network is scanned only when that cannot disturb the station.
       if (fry::improv::admitScan(transportRunning, fry_wifi::isConnected(), s_haveLastRunningScan,
                                  millis(), s_lastRunningScanMs, fry::queryMaxFreeBlock(),
-                                 FRY_IMPROV_SCAN_MIN_BLOCK) == fry::improv::ScanAdmit::Refuse) {
+                                 kScanMinBlock) == fry::improv::ScanAdmit::Refuse) {
         sendError(Error::NotAuthorized);
         break;
       }

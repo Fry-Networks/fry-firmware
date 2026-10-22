@@ -45,6 +45,12 @@ enum class ScanAdmit : uint8_t { Run, Refuse };
 // A running board's scan stalls the radio for the seconds it takes, so it is spaced out.
 const unsigned long kRunningScanMinIntervalMs = 30000;
 
+// Smallest contiguous free block an ESP8266 running board scans with (src/core/improv_serial_glue.cpp
+// passes it as minBlock). Bench, keyed joined ESP8266 on 0.4.9 + diag build, 6 scans: block at request
+// 29248..37032; largest block drop start->done 3504 (37032 -> 33528, 24 networks). Floor = that drop +
+// 4096 margin. ESP32/C3 keep no floor (block 110580 / 118772, drop 0).
+const uint32_t kRunningScanMinBlockEsp8266 = 7600;
+
 // transportRunning (the board is provisionable): always Run, as before. Otherwise (a board that
 // joined its network) Run only when the station is joined (a scan started while it is joining
 // would disconnect it), the last running-phase scan is at least kRunningScanMinIntervalMs old

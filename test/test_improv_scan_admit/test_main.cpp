@@ -67,6 +67,16 @@ void test_heap_floor_edge() {
   TEST_ASSERT_EQUAL(ScanAdmit::Refuse, admitScan(false, true, false, 5000, 0, kFloor - 1, kFloor));
 }
 
+void test_esp8266_floor_is_the_measured_drop_plus_margin() {
+  const uint32_t floor = fry::improv::kRunningScanMinBlockEsp8266;
+  // Measured on the bench: largest block drop during a scan 3504; 4096 margin.
+  TEST_ASSERT_EQUAL_UINT32(3504 + 4096, floor);
+  TEST_ASSERT_EQUAL(ScanAdmit::Run, admitScan(false, true, false, 5000, 0, floor, floor));
+  TEST_ASSERT_EQUAL(ScanAdmit::Refuse, admitScan(false, true, false, 5000, 0, floor - 1, floor));
+  // The healthy running board (lowest block seen at a request: 29248) is never refused by it.
+  TEST_ASSERT_EQUAL(ScanAdmit::Run, admitScan(false, true, false, 5000, 0, 29248, floor));
+}
+
 void test_failed_scan_start_is_not_a_started_scan() {
   TEST_ASSERT_EQUAL(ScanStart::Failed, classifyScanStart(kScanFailed));
   TEST_ASSERT_EQUAL(ScanStart::Started, classifyScanStart(kScanRunning));
@@ -95,6 +105,7 @@ int main() {
   RUN_TEST(test_running_scan_at_the_interval_is_admitted);
   RUN_TEST(test_millis_wrap_does_not_lock_the_scan_out_or_skip_the_interval);
   RUN_TEST(test_heap_floor_edge);
+  RUN_TEST(test_esp8266_floor_is_the_measured_drop_plus_margin);
   RUN_TEST(test_failed_scan_start_is_not_a_started_scan);
   RUN_TEST(test_poll_failed_scan_is_an_error_not_zero_rows);
   return UNITY_END();
