@@ -27,6 +27,7 @@
 #include "ota_retry.h"
 #include "ota_rollout_json.h"
 #include "ota_session.h"
+#include "ota_settle.h"
 #include "ota_timewait.h"
 #include "sha256.h"
 #include "tls_sizing.h"
@@ -263,9 +264,36 @@ struct OtaPlan {
 };
 #endif
 
+#if defined(ARDUINO_ARCH_ESP8266)
+// The largest free block when checkNow() started its manifest check (after the plan's Strings were reserved): what the download waits for.
+static uint32_t s_blkAtCheckStart = 0;
+
+// Between the manifest and the download: the manifest connection's pcb (192 B), the pbuf of its last TLS record (112 B) and that record's
+// tcp_seg (24 B) are freed by lwIP once the peer answers the close, a few milliseconds to a second after the clients are gone. The download's
+// constructors must not run before that: they would run on a heap those blocks split, and where they land decides where the 432 B work block
+// and the 6208 B BearSSL thunk go (lib/fry_core/ota_settle.h, bench X2: the download's block 29072 -> 23000 -> 22648 -> 15008 over seven checks).
+// Bounded, and silent when there was nothing to wait for. The messages stay under 64 B: Serial.printf of a longer one allocates.
+// It runs first thing in downloadAndApply(), after checkNow() released the manifest's clients, body and url (test_ota_release pins that block).
+FRY_OTA_ESP8266_NOINLINE static void settleAfterManifest(uint32_t blkBefore) {
+  const unsigned long t0 = millis();
+  uint32_t blk = fry::queryMaxFreeBlock();
+  while (fry::decideHeapSettle(blk, blkBefore, fry::kOtaSettleSlackBytes, static_cast<uint32_t>(millis() - t0),
+                               fry::kOtaSettleMaxMs) == fry::SettleHold::Hold) {
+    delay(fry::kOtaSettlePollMs);
+    blk = fry::queryMaxFreeBlock();
+  }
+  const unsigned long waited = millis() - t0;
+  if (waited == 0) return;
+  const bool back = blk + fry::kOtaSettleSlackBytes >= blkBefore;
+  Serial.printf_P(back ? PSTR("ota: settled %lu ms, blk %u (start %u)\n") : PSTR("ota: not settled %lu ms, blk %u (start %u)\n"), waited,
+                  static_cast<unsigned>(blk), static_cast<unsigned>(blkBefore));
+}
+#endif
+
 FRY_OTA_ESP8266_NOINLINE bool downloadAndApply(const String& url, const String& shaExpect,
                                                const String& newVersion) {
 #if defined(ARDUINO_ARCH_ESP8266)
+  settleAfterManifest(s_blkAtCheckStart);
   const std::unique_ptr<DownloadWork> work(new (std::nothrow) DownloadWork());
   if (!work) {
     Serial.println("ota: no memory for the download client");
@@ -714,6 +742,8 @@ bool checkNow() {
   // needs (heap map at dl-begin: 104 B + 88 B cut the largest block from 28280 to 14768). Take their capacity first: below the session.
   OtaPlan plan;
   plan.reserveEarly();
+  // Where the check starts: the download's constructors wait for the largest block to be back at this (settleAfterManifest).
+  s_blkAtCheckStart = fry::queryMaxFreeBlock();
   std::unique_ptr<ManifestClients> clients(new (std::nothrow) ManifestClients());
   if (!clients) {
     Serial.println("ota: no memory for the manifest client");
