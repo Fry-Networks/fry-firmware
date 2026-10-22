@@ -104,6 +104,30 @@ void test_the_plan_reserves_every_string_it_hands_to_the_download() {
                            "kUrlCap holds a release-asset URL (the longest published ones are about 100 characters)");
 }
 
+// The assignments in evaluateManifest(): `plan.x = <const char*>;` copies into the capacity that is already there. A temporary String on the
+// right (`plan.url = String(url)`, or a conditional of Strings) is MOVE-assigned in core 3.x: String::move() frees plan.url's reserved buffer
+// and takes the temporary's, which was allocated while the manifest session was live, so the reservation is thrown away and the String is
+// back above the session. The bench probe's forced-download branch did exactly that: it was the 104 B / 88 B survivor of the A and X1 heap
+// maps (104 = a 90-character temporary, 88 = a 64-character one: capacity (n + 16) & ~15, plus the 4 B header, in 8 B blocks).
+bool evaluateManifestBody(std::string& fn) {
+  std::string src;
+  if (!loadSource("src/core/ota_client.cpp", src)) return false;
+  const size_t a = src.find("FRY_OTA_ESP8266_NOINLINE static bool evaluateManifest(const String& body, OtaPlan& plan) {");
+  const size_t b = src.find("#if defined(ARDUINO_ARCH_ESP8266)", src.find("return downloadAndApply(url, sha, latest);", a));
+  if (a == std::string::npos || b == std::string::npos) return false;
+  fn = src.substr(a, b - a);
+  return true;
+}
+
+void test_the_plan_is_filled_from_c_strings() {
+  std::string fn;
+  TEST_ASSERT_TRUE_MESSAGE(evaluateManifestBody(fn), "cannot find evaluateManifest() in src/core/ota_client.cpp");
+  TEST_ASSERT_EQUAL_INT_MESSAGE(1, countOf(fn, "plan.url = url;"), "plan.url is copied from the manifest's const char*");
+  TEST_ASSERT_EQUAL_INT_MESSAGE(1, countOf(fn, "plan.sha = sha;"), "plan.sha too");
+  TEST_ASSERT_EQUAL_INT_MESSAGE(1, countOf(fn, "plan.version = latest;"), "plan.version too");
+  TEST_ASSERT_EQUAL_INT_MESSAGE(3, countOf(fn, "plan."), "and nothing else touches the plan: no String temporaries, no std::move");
+}
+
 }  // namespace
 
 // Unity's setUp/tearDown have C linkage, so they must sit at global scope.
@@ -115,5 +139,6 @@ int main(int, char**) {
   RUN_TEST(test_the_plan_is_reserved_before_the_manifest_clients_exist);
   RUN_TEST(test_the_plan_is_only_on_the_esp8266);
   RUN_TEST(test_the_plan_reserves_every_string_it_hands_to_the_download);
+  RUN_TEST(test_the_plan_is_filled_from_c_strings);
   return UNITY_END();
 }
