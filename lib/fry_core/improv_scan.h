@@ -63,9 +63,12 @@ ScanAdmit admitScan(bool transportRunning, bool staConnected, bool haveLast, uns
 enum class ScanStart : uint8_t { Started, Failed };
 ScanStart classifyScanStart(int rc);
 
-// What WiFi.scanComplete() reports while the glue waits for the scan.
+// What WiFi.scanComplete() reports while the glue waits for the scan. runningBoard: the scan was
+// admitted on a board that joined its network. That board's own AP is visible to a scan with hidden
+// networks shown, so a finished scan with 0 networks is a failed one (the ESP8266 core reports a
+// scan callback with a non-OK status as count 0). A provisionable board's 0 stays a valid empty list.
 enum class ScanPoll : uint8_t { Wait, Failed, Done };
-ScanPoll classifyScanPoll(int n);
+ScanPoll classifyScanPoll(int n, bool runningBoard = false);
 
 }  // namespace improv
 }  // namespace fry

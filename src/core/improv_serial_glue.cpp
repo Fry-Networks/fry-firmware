@@ -61,6 +61,7 @@ WiFiMode_t s_scanPrevMode = WIFI_OFF;  // restored when the scan ends
 // window starts when a running-phase scan started; a refused request does not move it.
 unsigned long s_lastRunningScanMs = 0;
 bool s_haveLastRunningScan = false;
+bool s_scanOnRunningBoard = false;  // the scan in flight was admitted on a joined running board
 
 // Smallest contiguous free block a running board may scan with. Only the ESP8266 has one: its
 // scan took up to 3.5 KB of the largest block, while the ESP32 family showed no drop (see
@@ -198,7 +199,7 @@ bool handleScanRequest() {
 void pollScan() {
   if (!s_scanRunning) return;
   const int n = WiFi.scanComplete();
-  const fry::improv::ScanPoll state = fry::improv::classifyScanPoll(n);
+  const fry::improv::ScanPoll state = fry::improv::classifyScanPoll(n, s_scanOnRunningBoard);
   if (state == fry::improv::ScanPoll::Wait) return;
   s_scanRunning = false;
   if (state == fry::improv::ScanPoll::Failed) {
@@ -297,9 +298,12 @@ void dispatch(bool transportRunning) {
         sendError(Error::NotAuthorized);
         break;
       }
-      if (handleScanRequest() && !transportRunning) {
-        s_lastRunningScanMs = millis();
-        s_haveLastRunningScan = true;
+      if (handleScanRequest()) {
+        s_scanOnRunningBoard = !transportRunning;
+        if (!transportRunning) {
+          s_lastRunningScanMs = millis();
+          s_haveLastRunningScan = true;
+        }
       }
       break;
     case Command::FrySetMinerKey:

@@ -48,9 +48,10 @@ ScanStart classifyScanStart(int rc) {
   return rc == kScanFailed ? ScanStart::Failed : ScanStart::Started;
 }
 
-ScanPoll classifyScanPoll(int n) {
+ScanPoll classifyScanPoll(int n, bool runningBoard) {
   if (n == kScanRunning) return ScanPoll::Wait;
-  return n == kScanFailed ? ScanPoll::Failed : ScanPoll::Done;
+  if (n == kScanFailed) return ScanPoll::Failed;
+  return (n == 0 && runningBoard) ? ScanPoll::Failed : ScanPoll::Done;
 }
 
 }  // namespace improv

@@ -91,6 +91,16 @@ void test_poll_failed_scan_is_an_error_not_zero_rows() {
   TEST_ASSERT_EQUAL(ScanPoll::Done, classifyScanPoll(7));
 }
 
+void test_poll_zero_networks_on_a_joined_running_board_is_an_error() {
+  TEST_ASSERT_EQUAL(ScanPoll::Failed, classifyScanPoll(0, true));
+  TEST_ASSERT_EQUAL(ScanPoll::Done, classifyScanPoll(1, true));
+  TEST_ASSERT_EQUAL(ScanPoll::Wait, classifyScanPoll(kScanRunning, true));
+  TEST_ASSERT_EQUAL(ScanPoll::Failed, classifyScanPoll(kScanFailed, true));
+  // A provisionable board's empty scan is a legitimate empty list.
+  TEST_ASSERT_EQUAL(ScanPoll::Done, classifyScanPoll(0, false));
+  TEST_ASSERT_EQUAL(ScanPoll::Done, classifyScanPoll(0));
+}
+
 }  // namespace
 
 void setUp() {}
@@ -108,5 +118,6 @@ int main() {
   RUN_TEST(test_esp8266_floor_is_the_measured_drop_plus_margin);
   RUN_TEST(test_failed_scan_start_is_not_a_started_scan);
   RUN_TEST(test_poll_failed_scan_is_an_error_not_zero_rows);
+  RUN_TEST(test_poll_zero_networks_on_a_joined_running_board_is_an_error);
   return UNITY_END();
 }
