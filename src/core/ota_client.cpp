@@ -189,11 +189,54 @@ bool otaBeginUrl(HTTPClient& http, WiFiClientSecure& sec, WiFiClient& plain, con
   return true;
 }
 
-FRY_OTA_ESP8266_NOINLINE bool downloadAndApply(const String& url, const String& shaExpect,
-                                               const String& newVersion) {
+#if defined(ARDUINO_ARCH_ESP8266)
+// Second cut at the same 4 KB loop stack (the first, FRY_OTA_ESP8266_NOINLINE + the heap read buffer, left ~350 B
+// free below a manifest GET on the bench): checkNow() and downloadAndApply() are on the stack, one above the other,
+// while the TLS connect runs below them, and what they hold across it is the cost. HTTPClient + WiFiClientSecure +
+// WiFiClient are 204 B, fry::Sha256 + digest + hex ~200 B more; they live in one heap block per function (same
+// lifetime as the stack objects had: destroyed when the function returns), and the manifest decision, which needs
+// a JsonDocument and two key/digest buffers but no connection, runs in its own frame after the GET.
+// Frames (gcc -fstack-usage, tools/check_esp8266_stack_budget.py): checkNow 560 -> 128 B, downloadAndApply 512 ->
+// 112 B, evaluateManifest 208 B (sequential with the GET, not nested in it).
+struct ManifestClients {
   HTTPClient http;
   WiFiClientSecure sec;
   WiFiClient plain;
+};
+
+struct DownloadWork {
+  HTTPClient http;
+  WiFiClientSecure sec;
+  WiFiClient plain;
+  fry::Sha256 sha;
+  uint8_t digest[32];
+  char hex[65];
+};
+
+// What the manifest decided: the download's arguments.
+struct OtaPlan {
+  String url;
+  String sha;
+  String version;
+};
+#endif
+
+FRY_OTA_ESP8266_NOINLINE bool downloadAndApply(const String& url, const String& shaExpect,
+                                               const String& newVersion) {
+#if defined(ARDUINO_ARCH_ESP8266)
+  const std::unique_ptr<DownloadWork> work(new (std::nothrow) DownloadWork());
+  if (!work) {
+    Serial.println("ota: no memory for the download client");
+    return false;
+  }
+  HTTPClient& http = work->http;
+  WiFiClientSecure& sec = work->sec;
+  WiFiClient& plain = work->plain;
+#else
+  HTTPClient http;
+  WiFiClientSecure sec;
+  WiFiClient plain;
+#endif
   if (!otaBeginUrl(http, sec, plain, url)) {
     Serial.println("ota: begin failed");
     return false;
@@ -239,7 +282,11 @@ FRY_OTA_ESP8266_NOINLINE bool downloadAndApply(const String& url, const String& 
     return false;
   }
 
+#if defined(ARDUINO_ARCH_ESP8266)
+  fry::Sha256& sha = work->sha;
+#else
   fry::Sha256 sha;
+#endif
   WiFiClient* stream = http.getStreamPtr();
   constexpr size_t kBufBytes = 1024;
 #if defined(ARDUINO_ARCH_ESP8266)
@@ -303,9 +350,14 @@ FRY_OTA_ESP8266_NOINLINE bool downloadAndApply(const String& url, const String& 
     return false;
   }
 
+#if defined(ARDUINO_ARCH_ESP8266)
+  uint8_t(&digest)[32] = work->digest;
+  char(&hex)[65] = work->hex;
+#else
   uint8_t digest[32];
-  sha.finish(digest);
   char hex[65];
+#endif
+  sha.finish(digest);
   fry::bytesToHexUpper(digest, 32, hex, sizeof(hex));
   String got = hex;
   got.toLowerCase();
@@ -473,6 +525,10 @@ void confirmGood() {
   Serial.printf("ota: %s confirmed\n", FRY_FIRMWARE_VERSION);
 }
 
+#if defined(ARDUINO_ARCH_ESP8266)
+FRY_OTA_ESP8266_NOINLINE static bool evaluateManifest(const String& body, OtaPlan& plan);
+#endif
+
 bool checkNow() {
 #if !defined(ARDUINO_ARCH_ESP8266)
   // esp_ota_begin() refuses while the running image is unconfirmed, and the other slot is the
@@ -521,9 +577,20 @@ bool checkNow() {
   }
 #endif
 
+#if defined(ARDUINO_ARCH_ESP8266)
+  const std::unique_ptr<ManifestClients> clients(new (std::nothrow) ManifestClients());
+  if (!clients) {
+    Serial.println("ota: no memory for the manifest client");
+    return false;
+  }
+  HTTPClient& http = clients->http;
+  WiFiClientSecure& sec = clients->sec;
+  WiFiClient& plain = clients->plain;
+#else
   HTTPClient http;
   WiFiClientSecure sec;
   WiFiClient plain;
+#endif
   if (!otaBeginUrl(http, sec, plain, manifestUrl)) {
     Serial.println("ota: manifest fetch begin failed");
     return false;
@@ -541,6 +608,16 @@ bool checkNow() {
   String body = http.getString();
   http.end();
 
+#if defined(ARDUINO_ARCH_ESP8266)
+  // The rest of the decision runs in evaluateManifest(), a frame of its own that is gone again before the download
+  // opens its connection (see ManifestClients above). The ESP32 keeps one function.
+  OtaPlan plan;
+  if (!evaluateManifest(body, plan)) return false;
+  return downloadAndApply(plan.url, plan.sha, plan.version);
+}
+
+FRY_OTA_ESP8266_NOINLINE static bool evaluateManifest(const String& body, OtaPlan& plan) {
+#endif
   JsonDocument doc;
   if (deserializeJson(doc, body)) {
     Serial.println("ota: manifest parse failed");
@@ -609,7 +686,14 @@ bool checkNow() {
     return false;
   }
 
+#if defined(ARDUINO_ARCH_ESP8266)
+  plan.url = url;
+  plan.sha = sha;
+  plan.version = latest;
+  return true;
+#else
   return downloadAndApply(url, sha, latest);
+#endif
 }
 
 #if defined(ARDUINO_ARCH_ESP8266)
