@@ -9,6 +9,7 @@
 #include <cstring>
 
 #include "../core/fry_config.h"
+#include "../core/flash_print.h"
 #include "../core/miner_key.h"
 #include "../core/status_snapshot.h"
 #include "config.h"
@@ -207,7 +208,7 @@ void handleProvision() {
     char stored[40] = {0};
     fry_identity::ensureMinerKey(stored, sizeof(stored));
     if (!fry::keyAllowsJoin(fry::kBuildKeyModel, stored[0] != 0)) {
-      Serial.println("[prov] refused: no miner key - set it with the web setup page (USB) or app>=0.4");
+      FRY_PRINTLN("[prov] refused: no miner key - set it with the web setup page (USB) or app>=0.4");
       s_fsm.feed(fry::ProvEvent::KeyMissing, walletIn);
       sendProvisionError(422, "key_required");
       return;
@@ -288,10 +289,10 @@ void init(const char* deviceName, const char* minerKey) {
 
   if (s_apSecure) {
     // The one place the setup code is shown besides Improv 0xF1: this is the USB serial log.
-    Serial.printf("AP started %s ip=192.168.4.1 wpa2 setup-code=%s (no miner key yet)\n", s_apName,
+    FRY_PRINTF("AP started %s ip=192.168.4.1 wpa2 setup-code=%s (no miner key yet)\n", s_apName,
                   s_apCode);
   } else {
-    Serial.printf("AP started %s ip=192.168.4.1\n", s_apName);
+    FRY_PRINTF("AP started %s ip=192.168.4.1\n", s_apName);
   }
 }
 
@@ -336,7 +337,7 @@ void notifyWifiUp() {
 void restoreApAfterFailedJoin() {
   if (!s_apActive || (WiFi.getMode() & WIFI_AP)) return;
   startAp();
-  Serial.printf("AP restarted %s after the failed join - /provision accepts a new attempt\n", s_apName);
+  FRY_PRINTF("AP restarted %s after the failed join - /provision accepts a new attempt\n", s_apName);
 }
 
 void notifyWifiAuthFail() {
@@ -371,7 +372,7 @@ void tick() {
     s_dns.stop();
     WiFi.softAPdisconnect(true);
     s_apActive = false;
-    Serial.println("AP torn down (status=3, teardown window elapsed)");
+    FRY_PRINTLN("AP torn down (status=3, teardown window elapsed)");
   }
 }
 
