@@ -36,5 +36,23 @@ void formatRssi(int rssi, char* out, size_t outLen) { snprintf(out, outLen, "%d"
 
 const char* authCell(bool secure) { return secure ? "YES" : "NO"; }
 
+ScanAdmit admitScan(bool transportRunning, bool staConnected, bool haveLast, unsigned long nowMs,
+                    unsigned long lastScanMs, uint32_t maxFreeBlock, uint32_t minBlock) {
+  (void)staConnected;
+  (void)haveLast;
+  (void)nowMs;
+  (void)lastScanMs;
+  (void)maxFreeBlock;
+  (void)minBlock;
+  return transportRunning ? ScanAdmit::Run : ScanAdmit::Refuse;
+}
+
+ScanStart classifyScanStart(int rc) {
+  (void)rc;
+  return ScanStart::Started;
+}
+
+ScanPoll classifyScanPoll(int n) { return n == kScanRunning ? ScanPoll::Wait : ScanPoll::Done; }
+
 }  // namespace improv
 }  // namespace fry

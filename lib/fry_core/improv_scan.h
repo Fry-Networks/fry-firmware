@@ -34,5 +34,32 @@ class ScanList {
 void formatRssi(int rssi, char* out, size_t outLen);
 const char* authCell(bool secure);  // "YES" / "NO", the same cells the ESP32 path sends
 
+// The Arduino WiFi.scanNetworks() / scanComplete() sentinels, spelled here so the native suite
+// needs no Wi-Fi header.
+const int kScanRunning = -1;  // WIFI_SCAN_RUNNING
+const int kScanFailed = -2;   // WIFI_SCAN_FAILED
+
+// Whether an Improv "request scanned Wi-Fi networks" is answered with a scan.
+enum class ScanAdmit : uint8_t { Run, Refuse };
+
+// A running board's scan stalls the radio for the seconds it takes, so it is spaced out.
+const unsigned long kRunningScanMinIntervalMs = 30000;
+
+// transportRunning (the board is provisionable): always Run, as before. Otherwise (a board that
+// joined its network) Run only when the station is joined (a scan started while it is joining
+// would disconnect it), the last running-phase scan is at least kRunningScanMinIntervalMs old
+// (haveLast=false: none yet; unsigned subtraction, so a millis() wrap is harmless), and the
+// largest free heap block is at least minBlock. Refuse is answered with Improv error 4.
+ScanAdmit admitScan(bool transportRunning, bool staConnected, bool haveLast, unsigned long nowMs,
+                    unsigned long lastScanMs, uint32_t maxFreeBlock, uint32_t minBlock);
+
+// What WiFi.scanNetworks() returned when the glue started the scan.
+enum class ScanStart : uint8_t { Started, Failed };
+ScanStart classifyScanStart(int rc);
+
+// What WiFi.scanComplete() reports while the glue waits for the scan.
+enum class ScanPoll : uint8_t { Wait, Failed, Done };
+ScanPoll classifyScanPoll(int n);
+
 }  // namespace improv
 }  // namespace fry
