@@ -20,6 +20,7 @@
 #include "ota_boot_counter.h"
 #include "ota_health.h"
 #include "ota_rollout_json.h"
+#include "ota_session.h"
 #include "sha256.h"
 #include "trigger_hooks.h"
 #include "wifi_station.h"
@@ -152,7 +153,17 @@ bool otaBeginUrl(HTTPClient& http, WiFiClientSecure& sec, WiFiClient& plain, con
     // MFLN-honouring host still gets the probe, and therefore still gets the cheap 512/512 path.
     const bool githubHost =
         url.indexOf("github.com") >= 0 || url.indexOf("githubusercontent.com") >= 0;
+#if defined(ARDUINO_ARCH_ESP8266)
+    // checkNow() keeps the manifest HTTPClient + WiFiClientSecure in scope while downloadAndApply()
+    // opens its own, and HTTPClient::end() only stops the TLS session (freeing BearSSL's ~21 KB of
+    // context and I/O buffers) when keep-alive reuse is off. Its default is on and GitHub keeps the
+    // connection, so two sessions were open at once on a ~80 KB heap. See lib/fry_core/ota_session.h.
+    if (!fry_http::beginHttpsUrl(http, sec, url, !githubHost)) return false;
+    http.setReuse(fry::otaAsksForKeepAlive(/*isEsp8266=*/true, /*isHttps=*/true));
+    return true;
+#else
     return fry_http::beginHttpsUrl(http, sec, url, !githubHost);
+#endif
   }
   if (!http.begin(plain, url)) return false;
   http.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);
