@@ -22,6 +22,7 @@
 #include "miner_key.h"
 #include "ota_boot_counter.h"
 #include "ota_health.h"
+#include "ota_heap_budget.h"
 #include "ota_rollout_json.h"
 #include "ota_session.h"
 #include "ota_timewait.h"
@@ -223,6 +224,11 @@ struct DownloadWork {
 // (lib/fry_core/tls_sizing.h, tlsFloorsAtBegin): the block must be at least as big as the larger of the two.
 static_assert(sizeof(DownloadWork) + 16 <= fry::kOtaClientsBytes, "DownloadWork outgrew kOtaClientsBytes");
 static_assert(sizeof(ManifestClients) + 16 <= fry::kOtaClientsBytes, "ManifestClients outgrew kOtaClientsBytes");
+// The manifest gate in platformio.ini is typed by hand; the measured table is the source of truth.
+static_assert(HEAP_GATE_OTA_MANIFEST_BLOCK == fry::ota_heap::kManifestGateBlock,
+              "HEAP_GATE_OTA_MANIFEST_BLOCK (platformio.ini) drifted from ota_heap_budget.h");
+static_assert(HEAP_GATE_OTA_MANIFEST == fry::ota_heap::kManifestGateFree,
+              "HEAP_GATE_OTA_MANIFEST (platformio.ini) drifted from ota_heap_budget.h");
 
 // What the manifest decided: the download's arguments.
 struct OtaPlan {
@@ -572,21 +578,23 @@ bool checkNow() {
   if (manifestUrl.length() == 0) return false;
 
 #if defined(FRY_BOARD_ESP8266)
-  // Do not even open an HTTPS session for the manifest unless the big BearSSL path is
-  // affordable. The release manifest lives on GitHub, which does not honour MFLN, so on a
+  // Do not even open an HTTPS session for the manifest unless it is affordable: the gate is the
+  // MEASURED need of the 8192/512 session plus a margin (lib/fry_core/ota_heap_budget.h), sampled before
+  // the clients and BearSSL's stack thunk exist. The rest of this comment predates that and is about the
+  // 16384/512 session the check used to open. The release manifest lives on GitHub, which does not honour MFLN, so on a
   // fragmented heap the 512/512 fallback cannot carry its handshake and BearSSL fails hard
   // rather than returning an error. Skipping the check costs one deferred update; not
   // skipping it cost a crash-and-reboot on COM11. Plain-HTTP manifests (the lab server) are
   // unaffected and still checked, which is how OTA is exercised on this chip.
   if (manifestUrl.startsWith("https://") &&
-      !fry::waitForHeapGate(HEAP_GATE_OTA, HEAP_GATE_OTA_BLOCK, 1)) {
+      !fry::waitForHeapGate(HEAP_GATE_OTA_MANIFEST, HEAP_GATE_OTA_MANIFEST_BLOCK, 1)) {
     // Print the numbers, not just the verdict. "insufficient" alone cost real diagnostic time:
     // a board carrying a stale plain-http lab override never reaches this branch at all, and its
     // unrelated "manifest fetch HTTP -1" (lab server unreachable) was read for two runs as
     // evidence of a TLS/heap failure on the GitHub path that was in fact never attempted.
     // With the shortfall visible, the two situations can never be confused again.
     Serial.printf("ota: skipped https manifest check - need blk>=%u free>=%u, have blk=%u free=%u\n",
-                  static_cast<unsigned>(HEAP_GATE_OTA_BLOCK), static_cast<unsigned>(HEAP_GATE_OTA),
+                  static_cast<unsigned>(HEAP_GATE_OTA_MANIFEST_BLOCK), static_cast<unsigned>(HEAP_GATE_OTA_MANIFEST),
                   static_cast<unsigned>(fry::queryMaxFreeBlock()),
                   static_cast<unsigned>(ESP.getFreeHeap()));
     return false;

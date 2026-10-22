@@ -152,8 +152,8 @@ void test_beginHttpsUrl_plans_with_the_begin_floors_not_the_raw_gate() {
   std::string src;
   TEST_ASSERT_TRUE_MESSAGE(loadSource("src/esp8266/http_tls.cpp", src), "cannot read src/esp8266/http_tls.cpp");
   TEST_ASSERT_EQUAL_INT_MESSAGE(
-      1, countOf(src, "fry::tlsFloorsAtBegin(HEAP_GATE_OTA, HEAP_GATE_OTA_BLOCK, mflnProbeWorthwhile)"),
-      "the floors must come from tlsFloorsAtBegin() applied to the gate's own numbers");
+      1, countOf(src, "fry::tlsFloorsAtBegin(gateFree, gateBlock, mflnProbeWorthwhile)"),
+      "the floors must come from tlsFloorsAtBegin() applied to the gate's own numbers (selected in beginHttpsUrl)");
   TEST_ASSERT_EQUAL_INT_MESSAGE(
       1, countOf(src, "fry::planTls(heap, floors.freeTotal, floors.block, mflnProbeWorthwhile, smallReply)"),
       "planTls() must be given those floors");

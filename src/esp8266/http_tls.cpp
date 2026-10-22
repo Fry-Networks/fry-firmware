@@ -73,7 +73,11 @@ bool beginHttpsUrl(HTTPClient& http, WiFiClientSecure& sec, const String& url, b
   // judged against their floors less what the constructor took (the thunk above + the clients). The raw gate numbers
   // here refused every OTA manifest check 15 ms after the gate had passed it ("manifest fetch begin failed").
   const fry::HeapSample heap{static_cast<uint32_t>(ESP.getFreeHeap()), fry::queryMaxFreeBlock()};
-  const fry::TlsFloors floors = fry::tlsFloorsAtBegin(HEAP_GATE_OTA, HEAP_GATE_OTA_BLOCK, mflnProbeWorthwhile);
+  // The manifest (small reply, Medium session) is judged by its measured gate (lib/fry_core/ota_heap_budget.h), everything
+  // else by the 16384/512 one.
+  const uint32_t gateFree = smallReply ? HEAP_GATE_OTA_MANIFEST : HEAP_GATE_OTA;
+  const uint32_t gateBlock = smallReply ? HEAP_GATE_OTA_MANIFEST_BLOCK : HEAP_GATE_OTA_BLOCK;
+  const fry::TlsFloors floors = fry::tlsFloorsAtBegin(gateFree, gateBlock, mflnProbeWorthwhile);
   const fry::TlsPlan plan =
       fry::planTls(heap, floors.freeTotal, floors.block, mflnProbeWorthwhile, smallReply);
   String host = extractHost(url);

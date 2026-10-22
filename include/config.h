@@ -80,3 +80,13 @@
 #ifndef HEAP_GATE_OTA_BLOCK
 #define HEAP_GATE_OTA_BLOCK 36864
 #endif
+
+// The ESP8266 HTTPS manifest check (8192/512 session, lib/fry_core/tls_sizing.h) has its own, MEASURED gate, in the units
+// checkNow() samples (the heap before its TLS clients exist): lib/fry_core/ota_heap_budget.h derives 29976 free / 29808
+// block, and [env:esp8266] sets them. Every other build keeps the two numbers above.
+#ifndef HEAP_GATE_OTA_MANIFEST
+#define HEAP_GATE_OTA_MANIFEST HEAP_GATE_OTA
+#endif
+#ifndef HEAP_GATE_OTA_MANIFEST_BLOCK
+#define HEAP_GATE_OTA_MANIFEST_BLOCK HEAP_GATE_OTA_BLOCK
+#endif
