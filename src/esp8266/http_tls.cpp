@@ -69,17 +69,21 @@ bool beginHttpsUrl(HTTPClient& http, WiFiClientSecure& sec, const String& url, b
   // that `sec` exists: constructing a WiFiClientSecure allocates BearSSL's 6200 B stack thunk, so a
   // sample taken before it (checkNow's gate) overstates what is left. A short heap is no longer
   // allowed to fall through to 512/512 for a peer that does not honour MFLN - see tls_sizing.h.
+  // The OTA gates in ota_client.cpp sampled BEFORE `sec` and its HTTPClient existed; this sample is after, so it is
+  // judged against their floors less what the constructor took (the thunk above + the clients). The raw gate numbers
+  // here refused every OTA manifest check 15 ms after the gate had passed it ("manifest fetch begin failed").
   const fry::HeapSample heap{static_cast<uint32_t>(ESP.getFreeHeap()), fry::queryMaxFreeBlock()};
+  const fry::TlsFloors floors = fry::tlsFloorsAtBegin(HEAP_GATE_OTA, HEAP_GATE_OTA_BLOCK, mflnProbeWorthwhile);
   const fry::TlsPlan plan =
-      fry::planTls(heap, HEAP_GATE_OTA, HEAP_GATE_OTA_BLOCK, mflnProbeWorthwhile, smallReply);
+      fry::planTls(heap, floors.freeTotal, floors.block, mflnProbeWorthwhile, smallReply);
   String host = extractHost(url);
   switch (plan.sizing) {
     case fry::TlsSizing::Refuse:
       // printf_P/PSTR: the string stays in flash instead of costing ~130 B of the 80 KB heap budget.
       Serial.printf_P(PSTR("tls: refusing %s - heap too short for the big buffers and the peer does "
                            "not honour MFLN (need blk>=%u free>=%u, have blk=%u free=%u)\n"),
-                      host.c_str(), static_cast<unsigned>(HEAP_GATE_OTA_BLOCK),
-                      static_cast<unsigned>(HEAP_GATE_OTA), static_cast<unsigned>(heap.maxBlock),
+                      host.c_str(), static_cast<unsigned>(floors.block),
+                      static_cast<unsigned>(floors.freeTotal), static_cast<unsigned>(heap.maxBlock),
                       static_cast<unsigned>(heap.freeTotal));
       return false;
     case fry::TlsSizing::Small:

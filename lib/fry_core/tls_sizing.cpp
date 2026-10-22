@@ -23,6 +23,13 @@ TlsPlan planTls(const HeapSample& sample, uint32_t minFreeTotal, uint32_t minBlo
   return {sizing, affordable};
 }
 
+TlsFloors tlsFloorsAtBegin(uint32_t gateFreeTotal, uint32_t gateBlock, bool peerMightHonourMfln) {
+  if (peerMightHonourMfln) return {gateFreeTotal, gateBlock};
+  constexpr uint32_t kTakenByTheClients = kBearsslStackThunkBytes + kOtaClientsBytes;
+  return {gateFreeTotal > kTakenByTheClients ? gateFreeTotal - kTakenByTheClients : 0,
+          gateBlock > kTakenByTheClients ? gateBlock - kTakenByTheClients : 0};
+}
+
 }  // namespace fry
 
 #endif  // !ARDUINO || ARDUINO_ARCH_ESP8266

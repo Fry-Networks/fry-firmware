@@ -26,6 +26,7 @@
 #include "ota_session.h"
 #include "ota_timewait.h"
 #include "sha256.h"
+#include "tls_sizing.h"
 #include "trigger_hooks.h"
 #include "wifi_station.h"
 
@@ -217,6 +218,11 @@ struct DownloadWork {
   uint8_t digest[32];
   char hex[65];
 };
+
+// beginHttpsUrl() judges the heap after these exist against the gate's floors less kOtaClientsBytes + the BearSSL thunk
+// (lib/fry_core/tls_sizing.h, tlsFloorsAtBegin): the block must be at least as big as the larger of the two.
+static_assert(sizeof(DownloadWork) + 16 <= fry::kOtaClientsBytes, "DownloadWork outgrew kOtaClientsBytes");
+static_assert(sizeof(ManifestClients) + 16 <= fry::kOtaClientsBytes, "ManifestClients outgrew kOtaClientsBytes");
 
 // What the manifest decided: the download's arguments.
 struct OtaPlan {

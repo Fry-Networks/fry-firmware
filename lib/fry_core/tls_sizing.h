@@ -52,6 +52,27 @@ struct TlsPlan {
 TlsPlan planTls(const HeapSample& sample, uint32_t minFreeTotal, uint32_t minBlock,
                 bool peerMightHonourMfln, bool smallReply = false);
 
+// What the heap looks like at the moment beginHttpsUrl() samples it, against what the OTA gates measured.
+// checkNow() and downloadAndApply() sample BEFORE their HTTPClient + WiFiClientSecure + WiFiClient exist; beginHttpsUrl()
+// samples AFTER: constructing the first WiFiClientSecure mallocs BearSSL's 6200 B stack thunk (8-byte units: 6208), and
+// the clients themselves are one more block. Handing beginHttpsUrl() the gate's own floors therefore asked for
+// gate + ~6.7 KB, which no heap that had just passed the gate can meet, so every OTA manifest check ended in
+// planTls() -> Refuse -> "ota: manifest fetch begin failed" 15 ms after the gate passed.
+constexpr uint32_t kBearsslStackThunkBytes = 6208;
+constexpr uint32_t kOtaClientsBytes = 512;  // one block: HTTPClient + WiFiClientSecure + WiFiClient (+ Sha256 + digest)
+
+struct TlsFloors {
+  uint32_t freeTotal;
+  uint32_t block;
+};
+
+// The floors to give planTls() for a sample taken after the clients exist, from the floors the caller's gate used before
+// they did. A peer that may honour MFLN keeps the gate's floors untouched: its 32 KB probe allocates AFTER the
+// constructor, so the sample is already in the probe's terms. Every other peer (the OTA hosts) gets the gate's floors
+// less what the constructor takes, saturating at 0: a heap that passed the gate passes here, and one the gate refused
+// is refused here too, so this is the gate's own number seen from the other side of the constructor, never a lower bar.
+TlsFloors tlsFloorsAtBegin(uint32_t gateFreeTotal, uint32_t gateBlock, bool peerMightHonourMfln);
+
 }  // namespace fry
 
 #endif  // !ARDUINO || ARDUINO_ARCH_ESP8266
