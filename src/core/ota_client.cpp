@@ -248,9 +248,18 @@ static_assert(HEAP_GATE_OTA_STREAM == fry::ota_heap::kStreamGateFree,
 
 // What the manifest decided: the download's arguments.
 struct OtaPlan {
+  // Capacities taken by checkNow() BEFORE the manifest session opens (reserveEarly): see there.
+  static constexpr size_t kUrlCap = 128;     // release-asset URLs are about 100 characters
+  static constexpr size_t kShaCap = 64;      // a sha256 in hex
+  static constexpr size_t kVersionCap = 24;  // a SemVer with a pre-release tag
   String url;
   String sha;
   String version;
+  void reserveEarly() {
+    url.reserve(kUrlCap);
+    sha.reserve(kShaCap);
+    version.reserve(kVersionCap);
+  }
 };
 #endif
 
@@ -700,6 +709,11 @@ bool checkNow() {
 #endif
 
 #if defined(ARDUINO_ARCH_ESP8266)
+  // The plan's Strings are the one thing that outlives the manifest session (clients.reset() below). umm_malloc is best-fit and carves the low
+  // end of the block it picks, so Strings born while the session is live sit above its blocks and split the free region the download
+  // needs (heap map at dl-begin: 104 B + 88 B cut the largest block from 28280 to 14768). Take their capacity first: below the session.
+  OtaPlan plan;
+  plan.reserveEarly();
   std::unique_ptr<ManifestClients> clients(new (std::nothrow) ManifestClients());
   if (!clients) {
     Serial.println("ota: no memory for the manifest client");
@@ -753,7 +767,6 @@ bool checkNow() {
 #if defined(ARDUINO_ARCH_ESP8266)
   // The rest of the decision runs in evaluateManifest(), a frame of its own that is gone again before the download
   // opens its connection (see ManifestClients above). The ESP32 keeps one function.
-  OtaPlan plan;
   if (!evaluateManifest(body, plan)) return false;
   // The manifest check is over: give back what it held before the download opens its own session.
   body = String();
