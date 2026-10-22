@@ -4,6 +4,10 @@
 
 #include <cstring>
 #include <ctime>
+#if defined(ARDUINO_ARCH_ESP8266)
+#include <memory>
+#include <new>
+#endif
 
 #include "config.h"
 #include "fry_config.h"
@@ -143,8 +147,36 @@ bool ensureNtpSynced(uint32_t timeoutMs) {
   return false;
 }
 
-bool registerInstallation() {
+#if defined(ARDUINO_ARCH_ESP8266)
+// registerInstallation() sits on the deepest boot-time loop-stack path: loop() -> tick() -> here -> the TLS connect below it, a few
+// hundred bytes from the end of the 4 KB cont stack (bench: 736..1152 B free at the end of the registration interval). What it holds
+// across the connect lives in heap blocks, as ota_client.cpp's ManifestClients does: the four text buffers for the whole call, the two
+// TLS clients for one attempt: the frame goes from 736 B to 352 B (-fstack-usage). The ESP32 keeps its stack locals.
+namespace {
+struct RegText {
   char minerKey[40];
+  char installId[40];
+  char deviceName[32];
+  char detail[128];
+};
+struct RegClients {
+  WiFiClientSecure sec;
+  HTTPClient http;
+};
+}  // namespace
+#endif
+
+bool registerInstallation() {
+#if defined(ARDUINO_ARCH_ESP8266)
+  std::unique_ptr<RegText> text(new (std::nothrow) RegText());
+  if (!text) {
+    Serial.println("api: no memory for the registration");
+    return false;
+  }
+  char (&minerKey)[40] = text->minerKey;
+#else
+  char minerKey[40];
+#endif
   fry_identity::ensureMinerKey(minerKey, sizeof(minerKey));
   if (minerKey[0] == 0) {
     // USER_SUPPLIED board without a key: there is nothing to register as. Not an API failure.
@@ -155,9 +187,17 @@ bool registerInstallation() {
     fry_provisioning::notifyKeyMissing();
     return false;
   }
+#if defined(ARDUINO_ARCH_ESP8266)
+  char (&installId)[40] = text->installId;
+#else
   char installId[40];
+#endif
   fry_identity::ensureInstallId(installId, sizeof(installId));
+#if defined(ARDUINO_ARCH_ESP8266)
+  char (&deviceName)[32] = text->deviceName;
+#else
   char deviceName[32];
+#endif
   fry_identity::getDeviceName(deviceName, sizeof(deviceName));
 
   fry::InstallationFields fields{};
@@ -184,10 +224,24 @@ bool registerInstallation() {
   // the loop (Improv, the reset button, the relay) is never held for more than one retry.
   int code = -1;
   fry::RegClass cls = fry::RegClass::Unreachable;
+#if defined(ARDUINO_ARCH_ESP8266)
+  char (&detail)[128] = text->detail;
+#else
   char detail[128] = {0};
+#endif
   for (int attempt = 0; attempt < 2; attempt++) {
+#if defined(ARDUINO_ARCH_ESP8266)
+    std::unique_ptr<RegClients> clients(new (std::nothrow) RegClients());
+    if (!clients) {
+      Serial.println("api: no memory for the registration client");
+      break;  // code -1, Unreachable: the failure bookkeeping below backs off as for an unreachable server
+    }
+    WiFiClientSecure& sec = clients->sec;
+    HTTPClient& http = clients->http;
+#else
     WiFiClientSecure sec;
     HTTPClient http;
+#endif
     code = -1;
     if (fry_http::beginHttpsUrl(http, sec, url)) {
       addAuthHeader(http);
