@@ -268,6 +268,8 @@ struct OtaPlan {
 #if defined(ARDUINO_ARCH_ESP8266)
 // The largest free block when checkNow() started its manifest check (after the plan's Strings were reserved): what the download waits for.
 static uint32_t s_blkAtCheckStart = 0;
+// The largest block an earlier check started on, this boot (0 = none yet): what the next check waits for before it measures (settleBeforeCheck).
+static uint32_t s_blkSettledBase = 0;
 
 // Between the manifest and the download: the manifest connection's pcb (192 B), the pbuf of its last TLS record (112 B) and that record's
 // tcp_seg (24 B) are freed by lwIP once the peer answers the close, a few milliseconds to a second after the clients are gone. The download's
@@ -288,6 +290,38 @@ FRY_OTA_ESP8266_NOINLINE static void settleAfterManifest(uint32_t blkBefore) {
   const bool back = blk + fry::kOtaSettleSlackBytes >= blkBefore;
   Serial.printf_P(back ? PSTR("ota: settled %lu ms, blk %u (start %u)\n") : PSTR("ota: not settled %lu ms, blk %u (start %u)\n"), waited,
                   static_cast<unsigned>(blk), static_cast<unsigned>(blkBefore));
+}
+
+// Before the check: the report tick that ran just before it leaves a 24 B block, or a 192 B pcb with its 112 B pbuf, in the middle of the free region
+// for up to a few seconds. A check that starts on that heap measures a block that is not the settled one, so settleAfterManifest's reference is
+// wrong and the manifest gate samples a split heap (x3-tip bench: cycle C download-begin blk 26280 instead of 32808, cycle G manifest skipped at
+// blk 29776 against 29808). Wait, bounded, for the block to be back where earlier checks started (lib/fry_core/ota_settle.h), then measure.
+// Silent when there was nothing to wait for. The messages stay under 64 B: Serial.printf of a longer one allocates.
+FRY_OTA_ESP8266_NOINLINE static void settleBeforeCheck() {
+  const unsigned long t0 = millis();
+  unsigned long changedAt = t0;
+  uint32_t blk = fry::queryMaxFreeBlock();
+  uint32_t last = blk;
+  uint32_t held = 0;
+  uint32_t stable = 0;
+  while (fry::decideCheckStartSettle(blk, s_blkSettledBase, fry::kOtaSettleSlackBytes, held, stable, fry::kOtaSettleMaxMs) ==
+         fry::SettleHold::Hold) {
+    delay(fry::kOtaSettlePollMs);
+    blk = fry::queryMaxFreeBlock();
+    const unsigned long now = millis();
+    if (blk != last) {
+      last = blk;
+      changedAt = now;
+    }
+    held = static_cast<uint32_t>(now - t0);
+    stable = static_cast<uint32_t>(now - changedAt);
+  }
+  const uint32_t base = s_blkSettledBase;
+  const bool back = base == 0 || blk + fry::kOtaSettleSlackBytes >= base;
+  s_blkSettledBase = fry::nextCheckStartBaseline(base, blk, held >= fry::kOtaSettleMaxMs);
+  if (held == 0) return;
+  Serial.printf_P(back ? PSTR("ota: start settled %lu ms, blk %u (base %u)\n") : PSTR("ota: start not settled %lu ms, blk %u (base %u)\n"),
+                  static_cast<unsigned long>(held), static_cast<unsigned>(blk), static_cast<unsigned>(base));
 }
 #endif
 
@@ -711,6 +745,12 @@ bool checkNow() {
   String manifestUrl = fry_config::getOtaUrl();
   if (manifestUrl.length() == 0) manifestUrl = FRY_OTA_DEFAULT_MANIFEST;
   if (manifestUrl.length() == 0) return false;
+
+#if defined(ARDUINO_ARCH_ESP8266)
+  // The report tick before this check may have left lwIP blocks in the middle of the free region: wait for the heap to settle before the gate
+  // samples it and before the block the download will wait for is measured.
+  settleBeforeCheck();
+#endif
 
 #if defined(FRY_BOARD_ESP8266)
   // Do not even open an HTTPS session for the manifest unless it is affordable: the gate is the

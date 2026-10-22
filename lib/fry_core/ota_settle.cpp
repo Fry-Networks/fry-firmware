@@ -12,6 +12,19 @@ SettleHold decideHeapSettle(uint32_t blkNow, uint32_t blkBefore, uint32_t slackB
   return heldMs >= maxHoldMs ? SettleHold::Proceed : SettleHold::Hold;
 }
 
+// The wait before the check (see ota_settle.h): the baseline is what earlier checks started on, not what this one starts with.
+SettleHold decideCheckStartSettle(uint32_t blkNow, uint32_t baseline, uint32_t slackBytes, uint32_t heldMs, uint32_t stableMs, uint32_t maxHoldMs) {
+  if (heldMs >= maxHoldMs) return SettleHold::Proceed;
+  if (baseline == 0) return stableMs >= kOtaCheckStartStableMs ? SettleHold::Proceed : SettleHold::Hold;
+  const uint32_t want = baseline > slackBytes ? baseline - slackBytes : 0;
+  return blkNow >= want ? SettleHold::Proceed : SettleHold::Hold;
+}
+
+uint32_t nextCheckStartBaseline(uint32_t baseline, uint32_t blkAtProceed, bool boundReached) {
+  if (boundReached && blkAtProceed < baseline) return blkAtProceed;
+  return blkAtProceed > baseline ? blkAtProceed : baseline;
+}
+
 }  // namespace fry
 
 #endif  // !ARDUINO || ARDUINO_ARCH_ESP8266

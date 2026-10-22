@@ -42,6 +42,32 @@ enum class SettleHold : uint8_t {
 // (or above it), or when the bound is reached whatever the heap looks like.
 SettleHold decideHeapSettle(uint32_t blkNow, uint32_t blkBefore, uint32_t slackBytes, uint32_t heldMs, uint32_t maxHoldMs);
 
+// ---- the wait BEFORE the check -------------------------------------------------------------------------------------------------
+// The report tick (registration, telemetry, PoC) runs right before a check, and its connection leaves the same kind of blocks in the middle of the
+// free region: a 24 B block, or a 192 B pcb with its 112 B pbuf, for a few milliseconds to a few seconds after the connection is closed.
+//   x3-tip bench capture (lo/c1-x3t-204146.lines.txt), seven check cycles:
+//   cycle C: a 24 B block at 11688 was alive at the check start (blk 32360 instead of the settled 39448). settleAfterManifest takes "blk at the
+//            check start" as its reference, so it was satisfied at its first look (no "settled" line, the five clean cycles waited 20-80 ms) and
+//            released the download onto a heap the manifest connection's own survivors split: download-begin blk 26280 instead of 32808.
+//   cycle G: a 192 B + 112 B pair alive at the check start: blk 29776, and the manifest gate (blk >= 29808) skipped the whole check.
+// A check that starts on a heap that has not settled cannot tell, because the reference it would use is the unsettled heap itself. So the
+// baseline is what EARLIER checks started on: the largest block seen at a check start of this boot, kept in one word. The check waits (bounded,
+// same bound, poll and slack as the wait after the manifest) until the block is back to it, and only then measures s_blkAtCheckStart and samples
+// the manifest gate. It rises as the heap recovers and never falls by itself; when the bound is reached with the block still short, the heap
+// did not recover (a persistent block landed mid-heap: dl-31's 40 B at 12544 cuts the settled blk from 38040 to 30072) and the block seen becomes
+// the new level, so only the first check after it pays the wait. The first check of a boot has no baseline: it waits until the block has been the
+// same for kOtaCheckStartStableMs.
+constexpr uint32_t kOtaCheckStartStableMs = 1000;
+
+// blkNow: the largest free block now. baseline: the largest block an earlier check started on this boot (0 = none yet). heldMs: how long this
+// check has already waited. stableMs: how long blkNow has been unchanged. Proceeds once the block is back within slackBytes of the baseline (or
+// above it); with no baseline, once it has been still for kOtaCheckStartStableMs; always at maxHoldMs.
+SettleHold decideCheckStartSettle(uint32_t blkNow, uint32_t baseline, uint32_t slackBytes, uint32_t heldMs, uint32_t stableMs, uint32_t maxHoldMs);
+
+// The baseline after the wait: the larger of it and the block the check starts on; except that when the wait ran into its bound with the block
+// still below the baseline, the block seen is the new baseline.
+uint32_t nextCheckStartBaseline(uint32_t baseline, uint32_t blkAtProceed, bool boundReached);
+
 }  // namespace fry
 
 #endif  // !ARDUINO || ARDUINO_ARCH_ESP8266
