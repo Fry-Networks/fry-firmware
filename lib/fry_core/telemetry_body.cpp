@@ -3,6 +3,8 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "flash_fmt.h"
+
 namespace fry {
 
 bool isJsonSafeToken(const char* s) {
@@ -27,7 +29,7 @@ size_t buildTelemetryBody(const TelemetrySample& sample, const char* minerCode,
     return 0;
   }
 
-  int n = snprintf(
+  int n = FRY_SNPRINTF(
       out, outLen,
       "{\"miner_code\":\"%s\",\"install_id\":\"%s\",\"measurement_type\":\"telemetry\","
       "\"timestamp\":\"%s\",\"value\":{"
