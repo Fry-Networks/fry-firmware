@@ -66,6 +66,17 @@ fry::FlashInfo flashInfo() {
   return cached;
 }
 
+#if defined(FRY_HEARTBEAT_HEAP) && defined(ARDUINO_ARCH_ESP8266)
+__attribute__((noinline)) void addHeartbeatHeap(JsonDocument& doc) {
+  // Own frame (noinline) so registerInstallation(), which sits on the deepest loop-stack path, does not grow. One umm_info pass gives
+  // the three heap numbers coherently; the loop stack's high water is what the cont stack has never come back from since boot.
+  uint32_t freeHeap = 0, maxBlock = 0;
+  uint8_t frag = 0;
+  ESP.getHeapStats(&freeHeap, &maxBlock, &frag);
+  fry::addHeapFields(doc, {freeHeap, maxBlock, frag, ESP.getFreeContStack()});
+}
+#endif
+
 // Updated unconditionally BEFORE every registration attempt (success or failure) so a rejected
 // or failed call backs off to INSTALL_HEARTBEAT_MS just like a successful heartbeat does — the
 // old design only updated this on success, which meant a persistent failure (e.g. the server
@@ -161,6 +172,9 @@ bool registerInstallation() {
   fields.flash = flashInfo();
   JsonDocument doc;
   fry::buildInstallationDoc(doc, fields);
+#if defined(FRY_HEARTBEAT_HEAP) && defined(ARDUINO_ARCH_ESP8266)
+  addHeartbeatHeap(doc);
+#endif
   String body;
   serializeJson(doc, body);
 

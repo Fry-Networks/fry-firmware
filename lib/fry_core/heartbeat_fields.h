@@ -49,4 +49,21 @@ inline void buildInstallationDoc(JsonDocument& doc, const InstallationFields& f)
   doc["sketch_size"] = f.flash.sketchSize;
 }
 
+// Heap and loop-stack headroom, sampled by the platform shim in one pass (ESP8266: ESP.getHeapStats + ESP.getFreeContStack).
+struct HeapInfo {
+  uint32_t freeHeap;        // total free heap, bytes
+  uint32_t maxFreeBlock;    // largest contiguous free block, bytes: what a TLS session's input buffer needs
+  uint32_t heapFrag;        // fragmentation, percent (0 = one free block)
+  uint32_t stackHighWater;  // loop-stack bytes still unused at its deepest point since boot
+};
+
+// Appended AFTER buildInstallationDoc(), so the 13-member body (pinned by test_heartbeat_fields) and the 0.4.7 prefix are untouched.
+// Only the ESP8266 platform shim calls it (-DFRY_HEARTBEAT_HEAP=1 in [env:esp8266]); unused elsewhere, so it emits no code there.
+inline void addHeapFields(JsonDocument& doc, const HeapInfo& h) {
+  doc["free_heap"] = h.freeHeap;
+  doc["max_free_block"] = h.maxFreeBlock;
+  doc["heap_frag"] = h.heapFrag;
+  doc["stack_high_water"] = h.stackHighWater;
+}
+
 }  // namespace fry
