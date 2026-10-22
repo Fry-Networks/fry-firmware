@@ -1,4 +1,5 @@
 #include "../core/http_tls.h"
+#include "../core/flash_print.h"
 
 #include "heap_gate.h"
 #include "mfln_cache.h"
@@ -99,14 +100,14 @@ bool beginHttpsUrl(HTTPClient& http, WiFiClientSecure& sec, const String& url, b
                       static_cast<unsigned>(heap.freeTotal));
       return false;
     case fry::TlsSizing::Small:
-      Serial.println("tls: low contiguous heap - MFLN probe skipped, 512/512");
+      FRY_PRINTLN("tls: low contiguous heap - MFLN probe skipped, 512/512");
       sec.setBufferSizes(512, 512);
       break;
     case fry::TlsSizing::Big:
       // blk is logged because the 30 s [health] line samples far too coarsely to catch this peak,
       // and HTTP -1 collapses connect-refused, iobuf-OOM and handshake-failure into one code. This
       // is the only place the deciding quantity is visible at the deciding moment.
-      Serial.printf("tls: peer does not honour MFLN - probe skipped, 16384/512 (blk=%u)\n",
+      FRY_PRINTF("tls: peer does not honour MFLN - probe skipped, 16384/512 (blk=%u)\n",
                     static_cast<unsigned>(heap.maxBlock));
       sec.setBufferSizes(16384, 512);
       break;
