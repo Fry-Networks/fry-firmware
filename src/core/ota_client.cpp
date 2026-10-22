@@ -23,6 +23,7 @@
 #include "ota_boot_counter.h"
 #include "ota_health.h"
 #include "ota_heap_budget.h"
+#include "ota_retry.h"
 #include "ota_rollout_json.h"
 #include "ota_session.h"
 #include "ota_timewait.h"
@@ -107,6 +108,11 @@ unsigned long s_faultCrashAtMs = 0;
 #endif
 
 unsigned long s_lastCheckMs = 0;
+#if defined(ARDUINO_ARCH_ESP8266)
+// The last checkNow() was refused by a heap gate before any connection opened (lib/fry_core/ota_retry.h).
+bool s_heapRefused = false;
+uint8_t s_heapRetries = 0;
+#endif
 // PROTOCOL.md section 6 wants a check "on boot and every 6 h". tick() is only reached
 // once WiFi is up, but with s_lastCheckMs seeded at 0 the elapsed-time gate is false at
 // boot (millis() is still tiny), so the first check silently slipped to OTA_CHECK_MS
@@ -267,6 +273,9 @@ FRY_OTA_ESP8266_NOINLINE bool downloadAndApply(const String& url, const String& 
   if (!otaBeginUrl(http, sec, plain, url)) {
 #endif
     Serial.println("ota: begin failed");
+#if defined(ARDUINO_ARCH_ESP8266)
+    if (url.startsWith("https://")) s_heapRefused = true;  // as for the manifest: only Refuse can fail it
+#endif
     return false;
   }
   http.setTimeout(20000);
@@ -564,6 +573,9 @@ FRY_OTA_ESP8266_NOINLINE static bool evaluateManifest(const String& body, OtaPla
 #endif
 
 bool checkNow() {
+#if defined(ARDUINO_ARCH_ESP8266)
+  s_heapRefused = false;
+#endif
 #if !defined(ARDUINO_ARCH_ESP8266)
   // esp_ota_begin() refuses while the running image is unconfirmed, and the other slot is the
   // rollback target: do not download over it before this image has proved itself.
@@ -609,6 +621,7 @@ bool checkNow() {
                   static_cast<unsigned>(HEAP_GATE_OTA_MANIFEST_BLOCK), static_cast<unsigned>(HEAP_GATE_OTA_MANIFEST),
                   static_cast<unsigned>(fry::queryMaxFreeBlock()),
                   static_cast<unsigned>(ESP.getFreeHeap()));
+    s_heapRefused = true;
     return false;
   }
 #endif
@@ -634,6 +647,10 @@ bool checkNow() {
   if (!otaBeginUrl(http, sec, plain, manifestUrl)) {
 #endif
     Serial.println("ota: manifest fetch begin failed");
+#if defined(ARDUINO_ARCH_ESP8266)
+    // On ESP8266 an https begin() can only fail by beginHttpsUrl()'s Refuse (HTTPClient::begin cannot fail for these URLs).
+    if (manifestUrl.startsWith("https://")) s_heapRefused = true;
+#endif
     return false;
   }
   int code = http.GET();
@@ -767,6 +784,14 @@ static bool holdForTimeWait(unsigned long now) {
 }
 #endif
 
+#if defined(ARDUINO_ARCH_ESP8266)
+// After a check: the normal wait, or the bounded shorter one when a heap gate refused it (lib/fry_core/ota_retry.h).
+static void afterCheck(unsigned long now) {
+  const uint32_t wait = fry::otaNextCheckDelayMs(s_heapRefused, s_heapRetries, OTA_CHECK_MS);
+  s_lastCheckMs = now - (OTA_CHECK_MS - wait);  // the next check fires `wait` after `now`
+}
+#endif
+
 void tick() {
   unsigned long now = millis();
   if (!s_firstCheckDone) {
@@ -776,6 +801,9 @@ void tick() {
     s_firstCheckDone = true;
     s_lastCheckMs = now;
     checkNow();
+#if defined(ARDUINO_ARCH_ESP8266)
+    afterCheck(now);
+#endif
     return;
   }
   if (now - s_lastCheckMs < OTA_CHECK_MS) return;
@@ -784,6 +812,9 @@ void tick() {
 #endif
   s_lastCheckMs = now;
   checkNow();
+#if defined(ARDUINO_ARCH_ESP8266)
+  afterCheck(now);
+#endif
 }
 
 }  // namespace fry_ota
