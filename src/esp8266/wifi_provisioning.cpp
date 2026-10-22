@@ -14,6 +14,7 @@
 #include "../core/status_snapshot.h"
 #include "config.h"
 #include "device_status.h"
+#include "flash_fmt.h"
 #include "key_policy.h"
 #include "provisioning_commit.h"
 
@@ -104,45 +105,45 @@ void cacheScan() {
   WiFi.scanDelete();
 }
 
-void handleRoot() { s_server.send_P(200, "text/html", PORTAL_HTML); }
+void handleRoot() { s_server.send_P(200, PSTR("text/html"), PORTAL_HTML); }
 
 void handleInfo() {
   fry::DeviceStatus st;
   fry_status::snapshot(st);
-  String out = "{\"deviceName\":\"";
+  String out = F("{\"deviceName\":\"");
   out += s_deviceName;
-  out += "\",\"minerKey\":\"";
+  out += F("\",\"minerKey\":\"");
   out += st.keyMasked;  // never the whole key on an unauthenticated surface
-  out += "\",\"fw\":\"" FRY_FIRMWARE_VERSION "\",\"chip\":\"ESP8266\",\"proto\":2,"
-         "\"caps\":[\"key_write\",\"error_reset\",\"errs_v2\"],\"keySet\":";
-  out += st.keySet ? "true" : "false";
-  out += "}";
-  s_server.send(200, "application/json; charset=utf-8", out);
+  out += F("\",\"fw\":\"" FRY_FIRMWARE_VERSION "\",\"chip\":\"ESP8266\",\"proto\":2,"
+           "\"caps\":[\"key_write\",\"error_reset\",\"errs_v2\"],\"keySet\":");
+  out += st.keySet ? F("true") : F("false");
+  out += F("}");
+  s_server.send(200, String(F("application/json; charset=utf-8")), out);
 }
 
 void handleScan() {
-  String out = "{\"nets\":[";
+  String out = F("{\"nets\":[");
   for (int i = 0; i < s_scanCount; i++) {
-    if (i) out += ",";
-    out += "{\"ssid\":\"";
+    if (i) out += F(",");
+    out += F("{\"ssid\":\"");
     out += s_scanCache[i].ssid;
-    out += "\",\"rssi\":";
+    out += F("\",\"rssi\":");
     out += String(s_scanCache[i].rssi);
-    out += ",\"enc\":";
-    out += (s_scanCache[i].enc ? "true" : "false");
-    out += "}";
+    out += F(",\"enc\":");
+    out += (s_scanCache[i].enc ? F("true") : F("false"));
+    out += F("}");
   }
-  out += "]}";
-  s_server.send(200, "application/json", out);
+  out += F("]}");
+  s_server.send(200, String(F("application/json")), out);
 }
 
 void sendProvisionError(int http, const char* reason) {
-  String out = "{\"ok\":false,\"err\":\"";
+  String out = F("{\"ok\":false,\"err\":\"");
   out += reason;
-  out += "\",\"status\":";
+  out += F("\",\"status\":");
   out += String(static_cast<unsigned>(s_fsm.state()));
-  out += "}";
-  s_server.send(http, "application/json", out);
+  out += F("}");
+  s_server.send(http, String(F("application/json")), out);
 }
 
 // A refused key write: the FSM reports it (status 4, detail 7/8) and the response says which.
@@ -222,7 +223,7 @@ void handleProvision() {
     fry_config::setWallet(wallet.c_str());
     optimistic_yield(1000);
   });
-  s_server.send(200, "application/json", "{\"ok\":true,\"status\":2}");
+  s_server.send_P(200, PSTR("application/json"), PSTR("{\"ok\":true,\"status\":2}"));
 }
 
 void handleStatus() {
@@ -230,14 +231,14 @@ void handleStatus() {
   fry_status::snapshot(st);
   char buf[256];
   // "err" stays the v1 byte (0-5) for old clients; "detail" carries the v1.1 code.
-  snprintf(buf, sizeof(buf),
+  FRY_SNPRINTF(buf, sizeof(buf),
            "{\"status\":%u,\"err\":%u,\"detail\":%u,\"minerKey\":\"%s\",\"keySet\":%s,\"reg\":%d,"
            "\"hb\":%ld,\"fw\":\"%s\",\"ota\":\"%s\",\"ip\":\"%s\"}",
            static_cast<unsigned>(st.state), static_cast<unsigned>(fry::statusLegacyErr(st)),
            static_cast<unsigned>(fry::statusDetailErr(st)), st.keyMasked, st.keySet ? "true" : "false",
            st.regHttp, static_cast<long>(st.hbAgeS), st.fw, st.ota,
            WiFi.localIP().toString().c_str());
-  s_server.send(200, "application/json; charset=utf-8", buf);
+  s_server.send(200, String(F("application/json; charset=utf-8")), buf);
 }
 
 void ensureApCode() {
@@ -274,7 +275,7 @@ void init(const char* deviceName, const char* minerKey) {
 
   uint8_t mac[6];
   WiFi.macAddress(mac);
-  snprintf(s_apName, sizeof(s_apName), "FRY-SETUP-%02X%02X%02X", mac[3], mac[4], mac[5]);
+  FRY_SNPRINTF(s_apName, sizeof(s_apName), "FRY-SETUP-%02X%02X%02X", mac[3], mac[4], mac[5]);
 
   startAp();
   s_apActive = true;

@@ -69,6 +69,26 @@ void expectNoRawCall(const char* rel, const char* name) {
   TEST_ASSERT_EQUAL_INT_MESSAGE(0, rawCalls(src, name), rel);
 }
 
+// `<call>(<first arg>, "literal"`: a call whose SECOND argument is a string literal (the content type of ESP8266WebServer::send / send_P).
+int callsWithLiteralSecondArg(const std::string& src, const std::string& call) {
+  int n = 0;
+  for (size_t pos = src.find(call); pos != std::string::npos; pos = src.find(call, pos + call.size())) {
+    if (pos > 0 && identChar(src[pos - 1]) && src[pos - 1] != '.') continue;
+    const size_t comma = src.find(',', pos);
+    if (comma == std::string::npos) break;
+    size_t i = comma + 1;
+    while (i < src.size() && (src[i] == ' ' || src[i] == '\t' || src[i] == '\n' || src[i] == '\r')) i++;
+    if (i < src.size() && src[i] == '"') n++;
+  }
+  return n;
+}
+
+void expectNoPiece(const char* rel, const char* piece) {
+  std::string src;
+  TEST_ASSERT_TRUE_MESSAGE(loadSource(rel, src), rel);
+  TEST_ASSERT_EQUAL_INT_MESSAGE(0, countOf(src, piece), piece);
+}
+
 }  // namespace
 
 void test_the_macro_reads_its_format_from_flash_on_the_esp8266_and_keeps_snprintf_elsewhere() {
@@ -91,6 +111,19 @@ void test_telemetry_body_formats_from_flash() {
   TEST_ASSERT_EQUAL_INT_MESSAGE(1, countOf(src, "FRY_SNPRINTF("), "the one format of the telemetry body");
 }
 
+void test_wifi_provisioning_keeps_its_text_in_flash() {
+  const char* f = "src/esp8266/wifi_provisioning.cpp";
+  expectNoRawCall(f, "snprintf");
+  expectNoPiece(f, "+= \"");               // String pieces: += F("..")
+  expectNoPiece(f, "String out = \"");     // String out = F("..")
+  std::string src;
+  TEST_ASSERT_TRUE(loadSource(f, src));
+  // out += cond ? F("true") : F("false") in the two JSON builders; the one left is the %s argument of the status snprintf (a RAM pointer).
+  TEST_ASSERT_EQUAL_INT_MESSAGE(1, countOf(src, "? \"true\" : \"false\""), "only the %s argument of the status snprintf keeps its RAM literals");
+  TEST_ASSERT_EQUAL_INT_MESSAGE(0, callsWithLiteralSecondArg(src, "s_server.send("), "send(): the content type is a temporary String from F(), not a RAM literal");
+  TEST_ASSERT_EQUAL_INT_MESSAGE(0, callsWithLiteralSecondArg(src, "s_server.send_P("), "send_P(): PSTR() for the content type");
+}
+
 // Unity's setUp/tearDown have C linkage, so they must sit at global scope.
 void setUp() {}
 void tearDown() {}
@@ -99,5 +132,6 @@ int main(int, char**) {
   UNITY_BEGIN();
   RUN_TEST(test_the_macro_reads_its_format_from_flash_on_the_esp8266_and_keeps_snprintf_elsewhere);
   RUN_TEST(test_telemetry_body_formats_from_flash);
+  RUN_TEST(test_wifi_provisioning_keeps_its_text_in_flash);
   return UNITY_END();
 }
