@@ -13,6 +13,7 @@
 #include <cstring>
 
 #include "config.h"
+#include "flash_print.h"
 #include "fry_config.h"
 #include "heap_gate.h"
 #include "heap_gate_wait.h"
@@ -130,17 +131,17 @@ bool s_firstCheckDone = false;
 // set, so the previous image's init() counts the strike: it is the only writer of the strikes.
 void manualRollback() {
 #if defined(ARDUINO_ARCH_ESP8266)
-  Serial.println("ota: boot-fail limit reached - ROLLBACK IMPOSSIBLE on ESP8266 (one slot)");
+  FRY_PRINTLN("ota: boot-fail limit reached - ROLLBACK IMPOSSIBLE on ESP8266 (one slot)");
   fry_config::clearOtaPending();
 #else
   const esp_partition_t* running = esp_ota_get_running_partition();
   const esp_partition_t* other = esp_ota_get_next_update_partition(nullptr);
   if (other && running && other->address != running->address) {
-    Serial.println("ota: boot-fail limit reached - booting the other OTA slot");
+    FRY_PRINTLN("ota: boot-fail limit reached - booting the other OTA slot");
     fry_config::setOtaRolledBack(true);
     esp_ota_set_boot_partition(other);
   } else {
-    Serial.println("ota: boot-fail limit reached but no other OTA slot found - staying");
+    FRY_PRINTLN("ota: boot-fail limit reached but no other OTA slot found - staying");
     fry_config::clearOtaPending();
   }
 #endif
@@ -160,7 +161,7 @@ void tryMarkValid(const char* why) {
     if (err != ESP_OK) {
       if (!s_markFailLogged) {
         s_markFailLogged = true;
-        Serial.printf("ota: marking %s valid FAILED (err=%d) - retried on the next hardwareapi answer\n",
+        FRY_PRINTF("ota: marking %s valid FAILED (err=%d) - retried on the next hardwareapi answer\n",
                       FRY_FIRMWARE_VERSION, static_cast<int>(err));
       }
       return;
@@ -171,7 +172,7 @@ void tryMarkValid(const char* why) {
   confirmGood();  // fry_ota.pending + the boot counter
   s_confirmPending = false;
   s_firstCheckDone = false;  // the manifest check a pending image skips runs on the next tick
-  Serial.printf("ota: image %s marked valid after %lus (hardwareapi answered, last http=%d; %s)\n",
+  FRY_PRINTF("ota: image %s marked valid after %lus (hardwareapi answered, last http=%d; %s)\n",
                 FRY_FIRMWARE_VERSION, millis() / 1000UL, s_heartbeat.lastHttp(), why ? why : "?");
 }
 
@@ -296,7 +297,7 @@ FRY_OTA_ESP8266_NOINLINE bool downloadAndApply(const String& url, const String& 
   settleAfterManifest(s_blkAtCheckStart);
   const std::unique_ptr<DownloadWork> work(new (std::nothrow) DownloadWork());
   if (!work) {
-    Serial.println("ota: no memory for the download client");
+    FRY_PRINTLN("ota: no memory for the download client");
     return false;
   }
   HTTPClient& http = work->http;
@@ -313,7 +314,7 @@ FRY_OTA_ESP8266_NOINLINE bool downloadAndApply(const String& url, const String& 
 #else
   if (!otaBeginUrl(http, sec, plain, url)) {
 #endif
-    Serial.println("ota: begin failed");
+    FRY_PRINTLN("ota: begin failed");
 #if defined(ARDUINO_ARCH_ESP8266)
     if (url.startsWith("https://")) s_heapRefused = true;  // as for the manifest: only Refuse can fail it
 #endif
@@ -323,13 +324,13 @@ FRY_OTA_ESP8266_NOINLINE bool downloadAndApply(const String& url, const String& 
 
   int code = http.GET();
   if (code != 200) {
-    Serial.printf("ota: HTTP %d\n", code);
+    FRY_PRINTF("ota: HTTP %d\n", code);
     http.end();
     return false;
   }
   int len = http.getSize();
   if (len <= 0) {
-    Serial.println("ota: no Content-Length");
+    FRY_PRINTLN("ota: no Content-Length");
     http.end();
     return false;
   }
@@ -355,13 +356,13 @@ FRY_OTA_ESP8266_NOINLINE bool downloadAndApply(const String& url, const String& 
   const uint32_t minFree = HEAP_GATE_OTA;
 #endif
   if (!fry::waitForHeapGate(minFree, minBlock)) {
-    Serial.printf("ota: heap gate failed (%s)\n",
+    FRY_PRINTF("ota: heap gate failed (%s)\n",
                   minBlock ? "total free or largest contiguous block" : "total free");
     http.end();
     return false;
   }
   if (!Update.begin(len)) {
-    Serial.printf("ota: Update.begin failed (bin %dB too big for slot?)\n", len);
+    FRY_PRINTF("ota: Update.begin failed (bin %dB too big for slot?)\n", len);
     http.end();
     return false;
   }
@@ -378,7 +379,7 @@ FRY_OTA_ESP8266_NOINLINE bool downloadAndApply(const String& url, const String& 
   // session opens, and 1 KB of it is what took the connect past the end of the stack.
   std::unique_ptr<uint8_t[]> bufHeap(new (std::nothrow) uint8_t[kBufBytes]);
   if (!bufHeap) {
-    Serial.println("ota: no memory for the download buffer");
+    FRY_PRINTLN("ota: no memory for the download buffer");
     Update.end(false);
     http.end();
     return false;
@@ -397,7 +398,7 @@ FRY_OTA_ESP8266_NOINLINE bool downloadAndApply(const String& url, const String& 
       if (r <= 0) break;
       sha.update(buf, r);
       if (Update.write(buf, r) != static_cast<size_t>(r)) {
-        Serial.println("ota: write failed");
+        FRY_PRINTLN("ota: write failed");
 #if defined(ARDUINO_ARCH_ESP8266)
         Update.end(false);
 #else
@@ -409,13 +410,13 @@ FRY_OTA_ESP8266_NOINLINE bool downloadAndApply(const String& url, const String& 
       done += r;
       lastData = millis();
       if (millis() - lastLog > 3000) {
-        Serial.printf("ota: downloading %u/%d KB\n", static_cast<unsigned>(done / 1024), len / 1024);
+        FRY_PRINTF("ota: downloading %u/%d KB\n", static_cast<unsigned>(done / 1024), len / 1024);
         lastLog = millis();
       }
     } else {
       if (!stream->connected()) break;
       if (millis() - lastData > 20000) {
-        Serial.println("ota: stall 20s");
+        FRY_PRINTLN("ota: stall 20s");
         break;
       }
       delay(1);
@@ -425,7 +426,7 @@ FRY_OTA_ESP8266_NOINLINE bool downloadAndApply(const String& url, const String& 
   http.end();
 
   if (done != static_cast<size_t>(len)) {
-    Serial.printf("ota: incomplete download %u/%d\n", static_cast<unsigned>(done), len);
+    FRY_PRINTF("ota: incomplete download %u/%d\n", static_cast<unsigned>(done), len);
 #if defined(ARDUINO_ARCH_ESP8266)
     Update.end(false);
 #else
@@ -448,7 +449,7 @@ FRY_OTA_ESP8266_NOINLINE bool downloadAndApply(const String& url, const String& 
   String want = shaExpect;
   want.toLowerCase();
   if (got != want) {
-    Serial.printf("ota: sha256 mismatch (got %.16s want %.16s) - rejected\n", got.c_str(), want.c_str());
+    FRY_PRINTF("ota: sha256 mismatch (got %.16s want %.16s) - rejected\n", got.c_str(), want.c_str());
 #if defined(ARDUINO_ARCH_ESP8266)
     Update.end(false);
 #else
@@ -458,12 +459,12 @@ FRY_OTA_ESP8266_NOINLINE bool downloadAndApply(const String& url, const String& 
   }
 
   if (!Update.end(true)) {
-    Serial.println("ota: Update.end failed");
+    FRY_PRINTLN("ota: Update.end failed");
     return false;
   }
 
   fry_config::setOtaPending(newVersion.c_str());
-  Serial.printf("ota: applied %s sha=ok\n", newVersion.c_str());
+  FRY_PRINTF("ota: applied %s sha=ok\n", newVersion.c_str());
   delay(500);
   ESP.restart();
   return true;  // unreachable — kept for a clean return type after ESP.restart()
@@ -479,7 +480,7 @@ void init() {
                     state == ESP_OTA_IMG_PENDING_VERIFY;
   if (s_pendingVerify) {
     s_confirmPending = true;
-    Serial.printf("ota: image %s is pending verification - valid once hardwareapi answered and it "
+    FRY_PRINTF("ota: image %s is pending verification - valid once hardwareapi answered and it "
                   "ran %lus, rolled back after %lus of Wi-Fi without an answer\n",
                   FRY_FIRMWARE_VERSION, static_cast<unsigned long>(kMarkValidSettleMs / 1000),
                   static_cast<unsigned long>(FRY_OTA_VERIFY_DEADLINE_MS / 1000));
@@ -503,7 +504,7 @@ void init() {
     if (counter.shouldRollBack(OTA_BOOT_FAIL_LIMIT)) {
       manualRollback();  // does not return
     }
-    Serial.printf("ota: first boot %s - awaiting confirmation (%u/%u attempts)\n",
+    FRY_PRINTF("ota: first boot %s - awaiting confirmation (%u/%u attempts)\n",
                   FRY_FIRMWARE_VERSION, counter.count(), OTA_BOOT_FAIL_LIMIT);
   } else {
     if (fry::shouldRecordBadVersion(pending.c_str(), FRY_FIRMWARE_VERSION,
@@ -517,15 +518,15 @@ void init() {
       if (changed) {
         fry_config::setOtaStrikes(pending.c_str(), strikes);
         s_firstCheckAfterRollback = true;
-        Serial.printf("ota: %s was rolled back - running %s, strike %u/%u for %s%s\n", pending.c_str(),
+        FRY_PRINTF("ota: %s was rolled back - running %s, strike %u/%u for %s%s\n", pending.c_str(),
                       FRY_FIRMWARE_VERSION, strikes, fry::kOtaPermanentStrikes, pending.c_str(),
                       strikes >= fry::kOtaPermanentStrikes ? " - it will not be installed again"
                                                            : " - retried after the next 6 h check");
       } else if (plannedRestart) {
-        Serial.printf("ota: %s was rolled back by a planned restart - not counted\n", pending.c_str());
+        FRY_PRINTF("ota: %s was rolled back by a planned restart - not counted\n", pending.c_str());
       }
     }
-    Serial.printf("ota: boot %s with pending=%s - flag cleared\n", FRY_FIRMWARE_VERSION, pending.c_str());
+    FRY_PRINTF("ota: boot %s with pending=%s - flag cleared\n", FRY_FIRMWARE_VERSION, pending.c_str());
     fry_config::clearOtaPending();
     fry_config::clearOtaBootFails();
   }
@@ -558,7 +559,7 @@ void loopGuard() {
   const unsigned long now = millis();
 #if defined(FRY_TEST_FAULT) && FRY_TEST_FAULT == 3
   if (s_faultCrashAtMs && static_cast<long>(now - s_faultCrashAtMs) >= 0) {
-    Serial.println("[fault] FRY_TEST_FAULT=3 - crashing 60 s after the first heartbeat");
+    FRY_PRINTLN("[fault] FRY_TEST_FAULT=3 - crashing 60 s after the first heartbeat");
     Serial.flush();
     abort();
   }
@@ -580,14 +581,14 @@ void loopGuard() {
                                FRY_OTA_VERIFY_DEADLINE_MS) != fry::GuardAction::Rollback) {
     return;
   }
-  Serial.printf("ota: no hardwareapi answer after %lus of Wi-Fi on pending image %s - rolling back\n",
+  FRY_PRINTF("ota: no hardwareapi answer after %lus of Wi-Fi on pending image %s - rolling back\n",
                 static_cast<unsigned long>(s_verifyMs / 1000), FRY_FIRMWARE_VERSION);
   Serial.flush();
   esp_ota_mark_app_invalid_rollback_and_reboot();
   // Only reached when there is nothing to roll back to. Stay, keep reporting "pending", and let a
   // later answer mark the image valid (tryMarkValid) so a forward fix can still arrive.
   s_rollbackFailed = true;
-  Serial.printf("ota: rollback impossible (no other valid image) - staying on pending %s\n",
+  FRY_PRINTF("ota: rollback impossible (no other valid image) - staying on pending %s\n",
                 FRY_FIRMWARE_VERSION);
 #endif
 }
@@ -606,7 +607,7 @@ void confirmGood() {
   if (fry_config::getOtaPending().length() == 0) return;
   fry_config::clearOtaPending();
   fry_config::clearOtaBootFails();
-  Serial.printf("ota: %s confirmed\n", FRY_FIRMWARE_VERSION);
+  FRY_PRINTF("ota: %s confirmed\n", FRY_FIRMWARE_VERSION);
 }
 
 #if defined(ARDUINO_ARCH_ESP8266)
@@ -671,7 +672,7 @@ FRY_OTA_ESP8266_NOINLINE static fry::ManifestRead readManifest(HTTPClient& http,
   }
   if (r != fry::ManifestRead::Ok) {
     // got/of say how much arrived, err is HTTPClient's own code (unsized only), ssl is BearSSL's last error (0 = none).
-    Serial.printf("ota: manifest read failed (%s) got=%u of %d err=%d ssl=%d blk=%u\n", fry::manifestReadName(r),
+    FRY_PRINTF("ota: manifest read failed (%s) got=%u of %d err=%d ssl=%d blk=%u\n", fry::manifestReadName(r),
                   static_cast<unsigned>(body.length()), size, err, sec.getLastSSLError(),
                   static_cast<unsigned>(fry::queryMaxFreeBlock()));
   }
@@ -690,7 +691,7 @@ bool checkNow() {
   // esp_ota_begin() refuses while the running image is unconfirmed, and the other slot is the
   // rollback target: do not download over it before this image has proved itself.
   if (s_pendingVerify) {
-    Serial.println("ota: manifest check skipped - running image still pending verification");
+    FRY_PRINTLN("ota: manifest check skipped - running image still pending verification");
     return false;
   }
 #endif
@@ -702,7 +703,7 @@ bool checkNow() {
     if (!fry::keyAllowsJoin(fry::kBuildKeyModel, key[0] != 0)) {
       if (!s_loggedKeyless) {
         s_loggedKeyless = true;
-        Serial.println("ota: manifest check skipped - no miner key yet");
+        FRY_PRINTLN("ota: manifest check skipped - no miner key yet");
       }
       return false;
     }
@@ -727,7 +728,7 @@ bool checkNow() {
     // unrelated "manifest fetch HTTP -1" (lab server unreachable) was read for two runs as
     // evidence of a TLS/heap failure on the GitHub path that was in fact never attempted.
     // With the shortfall visible, the two situations can never be confused again.
-    Serial.printf("ota: skipped https manifest check - need blk>=%u free>=%u, have blk=%u free=%u\n",
+    FRY_PRINTF("ota: skipped https manifest check - need blk>=%u free>=%u, have blk=%u free=%u\n",
                   static_cast<unsigned>(HEAP_GATE_OTA_MANIFEST_BLOCK), static_cast<unsigned>(HEAP_GATE_OTA_MANIFEST),
                   static_cast<unsigned>(fry::queryMaxFreeBlock()),
                   static_cast<unsigned>(ESP.getFreeHeap()));
@@ -746,7 +747,7 @@ bool checkNow() {
   s_blkAtCheckStart = fry::queryMaxFreeBlock();
   std::unique_ptr<ManifestClients> clients(new (std::nothrow) ManifestClients());
   if (!clients) {
-    Serial.println("ota: no memory for the manifest client");
+    FRY_PRINTLN("ota: no memory for the manifest client");
     return false;
   }
   HTTPClient& http = clients->http;
@@ -763,7 +764,7 @@ bool checkNow() {
 #else
   if (!otaBeginUrl(http, sec, plain, manifestUrl)) {
 #endif
-    Serial.println("ota: manifest fetch begin failed");
+    FRY_PRINTLN("ota: manifest fetch begin failed");
 #if defined(ARDUINO_ARCH_ESP8266)
     // On ESP8266 an https begin() can only fail by beginHttpsUrl()'s Refuse (HTTPClient::begin cannot fail for these URLs).
     if (manifestUrl.startsWith("https://")) s_heapRefused = true;
@@ -775,7 +776,7 @@ bool checkNow() {
     // Log the largest contiguous block alongside the code. HTTPClient collapses connect-refused,
     // iobuf-OOM and TLS-handshake-failure all into -1, and the 30 s [health] line samples far too
     // coarsely to catch the allocation peak, so without blk here a -1 is undiagnosable.
-    Serial.printf("ota: manifest fetch HTTP %d (blk=%u)\n", code,
+    FRY_PRINTF("ota: manifest fetch HTTP %d (blk=%u)\n", code,
                   static_cast<unsigned>(fry::queryMaxFreeBlock()));
     http.end();
     return false;
@@ -809,7 +810,7 @@ FRY_OTA_ESP8266_NOINLINE static bool evaluateManifest(const String& body, OtaPla
 #endif
   JsonDocument doc;
   if (deserializeJson(doc, body)) {
-    Serial.println("ota: manifest parse failed");
+    FRY_PRINTLN("ota: manifest parse failed");
     return false;
   }
 
@@ -829,7 +830,7 @@ FRY_OTA_ESP8266_NOINLINE static bool evaluateManifest(const String& body, OtaPla
   uint8_t badn = badver.length() ? fry_config::getOtaBadN() : 0;
   if (fry::strikesReset(latest, badver.c_str())) {
     fry_config::setOtaStrikes("", 0);
-    Serial.printf("ota: manifest names %s - strikes for %s cleared\n", latest, badver.c_str());
+    FRY_PRINTF("ota: manifest names %s - strikes for %s cleared\n", latest, badver.c_str());
     badver = "";
     badn = 0;
   }
@@ -851,7 +852,7 @@ FRY_OTA_ESP8266_NOINLINE static bool evaluateManifest(const String& body, OtaPla
       inRollout = fry::rolloutAllows(rv);
       if (rv == fry::RolloutVerdict::Malformed && !s_loggedRolloutMalformed) {
         s_loggedRolloutMalformed = true;
-        Serial.println("ota: rollout field malformed - ignored");
+        FRY_PRINTLN("ota: rollout field malformed - ignored");
       }
       rolloutBucketNo = fry::rolloutBucket(digest);
     }
@@ -861,14 +862,14 @@ FRY_OTA_ESP8266_NOINLINE static bool evaluateManifest(const String& body, OtaPla
       channel, FRY_OTA_CHANNEL, latest, FRY_FIRMWARE_VERSION, skip ? badver.c_str() : "", url, sha,
       inRollout);
   if (decision == fry::OtaDecision::NotInRollout) {
-    Serial.printf("ota: rollout skip bucket=%u\n", static_cast<unsigned>(rolloutBucketNo));
+    FRY_PRINTF("ota: rollout skip bucket=%u\n", static_cast<unsigned>(rolloutBucketNo));
   }
   const bool willUpdate = decision == fry::OtaDecision::Update;
-  Serial.printf("ota: manifest check cur=%s latest=%s action=%s\n", FRY_FIRMWARE_VERSION,
+  FRY_PRINTF("ota: manifest check cur=%s latest=%s action=%s\n", FRY_FIRMWARE_VERSION,
                 strlen(latest) ? latest : "?", willUpdate ? "update" : "none");
   if (!willUpdate) {
     if (decision != fry::OtaDecision::NotNewer) {
-      Serial.printf("ota: not updating - %s (manifest channel=%s, ours=%s, strikes=%u)\n",
+      FRY_PRINTF("ota: not updating - %s (manifest channel=%s, ours=%s, strikes=%u)\n",
                     fry::otaDecisionName(decision), strlen(channel) ? channel : "prod", FRY_OTA_CHANNEL,
                     static_cast<unsigned>(badn));
     }
