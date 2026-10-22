@@ -21,6 +21,7 @@
 #include "ota_health.h"
 #include "ota_rollout_json.h"
 #include "ota_session.h"
+#include "ota_timewait.h"
 #include "sha256.h"
 #include "trigger_hooks.h"
 #include "wifi_station.h"
@@ -579,15 +580,51 @@ bool checkNow() {
   return downloadAndApply(url, sha, latest);
 }
 
+#if defined(ARDUINO_ARCH_ESP8266)
+// Hold a due check while lwIP still has closed connections in TIME_WAIT, for at most
+// fry::kOtaTimeWaitMaxHoldMs (lib/fry_core/ota_timewait.h: two such pcbs cost the heap 7784 B of contiguous
+// block until they expire ~120 s after the TLS calls that left them). Never blocks: true means "skip this
+// loop pass", and the check stays due, so the decision is taken again on the next pass.
+static bool holdForTimeWait(unsigned long now) {
+  static bool holding = false;
+  static unsigned long since = 0;
+  const uint32_t tw = fry::countTimeWaitPcbs();
+  const uint32_t heldMs = holding ? static_cast<uint32_t>(now - since) : 0;
+  if (fry::decideTimeWaitHold(tw, heldMs, fry::kOtaTimeWaitMaxHoldMs) == fry::TwHold::Hold) {
+    if (!holding) {
+      holding = true;
+      since = now;
+      Serial.printf_P(PSTR("ota: check held, %u TIME_WAIT pcb(s), at most %lu s\n"),
+                      static_cast<unsigned>(tw),
+                      static_cast<unsigned long>(fry::kOtaTimeWaitMaxHoldMs / 1000UL));
+    }
+    return true;
+  }
+  if (holding) {
+    holding = false;
+    Serial.printf_P(PSTR("ota: check released after %lu ms (tw=%u%s)\n"),
+                    static_cast<unsigned long>(heldMs), static_cast<unsigned>(tw),
+                    tw ? ", bound reached" : "");
+  }
+  return false;
+}
+#endif
+
 void tick() {
   unsigned long now = millis();
   if (!s_firstCheckDone) {
+#if defined(ARDUINO_ARCH_ESP8266)
+    if (holdForTimeWait(now)) return;
+#endif
     s_firstCheckDone = true;
     s_lastCheckMs = now;
     checkNow();
     return;
   }
   if (now - s_lastCheckMs < OTA_CHECK_MS) return;
+#if defined(ARDUINO_ARCH_ESP8266)
+  if (holdForTimeWait(now)) return;
+#endif
   s_lastCheckMs = now;
   checkNow();
 }
