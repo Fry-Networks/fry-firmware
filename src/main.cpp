@@ -115,8 +115,18 @@ void attemptWifiConnect() {
     // one optional subsystem, not a boot gate: VPN and the Ready-phase report loop start
     // unconditionally below regardless of whether it succeeds, so a hardwareapi outage or a
     // rejected miner code never stops WiFi, the relay endpoint, health logging, or OTA.
+#if defined(ARDUINO_ARCH_ESP8266)
+    // The relay's two persistent 40 B blocks (the WiFiServer object and its listening pcb) are allocated BEFORE the registration: umm_malloc is
+    // best-fit, and the registration's TLS POST leaves an island of lwIP blocks (a 104 B hole among them) for up to 120 s. Started after it, the
+    // first block went into that hole whenever the neighbouring pbuf was not freed yet, which split the contiguous tail the image download needs.
+    // Started first, both land in the boot heap's lowest fitting hole, the same way on every boot. Nothing waits: the relay only runs in Ready.
+    fry_trigger_start_vpn();  // T6 overrides
+#endif
     fry_trigger_register_now();  // T5 overrides; weak default just logs and returns
-    fry_trigger_start_vpn(); FRY_OLOSTEP_ON_READY()  // T6 overrides
+#if !defined(ARDUINO_ARCH_ESP8266)
+    fry_trigger_start_vpn();  // T6 overrides
+#endif
+    FRY_OLOSTEP_ON_READY()
     setPhase(BootPhase::Ready);
   } else {
     // Back to provisioning so the transport can surface the error and accept a retry. On a board
