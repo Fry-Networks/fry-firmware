@@ -1,6 +1,7 @@
 #include "../core/http_tls.h"
 
 #include "heap_gate.h"
+#include "mfln_cache.h"
 #include "tls_sizing.h"
 #include "config.h"
 
@@ -16,6 +17,10 @@ String extractHost(const String& url) {
   int end = url.indexOf('/', start);
   if (end < 0) end = url.length();
   return url.substring(start, end);
+}
+
+bool probeMfln512(const char* host, void*) {
+  return WiFiClientSecure::probeMaxFragmentLength(host, 443, 512);
 }
 
 }  // namespace
@@ -88,13 +93,17 @@ bool beginHttpsUrl(HTTPClient& http, WiFiClientSecure& sec, const String& url,
                     static_cast<unsigned>(heap.maxBlock));
       sec.setBufferSizes(16384, 512);
       break;
-    case fry::TlsSizing::ProbeFirst:
-      if (!WiFiClientSecure::probeMaxFragmentLength(host, 443, 512)) {
+    case fry::TlsSizing::ProbeFirst: {
+      // The probe is a throwaway ~32 KB session plus a TIME_WAIT pcb: ask once per host per boot, not on
+      // every call (positive answers only, see lib/fry_core/mfln_cache.h).
+      static fry::MflnCache mflnCache;
+      if (!fry::mflnHonours(mflnCache, host.c_str(), probeMfln512, nullptr)) {
         sec.setBufferSizes(16384, 512);
       } else {
         sec.setBufferSizes(512, 512);
       }
       break;
+    }
   }
 
   if (!http.begin(sec, url)) return false;
