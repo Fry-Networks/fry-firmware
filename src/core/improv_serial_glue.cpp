@@ -64,7 +64,7 @@ bool s_haveLastRunningScan = false;
 bool s_scanOnRunningBoard = false;  // the scan in flight was admitted on a joined running board
 
 // Smallest contiguous free block a running board may scan with. Only the ESP8266 has one: its
-// scan took up to 3.5 KB of the largest block, while the ESP32 family showed no drop (see
+// scan took ~146 bytes of the largest block per network, while the ESP32 family showed no drop (see
 // kRunningScanMinBlockEsp8266).
 #if defined(ARDUINO_ARCH_ESP8266)
 const uint32_t kScanMinBlock = fry::improv::kRunningScanMinBlockEsp8266;

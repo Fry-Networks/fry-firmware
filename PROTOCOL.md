@@ -430,13 +430,19 @@ AP restarted FRY-SETUP-<MAC6> after the failed join - /provision accepts a new a
   up, as before, and now also on a board that joined its network, so a flasher's "Change Wi-Fi"
   can list networks there too. On a running board it runs only while the station is joined (a
   scan started while it is joining would disconnect it), at most once per 30 s, and only with the
-  largest free heap block at least 7600 bytes (ESP8266 only; the ESP32 family has no floor); otherwise the reply is Improv error `0x04`, as in
-  11.4. A refused request does not restart the 30 s window. This replaces the 11.4 rule that `0x04` is gated on the provisioning transport.
-  A scan that cannot start, or that the chip reports as failed, is answered with Improv error `0xFF`
-  and never with an empty list; the empty result still ends a successful list. On a running board a
-  finished scan that found 0 networks counts as failed too (error `0xFF`): the joined network is
-  visible to the scan, and the ESP8266 core reports a failed scan callback as 0 networks. A
-  provisionable board's empty scan is still an empty list.
+  largest free heap block at least 16384 bytes (ESP8266 only; the ESP32 family has no floor);
+  otherwise the reply is Improv error `0x04`, as in 11.4. A refused request does not restart the
+  30 s window, so a second `0x04` sent while a running-board scan is still in flight is answered
+  with error `0x04` and the first scan's rows still arrive. This replaces the 11.4 rule that `0x04`
+  is gated on the provisioning transport.
+  - Failures. A scan that cannot start, or that the chip reports as failed (`WIFI_SCAN_FAILED`), is
+    answered with Improv error `0xFF`, not an empty list. On a running board a finished scan that
+    found 0 networks counts as failed too (error `0xFF`): the joined network is visible to the
+    scan, and the ESP8266 core reports a scan callback with a non-OK status as 0 networks.
+  - Provisionable board. A finished scan with 0 networks stays an empty list, so an ESP8266 scan
+    callback with a non-OK status (count 0) can still appear there as an empty list. Also unchanged:
+    while a Wi-Fi join that `0x01` started is in flight (ESP8266), a scan request is answered with
+    the empty result at once and no scan runs, because the join owns the radio.
 - **Golden vectors** now live in `test/fixtures/improv_fry_vectors.json` (ASCII-only JSON with each
   vector's inputs); the hex lines in 11.4 are the same bytes.
 - **Image verification (replaces the 11.5 bullet).** A pending image is marked valid only once

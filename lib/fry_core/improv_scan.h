@@ -47,9 +47,10 @@ const unsigned long kRunningScanMinIntervalMs = 30000;
 
 // Smallest contiguous free block an ESP8266 running board scans with (src/core/improv_serial_glue.cpp
 // passes it as minBlock). Bench, keyed joined ESP8266 on 0.4.9 + diag build, 6 scans: block at request
-// 29248..37032; largest block drop start->done 3504 (37032 -> 33528, 24 networks). Floor = that drop +
-// 4096 margin. ESP32/C3 keep no floor (block 110580 / 118772, drop 0).
-const uint32_t kRunningScanMinBlockEsp8266 = 7600;
+// 29248..37032; largest block drop start->done 3504 (37032 -> 33528, 24 networks) = ~146 bytes per
+// network. Up to 64 networks (49 were seen on the ESP32/C3 at the same site) is ~9.3 KB; plus a 4096
+// margin that is ~13.4 KB, rounded up to 16384. ESP32/C3 keep no floor (block 110580 / 118772, drop 0).
+const uint32_t kRunningScanMinBlockEsp8266 = 16384;
 
 // transportRunning (the board is provisionable): always Run, as before. Otherwise (a board that
 // joined its network) Run only when the station is joined (a scan started while it is joining

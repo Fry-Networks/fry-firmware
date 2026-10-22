@@ -69,8 +69,11 @@ void test_heap_floor_edge() {
 
 void test_esp8266_floor_is_the_measured_drop_plus_margin() {
   const uint32_t floor = fry::improv::kRunningScanMinBlockEsp8266;
-  // Measured on the bench: largest block drop during a scan 3504; 4096 margin.
-  TEST_ASSERT_EQUAL_UINT32(3504 + 4096, floor);
+  // Bench: ~146 bytes per result (3504 / 24 networks); up to 64 networks plus a 4096 margin is about
+  // 13.4 KB, rounded up to 16384. The lowest block seen on a healthy running board was 29248.
+  TEST_ASSERT_EQUAL_UINT32(16384, floor);
+  TEST_ASSERT_TRUE(floor >= 64u * 146u + 4096u);
+  TEST_ASSERT_TRUE(floor <= 29248u);
   TEST_ASSERT_EQUAL(ScanAdmit::Run, admitScan(false, true, false, 5000, 0, floor, floor));
   TEST_ASSERT_EQUAL(ScanAdmit::Refuse, admitScan(false, true, false, 5000, 0, floor - 1, floor));
   // The healthy running board (lowest block seen at a request: 29248) is never refused by it.
