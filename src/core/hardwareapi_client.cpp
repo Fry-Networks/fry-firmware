@@ -408,9 +408,30 @@ void tick() {
   }
 }
 
+#if defined(ARDUINO_ARCH_ESP8266)
+// The boot-time registration (main.cpp attemptWifiConnect() -> fry_trigger_register_now()). tick() registers whenever
+// s_lastRegisterAttemptMs is 0 and nothing recorded this call, so the first tick registered AGAIN about a second later: a second ~8 KB
+// TLS session low in the 40 KB heap and a second TIME_WAIT pcb (test/test_hwapi_register_once). A success is recorded the way tick()
+// records its own (registerInstallation() has already set s_nextRegisterDelayMs to the heartbeat). A failure, or a call that skipped
+// for want of a miner key, is not: tick() retries at once, as before.
+bool registerAtBoot() {
+  const unsigned long started = millis();
+  if (!registerInstallation()) return false;
+  s_lastRegisterAttemptMs = started ? started : 1;
+  s_registered = true;
+  return true;
+}
+#endif
+
 }  // namespace fry_hwapi
 
 // Strong overrides of the weak defaults in trigger_stubs.cpp (see trigger_hooks.h).
-extern "C" void fry_trigger_register_now() { fry_hwapi::registerInstallation(); }
+extern "C" void fry_trigger_register_now() {
+#if defined(ARDUINO_ARCH_ESP8266)
+  fry_hwapi::registerAtBoot();
+#else
+  fry_hwapi::registerInstallation();
+#endif
+}
 extern "C" void fry_trigger_poc_now() { fry_hwapi::putPoc(); }
 extern "C" void fry_trigger_report_loop_tick() { fry_hwapi::tick(); }
