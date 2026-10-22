@@ -162,7 +162,12 @@ void tryMarkValid(const char* why) {
                 FRY_FIRMWARE_VERSION, millis() / 1000UL, s_heartbeat.lastHttp(), why ? why : "?");
 }
 
-bool otaBeginUrl(HTTPClient& http, WiFiClientSecure& sec, WiFiClient& plain, const String& url) {
+bool otaBeginUrl(HTTPClient& http, WiFiClientSecure& sec, WiFiClient& plain, const String& url
+#if defined(ARDUINO_ARCH_ESP8266)
+                 ,
+                 bool smallReply  // every TLS record of this request is small: the manifest, not the image
+#endif
+) {
   if (url.startsWith("https://")) {
     // GitHub - the compiled OTA_MANIFEST_URL host, and the *.githubusercontent.com targets its
     // release redirects hand out - does not honour MFLN. On ESP8266, probing it costs a ~32 KB
@@ -176,7 +181,7 @@ bool otaBeginUrl(HTTPClient& http, WiFiClientSecure& sec, WiFiClient& plain, con
     // opens its own, and HTTPClient::end() only stops the TLS session (freeing BearSSL's ~21 KB of
     // context and I/O buffers) when keep-alive reuse is off. Its default is on and GitHub keeps the
     // connection, so two sessions were open at once on a ~80 KB heap. See lib/fry_core/ota_session.h.
-    if (!fry_http::beginHttpsUrl(http, sec, url, !githubHost)) return false;
+    if (!fry_http::beginHttpsUrl(http, sec, url, !githubHost, smallReply)) return false;
     http.setReuse(fry::otaAsksForKeepAlive(/*isEsp8266=*/true, /*isHttps=*/true));
     return true;
 #else
@@ -237,7 +242,12 @@ FRY_OTA_ESP8266_NOINLINE bool downloadAndApply(const String& url, const String& 
   WiFiClientSecure sec;
   WiFiClient plain;
 #endif
+#if defined(ARDUINO_ARCH_ESP8266)
+  // The image streams 16 KB records: the big receive buffer, never the manifest's medium one.
+  if (!otaBeginUrl(http, sec, plain, url, /*smallReply=*/false)) {
+#else
   if (!otaBeginUrl(http, sec, plain, url)) {
+#endif
     Serial.println("ota: begin failed");
     return false;
   }
@@ -591,7 +601,12 @@ bool checkNow() {
   WiFiClientSecure sec;
   WiFiClient plain;
 #endif
+#if defined(ARDUINO_ARCH_ESP8266)
+  // A ~2 KB JSON behind a 4146 B Certificate record: 8192/512 instead of 16384/512 (lib/fry_core/tls_sizing.h).
+  if (!otaBeginUrl(http, sec, plain, manifestUrl, /*smallReply=*/true)) {
+#else
   if (!otaBeginUrl(http, sec, plain, manifestUrl)) {
+#endif
     Serial.println("ota: manifest fetch begin failed");
     return false;
   }

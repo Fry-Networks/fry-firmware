@@ -25,8 +25,8 @@ bool probeMfln512(const char* host, void*) {
 
 }  // namespace
 
-bool beginHttpsUrl(HTTPClient& http, WiFiClientSecure& sec, const String& url,
-                   bool mflnProbeWorthwhile) {
+bool beginHttpsUrl(HTTPClient& http, WiFiClientSecure& sec, const String& url, bool mflnProbeWorthwhile,
+                   bool smallReply) {
   // DOCUMENTED LIMITATION (v0.2.0), not a bug for this run: unlike the ESP32 fix in this same
   // release (src/esp32/http_tls.cpp, sec.setCACertBundle()), this chip stays on setInsecure().
   // BearSSL trust-anchor verification (setTrustAnchors()/setX509Time()) needs its own
@@ -70,7 +70,8 @@ bool beginHttpsUrl(HTTPClient& http, WiFiClientSecure& sec, const String& url,
   // sample taken before it (checkNow's gate) overstates what is left. A short heap is no longer
   // allowed to fall through to 512/512 for a peer that does not honour MFLN - see tls_sizing.h.
   const fry::HeapSample heap{static_cast<uint32_t>(ESP.getFreeHeap()), fry::queryMaxFreeBlock()};
-  const fry::TlsPlan plan = fry::planTls(heap, HEAP_GATE_OTA, HEAP_GATE_OTA_BLOCK, mflnProbeWorthwhile);
+  const fry::TlsPlan plan =
+      fry::planTls(heap, HEAP_GATE_OTA, HEAP_GATE_OTA_BLOCK, mflnProbeWorthwhile, smallReply);
   String host = extractHost(url);
   switch (plan.sizing) {
     case fry::TlsSizing::Refuse:
@@ -93,6 +94,14 @@ bool beginHttpsUrl(HTTPClient& http, WiFiClientSecure& sec, const String& url,
                     static_cast<unsigned>(heap.maxBlock));
       sec.setBufferSizes(16384, 512);
       break;
+    case fry::TlsSizing::Medium:
+      // The OTA manifest: github.com honours MFLN 512, the last hop (release-assets) does not and sends one 4146 B
+      // Certificate record, then a ~2 KB JSON. 8192 holds that 1.98x over for 8 KB less heap than 16384.
+      Serial.printf_P(PSTR("tls: small replies expected - probe skipped, %u/%u (blk=%u)\n"),
+                      static_cast<unsigned>(fry::kTlsMediumRxBytes), static_cast<unsigned>(fry::kTlsTxBytes),
+                      static_cast<unsigned>(heap.maxBlock));
+      sec.setBufferSizes(fry::kTlsMediumRxBytes, fry::kTlsTxBytes);
+      break;
     case fry::TlsSizing::ProbeFirst: {
       // The probe is a throwaway ~32 KB session plus a TIME_WAIT pcb: ask once per host per boot, not on
       // every call (positive answers only, see lib/fry_core/mfln_cache.h).
@@ -110,6 +119,10 @@ bool beginHttpsUrl(HTTPClient& http, WiFiClientSecure& sec, const String& url,
   http.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);
   http.setRedirectLimit(5);
   return true;
+}
+
+bool beginHttpsUrl(HTTPClient& http, WiFiClientSecure& sec, const String& url, bool mflnProbeWorthwhile) {
+  return beginHttpsUrl(http, sec, url, mflnProbeWorthwhile, /*smallReply=*/false);
 }
 
 }  // namespace fry_http

@@ -28,4 +28,12 @@ namespace fry_http {
 bool beginHttpsUrl(HTTPClient& http, WiFiClientSecure& sec, const String& url,
                    bool mflnProbeWorthwhile = true);
 
+#if defined(ARDUINO_ARCH_ESP8266)
+// As above, for a caller that knows every TLS record of its request is small (the OTA manifest): a peer that does not
+// honour MFLN then gets 8192/512 buffers instead of 16384/512 (lib/fry_core/tls_sizing.h, kTlsMediumRxBytes). The
+// four-argument form is smallReply = false. ESP8266 only: the ESP32 declaration and image are unchanged.
+bool beginHttpsUrl(HTTPClient& http, WiFiClientSecure& sec, const String& url, bool mflnProbeWorthwhile,
+                   bool smallReply);
+#endif
+
 }  // namespace fry_http

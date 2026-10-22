@@ -27,17 +27,30 @@ enum class TlsSizing : uint8_t {
   Small,       // 512/512 (only for a peer that may honour MFLN)
   Big,         // 16384/512, no probe (peer known not to honour MFLN, heap affordable)
   ProbeFirst,  // probe MFLN: honoured -> 512/512, refused -> 16384/512 (heap affordable)
+  Medium,      // 8192/512, no probe (peer does not honour MFLN but every record of THIS request is small)
 };
+
+// BearSSL buffer sizes (payload bytes; WiFiClientSecure::setBufferSizes adds its own 325 B / 85 B of record overhead).
+// A 512 B send buffer is what makes BearSSL ask for MFLN 512 in every ClientHello, whatever the receive size is.
+constexpr uint16_t kTlsBigRxBytes = 16384;
+// OTA manifest (a ~2 KB JSON behind github.com -> github.com -> release-assets.githubusercontent.com). Host probe
+// 2026-10-22: github.com honours MFLN 512 (its 2730 B Certificate arrives as 512 B records); release-assets does not
+// and sends one 4146 B Certificate record, the largest record of the exchange. 8192 is 1.98x that. A bigger record fails
+// cleanly (BR_ERR_TOO_LARGE), it cannot overrun the buffer. The image DOWNLOAD streams 16 KB records: Big only.
+constexpr uint16_t kTlsMediumRxBytes = 8192;
+constexpr uint16_t kTlsTxBytes = 512;
 
 struct TlsPlan {
   TlsSizing sizing;
   bool affordable;  // heapGatePass() on the SAME sample the sizing came from
 };
 
-// peerMightHonourMfln is false for a host known to refuse MFLN (GitHub): such a peer is either
-// given the big buffers or not connected to at all, never 512/512.
+// peerMightHonourMfln is false for a host that may send records the 512 B receive buffer cannot hold (GitHub's
+// release-assets host): such a peer is either given a big enough buffer or not connected to at all, never 512/512.
+// smallReply: the caller knows every record of this request is small (the OTA manifest). A peer that does not honour
+// MFLN then gets Medium instead of Big; every other combination is unchanged (the default keeps old callers and tests).
 TlsPlan planTls(const HeapSample& sample, uint32_t minFreeTotal, uint32_t minBlock,
-                bool peerMightHonourMfln);
+                bool peerMightHonourMfln, bool smallReply = false);
 
 }  // namespace fry
 
