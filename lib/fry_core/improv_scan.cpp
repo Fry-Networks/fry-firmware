@@ -38,21 +38,20 @@ const char* authCell(bool secure) { return secure ? "YES" : "NO"; }
 
 ScanAdmit admitScan(bool transportRunning, bool staConnected, bool haveLast, unsigned long nowMs,
                     unsigned long lastScanMs, uint32_t maxFreeBlock, uint32_t minBlock) {
-  (void)staConnected;
-  (void)haveLast;
-  (void)nowMs;
-  (void)lastScanMs;
-  (void)maxFreeBlock;
-  (void)minBlock;
-  return transportRunning ? ScanAdmit::Run : ScanAdmit::Refuse;
+  if (transportRunning) return ScanAdmit::Run;
+  if (!staConnected) return ScanAdmit::Refuse;
+  if (haveLast && nowMs - lastScanMs < kRunningScanMinIntervalMs) return ScanAdmit::Refuse;
+  return maxFreeBlock >= minBlock ? ScanAdmit::Run : ScanAdmit::Refuse;
 }
 
 ScanStart classifyScanStart(int rc) {
-  (void)rc;
-  return ScanStart::Started;
+  return rc == kScanFailed ? ScanStart::Failed : ScanStart::Started;
 }
 
-ScanPoll classifyScanPoll(int n) { return n == kScanRunning ? ScanPoll::Wait : ScanPoll::Done; }
+ScanPoll classifyScanPoll(int n) {
+  if (n == kScanRunning) return ScanPoll::Wait;
+  return n == kScanFailed ? ScanPoll::Failed : ScanPoll::Done;
+}
 
 }  // namespace improv
 }  // namespace fry

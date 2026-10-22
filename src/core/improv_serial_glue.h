@@ -29,7 +29,8 @@ void init(const char* deviceName, const char* minerKey);
 // key write and - since round 2 - 0x01 Wi-Fi settings are answered in every phase, so a web flasher
 // sees a board it can UPDATE instead of one it must erase, and its "Change Wi-Fi" works on a
 // running board (PROTOCOL.md sections 11.4, 11.8). `transportRunning` is
-// fry::BootPolicy::transportStarted(): only the scan is still limited to a provisionable board.
+// fry::BootPolicy::transportStarted(): a provisionable board is always scanned; a board that
+// joined its network is scanned only when that is safe (fry::improv::admitScan, 11.8).
 void poll(bool transportRunning);
 
 // True once after a 0xF0 write stored a key DIFFERENT from the previous one, and only after 3 s

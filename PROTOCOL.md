@@ -299,7 +299,8 @@ means protocol 1.
 - **Phases.** Current state (`0x02`), device info (`0x03`) and `0xF1` are answered in EVERY phase, so
   a web flasher connecting to a working board recognises it (and offers Update, not erase). `0x01`
   Wi-Fi settings and `0x04` scan are still answered only while the provisioning transport is up;
-  otherwise the reply is Improv error `0x04`. `0xF0` is accepted in any phase. `0x42` and every
+  otherwise the reply is Improv error `0x04` (11.8 replaces this for both). `0xF0` is accepted in
+  any phase. `0x42` and every
   other unassigned command, the rest of `0xF0`-`0xFF` included, stay "unknown command".
 - **`0xF0` FrySetMinerKey.** RPC data `[36][key]`. A length byte that disagrees with the data, or a
   value that cannot be buffered, is Improv error `0x01`; a well-framed key of the wrong length or
@@ -422,10 +423,17 @@ AP restarted FRY-SETUP-<MAC6> after the failed join - /provision accepts a new a
   is physical access, the same trust as `0xF0`): they are persisted and the board restarts into
   them; no Provisioned state or URL is reported for the connection it is leaving. A board that
   was provisioned earlier this boot (state 2 Connecting or 3 Connected) starts over the same way;
-  a board in Error starts over too, whatever the error. `0x04` scan is
-  still answered only while the provisioning transport is up. The restart after an `0xF0` key change
+  a board in Error starts over too, whatever the error. The restart after an `0xF0` key change
   waits for 3 s without another Improv command; a `0x01` sent within that window restarts the board
   anyway. This replaces the 11.4 rule that `0x01` is gated on the provisioning transport.
+- **Improv `0x04` scan on a running board.** A scan is answered while the provisioning transport is
+  up, as before, and now also on a board that joined its network, so a flasher's "Change Wi-Fi"
+  can list networks there too. On a running board it runs only while the station is joined (a
+  scan started while it is joining would disconnect it), at most once per 30 s, and only with the
+  largest free heap block at the measured floor; otherwise the reply is Improv error `0x04`, as in
+  11.4. A refused request does not restart the 30 s window. This replaces the 11.4 rule that `0x04` is gated on the provisioning transport.
+  A scan that cannot start, or that the chip reports as failed, is answered with Improv error `0xFF`
+  and never with an empty list; the empty result still ends a successful list.
 - **Golden vectors** now live in `test/fixtures/improv_fry_vectors.json` (ASCII-only JSON with each
   vector's inputs); the hex lines in 11.4 are the same bytes.
 - **Image verification (replaces the 11.5 bullet).** A pending image is marked valid only once
