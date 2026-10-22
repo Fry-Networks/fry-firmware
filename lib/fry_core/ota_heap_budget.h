@@ -53,7 +53,39 @@ constexpr uint32_t kCtorBytes = kBearsslStackThunkBytes + kOtaClientsBytes;
 constexpr uint32_t kManifestGateBlock = kManifestNeedBlk + kMarginBytes + kCtorBytes;
 constexpr uint32_t kManifestGateFree = kManifestNeedFree + kMarginBytes + kCtorBytes;
 
+// Image download, Big 16384/512 session (release-assets.githubusercontent.com sends 16400 B application records for the
+// body: host probe c1/tools/record_sizes.py, c1/logs/record-sizes-asset.log - 34 of 60 records over 16384 - so no smaller
+// receive buffer can carry it; the manifest's Medium buffer cannot). Measured by sweep C (lo/c1-c9-115327.lines.txt,
+// lo/c1-c9b-120136.lines.txt, 05ffb66 tree + trace, the same 3-hop GitHub chain with every hop on 16384/512), post-ctor:
+//
+//   post-ctor blk   free    result
+//   28912           29528   PASS 1/1  (unforced)
+//   27992           28608   PASS 3/3
+//   25992           26608   PASS 1/3, CRASH 2/3 (reset cause 4, OOM panic)
+//   23992           24368   CRASH (reset cause 2)
+//
+// The download's own chain has one hop fewer than the manifest's (github.com -> release-assets), so the 3-hop figure is an
+// upper bound on its need. The stack thunk is normally already held when downloadAndApply() runs (checkNow()'s manifest
+// clients are still alive), so its begin-time sample is "post-constructor" in exactly the sweep's sense.
+constexpr uint32_t kDownloadPassBlk = 27992;   // lowest forced largest free block that passed 3/3
+constexpr uint32_t kDownloadPassFree = 28608;  // total free at that point
+constexpr uint32_t kDownloadFailBlk = 25992;   // PASS 1/3, CRASH 2/3
+constexpr uint32_t kDownloadNeedBlk = kDownloadPassBlk;
+constexpr uint32_t kDownloadNeedFree = kDownloadPassFree;
+// In the same pre-constructor units as the manifest gate; beginHttpsUrl() sees them through tlsFloorsAtBegin().
+constexpr uint32_t kDownloadGateBlock = kDownloadNeedBlk + kMarginBytes + kCtorBytes;  // 38808
+constexpr uint32_t kDownloadGateFree = kDownloadNeedFree + kMarginBytes + kCtorBytes;  // 39424
+
+// After the connect: BearSSL's contexts and its 16 KB input buffer are ALREADY allocated, so a contiguous-block gate
+// there (the old 36864) measures a heap this session itself just consumed and can never pass. What streaming still
+// allocates is its own 1024 B buffer (new(nothrow) in downloadAndApply) and the Updater's buffer (new(nothrow), 4096 B when
+// more than 8192 B are free, else 256 B): both fail cleanly, nothing there reaches the OOM panic. Need = 1024 + 256.
+constexpr uint32_t kStreamNeedBytes = 1024 + 256;
+constexpr uint32_t kStreamGateFree = kStreamNeedBytes + kMarginBytes;  // 5376
+
 static_assert(kManifestFailBlk < kManifestPassBlk, "the sweep fails below it and passes at it");
+static_assert(kDownloadFailBlk < kDownloadPassBlk, "the sweep fails below it and passes at it");
+static_assert(kDownloadGateBlock >= kDownloadPassBlk + kMarginBytes + kBearsslStackThunkBytes, "gate below need + margin");
 static_assert(kManifestGateBlock >= kManifestPassBlk + kMarginBytes + kBearsslStackThunkBytes, "gate below need + margin");
 
 }  // namespace ota_heap

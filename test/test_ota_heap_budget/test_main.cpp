@@ -7,8 +7,14 @@
 //
 // checkNow() samples BEFORE its clients exist, so the gate is the need (upper bound) + a 4096 B margin + what the
 // constructors take (BearSSL stack thunk 6208 + clients block 512): 29808 blk, 29976 free (lib/fry_core/ota_heap_budget.h).
-// The 16384/512 numbers (HEAP_GATE_OTA 20000 / HEAP_GATE_OTA_BLOCK 36864, include/config.h) are unchanged: the image
-// download keeps them, and so does every other chip.
+// The 16384/512 numbers (HEAP_GATE_OTA 20000 / HEAP_GATE_OTA_BLOCK 36864, include/config.h) are unchanged for every other
+// chip and for the MFLN-probe path.
+//
+// The image download (Big 16384/512, no smaller buffer can carry its 16400 B records) is derived the same way from sweep C
+// (PASS 3/3 at post-ctor blk 27992, free 28608; PASS 1/3 + 2 OOM panics at 25992): begin-time floors 32088 / 32704, i.e.
+// 38808 / 39424 in the pre-constructor units. The post-connect gate of downloadAndApply() used to demand 20000 free and a
+// 36864 B contiguous block AFTER BearSSL had allocated its 16 KB buffer: it could not pass on this chip; it now asks only
+// for what streaming still allocates (kStreamGateFree).
 #include <unity.h>
 
 #include <fstream>
@@ -73,6 +79,54 @@ void test_the_gate_is_a_function_of_the_measurement_not_of_the_old_constant() {
   TEST_ASSERT_TRUE(post >= budget::kManifestNeedBlk + budget::kMarginBytes);
 }
 
+void test_the_download_gate_is_derived_the_same_way_from_the_16384_sweep() {
+  TEST_ASSERT_EQUAL_UINT32(27992, budget::kDownloadNeedBlk);   // PASS 3/3
+  TEST_ASSERT_EQUAL_UINT32(28608, budget::kDownloadNeedFree);
+  TEST_ASSERT_EQUAL_UINT32(25992, budget::kDownloadFailBlk);   // PASS 1/3, CRASH 2/3
+  TEST_ASSERT_EQUAL_UINT32(27992 + 4096 + 6208 + 512, budget::kDownloadGateBlock);
+  TEST_ASSERT_EQUAL_UINT32(38808, budget::kDownloadGateBlock);
+  TEST_ASSERT_EQUAL_UINT32(28608 + 4096 + 6208 + 512, budget::kDownloadGateFree);
+  TEST_ASSERT_EQUAL_UINT32(39424, budget::kDownloadGateFree);
+  const fry::TlsFloors f = fry::tlsFloorsAtBegin(budget::kDownloadGateFree, budget::kDownloadGateBlock, false);
+  TEST_ASSERT_EQUAL_UINT32(27992 + 4096, f.block);      // 32088
+  TEST_ASSERT_EQUAL_UINT32(28608 + 4096, f.freeTotal);  // 32704
+}
+
+void test_the_big_session_is_refused_in_the_crash_band_and_just_above_it() {
+  // Begin-time sample (after the constructors) for the download: the 16384/512 session. Every post-ctor block the sweep
+  // crashed at, the one it only half survived, and the lowest one it passed 3/3 are all below need + margin.
+  const fry::TlsFloors f = fry::tlsFloorsAtBegin(budget::kDownloadGateFree, budget::kDownloadGateBlock, false);
+  const uint32_t blocks[] = {23992, 25992, 27992, 28912, 32087};
+  for (uint32_t b : blocks) {
+    const fry::TlsPlan p = fry::planTls({b + 168, b}, f.freeTotal, f.block, /*peerMightHonourMfln=*/false);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(static_cast<int>(fry::TlsSizing::Refuse), static_cast<int>(p.sizing),
+                                  "a Big session below need + margin must be refused, never 512/512");
+  }
+  const fry::TlsPlan ok = fry::planTls({32704, 32088}, f.freeTotal, f.block, false);
+  TEST_ASSERT_EQUAL_INT(static_cast<int>(fry::TlsSizing::Big), static_cast<int>(ok.sizing));
+}
+
+void test_the_download_floors_are_higher_than_the_manifest_floors() {
+  // Same chip, same hosts: the 16 KB buffer costs more than the 8 KB one, so its floors must be the higher.
+  TEST_ASSERT_TRUE(budget::kDownloadGateBlock > budget::kManifestGateBlock);
+  TEST_ASSERT_TRUE(budget::kDownloadGateFree > budget::kManifestGateFree);
+  TEST_ASSERT_TRUE(budget::kDownloadGateBlock > 36864);  // above the old number: the old one was below need + margin
+}
+
+void test_the_stream_gate_is_what_streaming_allocates_plus_margin() {
+  TEST_ASSERT_EQUAL_UINT32(1024 + 256, budget::kStreamNeedBytes);  // download buffer + the Updater's smallest buffer
+  TEST_ASSERT_EQUAL_UINT32(1024 + 256 + 4096, budget::kStreamGateFree);
+  TEST_ASSERT_EQUAL_UINT32(5376, budget::kStreamGateFree);
+  // At the lowest heap the download is admitted (begin-time free 32704), the session leaves this much free after the connect
+  // (sweep C at post-ctor 27992: 5592 B free at the end of the last hop, plus the 4096 B of margin the admission adds):
+  const uint32_t freeAfterConnectAtAdmission = 5592 + 4096;
+  TEST_ASSERT_TRUE_MESSAGE(freeAfterConnectAtAdmission >= budget::kStreamGateFree,
+                           "a download admitted at its floor must still pass the post-connect gate");
+  // ...and the old post-connect gate (20000 free) could never pass on this chip: nothing admitted ever has 20000 free
+  // once the session holds 21 KB of a ~40 KB heap.
+  TEST_ASSERT_TRUE(freeAfterConnectAtAdmission < 20000);
+}
+
 // ---- wiring pins (source text; these files need the Arduino core or the PlatformIO tool chain) -----------------------
 
 bool readFile(const std::string& path, std::string& out) {
@@ -119,12 +173,20 @@ void test_only_env_esp8266_carries_the_new_gate_numbers() {
   TEST_ASSERT_TRUE_MESSAGE(loadSource("platformio.ini", ini), "cannot read platformio.ini");
   const std::string blk = "-DHEAP_GATE_OTA_MANIFEST_BLOCK=29808";
   const std::string fre = "-DHEAP_GATE_OTA_MANIFEST=29976";
+  const std::string dlb = "-DHEAP_GATE_OTA_DOWNLOAD_BLOCK=38808";
+  const std::string dlf = "-DHEAP_GATE_OTA_DOWNLOAD=39424";
+  const std::string stf = "-DHEAP_GATE_OTA_STREAM=5376";
   TEST_ASSERT_EQUAL_INT_MESSAGE(1, countOf(ini, blk), "the block gate is set once in the whole file");
   TEST_ASSERT_EQUAL_INT_MESSAGE(1, countOf(ini, fre), "the free gate is set once in the whole file");
   const std::string env = iniSection(ini, "[env:esp8266]");
   TEST_ASSERT_FALSE_MESSAGE(env.empty(), "no [env:esp8266] section");
   TEST_ASSERT_EQUAL_INT_MESSAGE(1, countOf(env, blk), "...and it is in [env:esp8266] (the *_lab/_test/_olostep ESP8266 envs extend it)");
   TEST_ASSERT_EQUAL_INT_MESSAGE(1, countOf(env, fre), "...likewise the free gate");
+  const std::string* more[] = {&dlb, &dlf, &stf};
+  for (const std::string* m : more) {
+    TEST_ASSERT_EQUAL_INT_MESSAGE(1, countOf(ini, *m), "each download/stream gate number is set once in the whole file");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(1, countOf(env, *m), "...in [env:esp8266]");
+  }
   TEST_ASSERT_EQUAL_INT_MESSAGE(0, countOf(iniSection(ini, "[embedded]"), "HEAP_GATE_OTA"), "not in the shared [embedded] flags");
   TEST_ASSERT_EQUAL_INT_MESSAGE(0, countOf(iniSection(ini, "[esp32common]"), "HEAP_GATE_OTA"), "not in the ESP32 family flags");
 }
@@ -138,6 +200,9 @@ void test_config_h_keeps_the_16384_numbers_and_defaults_the_new_ones_to_them() {
                                 "any build that does not set the manifest gate keeps the old free gate");
   TEST_ASSERT_EQUAL_INT_MESSAGE(1, countOf(cfg, "#define HEAP_GATE_OTA_MANIFEST_BLOCK HEAP_GATE_OTA_BLOCK\n"),
                                 "any build that does not set the manifest gate keeps the old block gate");
+  TEST_ASSERT_EQUAL_INT(1, countOf(cfg, "#define HEAP_GATE_OTA_DOWNLOAD HEAP_GATE_OTA\n"));
+  TEST_ASSERT_EQUAL_INT(1, countOf(cfg, "#define HEAP_GATE_OTA_DOWNLOAD_BLOCK HEAP_GATE_OTA_BLOCK\n"));
+  TEST_ASSERT_EQUAL_INT(1, countOf(cfg, "#define HEAP_GATE_OTA_STREAM HEAP_GATE_OTA\n"));
 }
 
 void test_checkNow_gates_with_the_manifest_numbers_and_nothing_else_changed() {
@@ -147,25 +212,39 @@ void test_checkNow_gates_with_the_manifest_numbers_and_nothing_else_changed() {
                                 "checkNow()'s manifest gate uses the measured numbers");
   TEST_ASSERT_EQUAL_INT_MESSAGE(0, countOf(src, "waitForHeapGate(HEAP_GATE_OTA, HEAP_GATE_OTA_BLOCK, 1)"),
                                 "...and not the 16384/512 ones");
-  TEST_ASSERT_EQUAL_INT_MESSAGE(1, countOf(src, "fry::waitForHeapGate(HEAP_GATE_OTA, minBlock)"),
-                                "the image download's gate is not touched by this change");
+  TEST_ASSERT_EQUAL_INT_MESSAGE(1, countOf(src, "fry::waitForHeapGate(minFree, minBlock)"),
+                                "the post-connect gate takes its floors from the lines above it");
+  TEST_ASSERT_EQUAL_INT_MESSAGE(0, countOf(src, "waitForHeapGate(HEAP_GATE_OTA, minBlock)"),
+                                "...not the 20000 / 36864 pair it asked for after BearSSL had allocated its buffer");
   TEST_ASSERT_EQUAL_INT_MESSAGE(
       1, countOf(src, "static_assert(HEAP_GATE_OTA_MANIFEST_BLOCK == fry::ota_heap::kManifestGateBlock"),
       "the -D must equal the table's derived value");
   TEST_ASSERT_EQUAL_INT_MESSAGE(
       1, countOf(src, "static_assert(HEAP_GATE_OTA_MANIFEST == fry::ota_heap::kManifestGateFree"),
       "the -D must equal the table's derived value");
+  TEST_ASSERT_EQUAL_INT(1, countOf(src, "static_assert(HEAP_GATE_OTA_DOWNLOAD_BLOCK == fry::ota_heap::kDownloadGateBlock"));
+  TEST_ASSERT_EQUAL_INT(1, countOf(src, "static_assert(HEAP_GATE_OTA_DOWNLOAD == fry::ota_heap::kDownloadGateFree"));
+  TEST_ASSERT_EQUAL_INT(1, countOf(src, "static_assert(HEAP_GATE_OTA_STREAM == fry::ota_heap::kStreamGateFree"));
+  // ESP8266: no contiguous block after the connect, and the stream floor only for https (plain http opens no session).
+  TEST_ASSERT_EQUAL_INT_MESSAGE(1, countOf(src, "const uint32_t minFree = isHttps ? HEAP_GATE_OTA_STREAM : HEAP_GATE_OTA;"),
+                                "ESP8266: the post-connect free floor is the stream's, for https");
+  TEST_ASSERT_EQUAL_INT_MESSAGE(1, countOf(src, "const uint32_t minFree = HEAP_GATE_OTA;"),
+                                "every other chip keeps its free floor");
 }
 
 void test_beginHttpsUrl_takes_its_floors_from_the_session_it_sizes() {
   std::string src;
   TEST_ASSERT_TRUE_MESSAGE(loadSource("src/esp8266/http_tls.cpp", src), "cannot read src/esp8266/http_tls.cpp");
-  TEST_ASSERT_EQUAL_INT_MESSAGE(
-      1, countOf(src, "const uint32_t gateFree = smallReply ? HEAP_GATE_OTA_MANIFEST : HEAP_GATE_OTA;"),
-      "the manifest (small reply, Medium session) is judged by the manifest gate, the download by the old one");
-  TEST_ASSERT_EQUAL_INT_MESSAGE(
-      1, countOf(src, "const uint32_t gateBlock = smallReply ? HEAP_GATE_OTA_MANIFEST_BLOCK : HEAP_GATE_OTA_BLOCK;"),
-      "likewise the block floor");
+  // Three sessions: the manifest (Medium), the image download (Big, a peer that does not honour MFLN), and the rest
+  // (a peer that may honour MFLN: its 32 KB probe allocates after the constructor, the old numbers are its own).
+  TEST_ASSERT_EQUAL_INT_MESSAGE(1, countOf(src, "uint32_t gateFree = HEAP_GATE_OTA;"), "the probe path keeps the old floors");
+  TEST_ASSERT_EQUAL_INT_MESSAGE(1, countOf(src, "uint32_t gateBlock = HEAP_GATE_OTA_BLOCK;"), "likewise the block floor");
+  TEST_ASSERT_EQUAL_INT_MESSAGE(1, countOf(src, "if (smallReply) {"), "the manifest session");
+  TEST_ASSERT_EQUAL_INT(1, countOf(src, "gateFree = HEAP_GATE_OTA_MANIFEST;"));
+  TEST_ASSERT_EQUAL_INT(1, countOf(src, "gateBlock = HEAP_GATE_OTA_MANIFEST_BLOCK;"));
+  TEST_ASSERT_EQUAL_INT_MESSAGE(1, countOf(src, "} else if (!mflnProbeWorthwhile) {"), "the download session");
+  TEST_ASSERT_EQUAL_INT(1, countOf(src, "gateFree = HEAP_GATE_OTA_DOWNLOAD;"));
+  TEST_ASSERT_EQUAL_INT(1, countOf(src, "gateBlock = HEAP_GATE_OTA_DOWNLOAD_BLOCK;"));
   TEST_ASSERT_EQUAL_INT_MESSAGE(1, countOf(src, "fry::tlsFloorsAtBegin(gateFree, gateBlock, mflnProbeWorthwhile)"),
                                 "the floors still come from tlsFloorsAtBegin()");
 }
@@ -183,6 +262,10 @@ int main(int, char**) {
   RUN_TEST(test_the_gate_refuses_every_heap_whose_post_constructor_block_is_inside_need_plus_margin);
   RUN_TEST(test_the_gate_passes_from_need_plus_margin_up);
   RUN_TEST(test_the_gate_is_a_function_of_the_measurement_not_of_the_old_constant);
+  RUN_TEST(test_the_download_gate_is_derived_the_same_way_from_the_16384_sweep);
+  RUN_TEST(test_the_big_session_is_refused_in_the_crash_band_and_just_above_it);
+  RUN_TEST(test_the_download_floors_are_higher_than_the_manifest_floors);
+  RUN_TEST(test_the_stream_gate_is_what_streaming_allocates_plus_margin);
   RUN_TEST(test_only_env_esp8266_carries_the_new_gate_numbers);
   RUN_TEST(test_config_h_keeps_the_16384_numbers_and_defaults_the_new_ones_to_them);
   RUN_TEST(test_checkNow_gates_with_the_manifest_numbers_and_nothing_else_changed);

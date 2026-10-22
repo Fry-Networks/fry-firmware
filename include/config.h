@@ -90,3 +90,15 @@
 #ifndef HEAP_GATE_OTA_MANIFEST_BLOCK
 #define HEAP_GATE_OTA_MANIFEST_BLOCK HEAP_GATE_OTA_BLOCK
 #endif
+
+// The same for the ESP8266 image DOWNLOAD session (16384/512, begin-time floors in beginHttpsUrl) and for what is left to
+// allocate once that session is connected (HEAP_GATE_OTA_STREAM, a total-free floor: BearSSL's buffers already exist then).
+#ifndef HEAP_GATE_OTA_DOWNLOAD
+#define HEAP_GATE_OTA_DOWNLOAD HEAP_GATE_OTA
+#endif
+#ifndef HEAP_GATE_OTA_DOWNLOAD_BLOCK
+#define HEAP_GATE_OTA_DOWNLOAD_BLOCK HEAP_GATE_OTA_BLOCK
+#endif
+#ifndef HEAP_GATE_OTA_STREAM
+#define HEAP_GATE_OTA_STREAM HEAP_GATE_OTA
+#endif

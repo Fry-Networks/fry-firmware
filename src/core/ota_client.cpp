@@ -229,6 +229,12 @@ static_assert(HEAP_GATE_OTA_MANIFEST_BLOCK == fry::ota_heap::kManifestGateBlock,
               "HEAP_GATE_OTA_MANIFEST_BLOCK (platformio.ini) drifted from ota_heap_budget.h");
 static_assert(HEAP_GATE_OTA_MANIFEST == fry::ota_heap::kManifestGateFree,
               "HEAP_GATE_OTA_MANIFEST (platformio.ini) drifted from ota_heap_budget.h");
+static_assert(HEAP_GATE_OTA_DOWNLOAD_BLOCK == fry::ota_heap::kDownloadGateBlock,
+              "HEAP_GATE_OTA_DOWNLOAD_BLOCK (platformio.ini) drifted from ota_heap_budget.h");
+static_assert(HEAP_GATE_OTA_DOWNLOAD == fry::ota_heap::kDownloadGateFree,
+              "HEAP_GATE_OTA_DOWNLOAD (platformio.ini) drifted from ota_heap_budget.h");
+static_assert(HEAP_GATE_OTA_STREAM == fry::ota_heap::kStreamGateFree,
+              "HEAP_GATE_OTA_STREAM (platformio.ini) drifted from ota_heap_budget.h");
 
 // What the manifest decided: the download's arguments.
 struct OtaPlan {
@@ -286,13 +292,19 @@ FRY_OTA_ESP8266_NOINLINE bool downloadAndApply(const String& url, const String& 
   // so a transient fragmentation dip becomes a short retry rather than a failed update.
   const bool isHttps = url.startsWith("https://");
 #if defined(ARDUINO_ARCH_ESP8266)
-  constexpr bool kBearsslSingleBuffer = true;
+  // This gate runs after http.GET(): BearSSL's contexts and its 16 KB input buffer are already allocated, so asking for a
+  // 36864 B contiguous block (or 20000 B free) here measured the heap the session itself had just consumed, and could
+  // never pass. The session's own need was gated before the connect (beginHttpsUrl, HEAP_GATE_OTA_DOWNLOAD*); what is
+  // left is the 1 KB download buffer and the Updater's buffer, both new(nothrow).
+  const uint32_t minBlock = 0;
+  const uint32_t minFree = isHttps ? HEAP_GATE_OTA_STREAM : HEAP_GATE_OTA;
 #else
   constexpr bool kBearsslSingleBuffer = false;  // ESP32 family uses mbedtls
-#endif
   const uint32_t minBlock =
       fry::otaMinContiguousBlock(isHttps, kBearsslSingleBuffer, HEAP_GATE_OTA_BLOCK);
-  if (!fry::waitForHeapGate(HEAP_GATE_OTA, minBlock)) {
+  const uint32_t minFree = HEAP_GATE_OTA;
+#endif
+  if (!fry::waitForHeapGate(minFree, minBlock)) {
     Serial.printf("ota: heap gate failed (%s)\n",
                   minBlock ? "total free or largest contiguous block" : "total free");
     http.end();

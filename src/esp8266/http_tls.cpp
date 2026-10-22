@@ -73,10 +73,18 @@ bool beginHttpsUrl(HTTPClient& http, WiFiClientSecure& sec, const String& url, b
   // judged against their floors less what the constructor took (the thunk above + the clients). The raw gate numbers
   // here refused every OTA manifest check 15 ms after the gate had passed it ("manifest fetch begin failed").
   const fry::HeapSample heap{static_cast<uint32_t>(ESP.getFreeHeap()), fry::queryMaxFreeBlock()};
-  // The manifest (small reply, Medium session) is judged by its measured gate (lib/fry_core/ota_heap_budget.h), everything
-  // else by the 16384/512 one.
-  const uint32_t gateFree = smallReply ? HEAP_GATE_OTA_MANIFEST : HEAP_GATE_OTA;
-  const uint32_t gateBlock = smallReply ? HEAP_GATE_OTA_MANIFEST_BLOCK : HEAP_GATE_OTA_BLOCK;
+  // Three sessions, three measured needs (lib/fry_core/ota_heap_budget.h): the manifest (Medium 8192/512), the image
+  // download (Big 16384/512, a peer that does not honour MFLN), and a peer that may honour MFLN, whose 32 KB probe
+  // allocates after the constructor so the original floors are already in its terms.
+  uint32_t gateFree = HEAP_GATE_OTA;
+  uint32_t gateBlock = HEAP_GATE_OTA_BLOCK;
+  if (smallReply) {
+    gateFree = HEAP_GATE_OTA_MANIFEST;
+    gateBlock = HEAP_GATE_OTA_MANIFEST_BLOCK;
+  } else if (!mflnProbeWorthwhile) {
+    gateFree = HEAP_GATE_OTA_DOWNLOAD;
+    gateBlock = HEAP_GATE_OTA_DOWNLOAD_BLOCK;
+  }
   const fry::TlsFloors floors = fry::tlsFloorsAtBegin(gateFree, gateBlock, mflnProbeWorthwhile);
   const fry::TlsPlan plan =
       fry::planTls(heap, floors.freeTotal, floors.block, mflnProbeWorthwhile, smallReply);
