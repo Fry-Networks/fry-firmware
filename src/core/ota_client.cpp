@@ -627,7 +627,7 @@ bool checkNow() {
 #endif
 
 #if defined(ARDUINO_ARCH_ESP8266)
-  const std::unique_ptr<ManifestClients> clients(new (std::nothrow) ManifestClients());
+  std::unique_ptr<ManifestClients> clients(new (std::nothrow) ManifestClients());
   if (!clients) {
     Serial.println("ota: no memory for the manifest client");
     return false;
@@ -671,6 +671,10 @@ bool checkNow() {
   // opens its connection (see ManifestClients above). The ESP32 keeps one function.
   OtaPlan plan;
   if (!evaluateManifest(body, plan)) return false;
+  // The manifest check is over: give back what it held before the download opens its own session.
+  body = String();
+  manifestUrl = String();
+  clients.reset();
   return downloadAndApply(plan.url, plan.sha, plan.version);
 }
 
