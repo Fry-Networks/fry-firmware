@@ -117,7 +117,7 @@ void tick() {
   // The path parameter is the miner key. The server's fallback device lookup resolves that
   // hexId against minerKey/canonicalId, so sending the key (not the install id) is what makes
   // an unresolvable install still attributable.
-  String url = fry_config::getApiBase() + "/measurements/" + minerKey;
+  String url = fry_config::getApiBase() + FRY_TEXT("/measurements/") + minerKey;
 
   // TOTAL-FREE gate only. One attempt, no blocking wait: a bounded wait inside the loop has
   // previously starved it badly enough to trip the software watchdog.
@@ -189,8 +189,8 @@ void tick() {
   HTTPClient http;
   int code = -1;
   if (fry_http::beginHttpsUrl(http, sec, url)) {
-    http.addHeader("Authorization", "Bearer " + auth);
-    http.addHeader("Content-Type", "application/json");
+    http.addHeader(FRY_TEXT("Authorization"), "Bearer " + auth);
+    http.addHeader(FRY_TEXT("Content-Type"), FRY_TEXT("application/json"));
     code = http.POST(body);
   }
   http.end();

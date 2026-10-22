@@ -120,7 +120,7 @@ void readServerDetail(HTTPClient& http, const char* minerKey, char* out, size_t 
 void addAuthHeader(HTTPClient& http) {
   String token = fry_config::getDeviceToken();
   if (token.length() == 0) token = String(FRY_API_TOKEN);
-  if (token.length() > 0) http.addHeader("Authorization", "Bearer " + token);
+  if (token.length() > 0) http.addHeader(FRY_TEXT("Authorization"), "Bearer " + token);
 }
 
 int computeSlot() {
@@ -219,7 +219,7 @@ bool registerInstallation() {
   String body;
   serializeJson(doc, body);
 
-  String url = fry_config::getApiBase() + "/installations/" + minerKey + "/installations/" + installId;
+  String url = fry_config::getApiBase() + FRY_TEXT("/installations/") + minerKey + FRY_TEXT("/installations/") + installId;
 
   // One attempt plus one quick retry for an outage only. Anything longer is tick()'s schedule, so
   // the loop (Improv, the reset button, the relay) is never held for more than one retry.
@@ -246,7 +246,7 @@ bool registerInstallation() {
     code = -1;
     if (fry_http::beginHttpsUrl(http, sec, url)) {
       addAuthHeader(http);
-      http.addHeader("Content-Type", "application/json");
+      http.addHeader(FRY_TEXT("Content-Type"), FRY_TEXT("application/json"));
       code = http.POST(body);
     }
     s_lastRegHttp = code;
@@ -309,12 +309,12 @@ bool renewLease() {
   String body;
   serializeJson(doc, body);
 
-  String url = fry_config::getApiBase() + "/installations/" + minerKey + "/leases/" + installId;
+  String url = fry_config::getApiBase() + FRY_TEXT("/installations/") + minerKey + FRY_TEXT("/leases/") + installId;
   WiFiClientSecure sec;
   HTTPClient http;
   if (!fry_http::beginHttpsUrl(http, sec, url)) return false;
   addAuthHeader(http);
-  http.addHeader("Content-Type", "application/json");
+  http.addHeader(FRY_TEXT("Content-Type"), FRY_TEXT("application/json"));
   int code = http.sendRequest("PATCH", body);  // String overload — avoids a const/non-const
                                                 // uint8_t* signature mismatch between cores
   http.end();
@@ -340,12 +340,12 @@ int putPoc() {
   String body;
   serializeJson(doc, body);
 
-  String url = fry_config::getApiBase() + "/PoC/" + minerKey + "/hardware";
+  String url = fry_config::getApiBase() + FRY_TEXT("/PoC/") + minerKey + FRY_TEXT("/hardware");
   WiFiClientSecure sec;
   HTTPClient http;
   if (!fry_http::beginHttpsUrl(http, sec, url)) return -1;
   addAuthHeader(http);
-  http.addHeader("Content-Type", "application/json");
+  http.addHeader(FRY_TEXT("Content-Type"), FRY_TEXT("application/json"));
   int code = http.PUT(body);
   http.end();
   fry_ota::noteHeartbeat(code, "poc");
@@ -353,7 +353,7 @@ int putPoc() {
 }
 
 bool getVersions(String& outJson) {
-  String url = fry_config::getApiBase() + "/versions/" FRY_MINER_CODE "?platform=" FRY_BUILD_ENV;
+  String url = fry_config::getApiBase() + FRY_TEXT("/versions/" FRY_MINER_CODE "?platform=" FRY_BUILD_ENV);
   WiFiClientSecure sec;
   HTTPClient http;
   if (!fry_http::beginHttpsUrl(http, sec, url)) return false;

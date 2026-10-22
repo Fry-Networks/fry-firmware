@@ -148,6 +148,23 @@ void test_main_keeps_its_text_in_flash() {
   TEST_ASSERT_EQUAL_INT_MESSAGE(1, countOf(src, "void restartToApply(FryText why) {"), "the helper takes the text as FryText");
 }
 
+void test_telemetry_and_hardwareapi_keep_their_header_names_and_url_pieces_in_flash() {
+  // Shared literals are merged by the linker, so the header names ("Content-Type", "application/json", "Authorization") only leave DRAM when
+  // BOTH files give them up: one test, one commit. FRY_TEXT is the flash string on the ESP8266 and the plain literal on the ESP32 family.
+  const char* files[] = {"src/core/telemetry.cpp", "src/core/hardwareapi_client.cpp"};
+  for (size_t i = 0; i < sizeof(files) / sizeof(files[0]); i++) {
+    expectNoPiece(files[i], "addHeader(\"");   // addHeader(FRY_TEXT("Name"), ..)
+    expectNoPiece(files[i], "+ \"/");          // getApiBase() + FRY_TEXT("/path/")
+  }
+  std::string hw;
+  TEST_ASSERT_TRUE(loadSource("src/core/hardwareapi_client.cpp", hw));
+  TEST_ASSERT_TRUE_MESSAGE(countOf(hw, "FRY_TEXT(\"/installations/\")") == 3, "three uses of the installations path: register (twice) and the lease");
+  TEST_ASSERT_TRUE(countOf(hw, "FRY_TEXT(\"Content-Type\"), FRY_TEXT(\"application/json\")") == 3);
+  std::string tel;
+  TEST_ASSERT_TRUE(loadSource("src/core/telemetry.cpp", tel));
+  TEST_ASSERT_TRUE(countOf(tel, "FRY_TEXT(\"Authorization\")") == 1 && countOf(tel, "FRY_TEXT(\"Content-Type\"), FRY_TEXT(\"application/json\")") == 1);
+}
+
 // Unity's setUp/tearDown have C linkage, so they must sit at global scope.
 void setUp() {}
 void tearDown() {}
@@ -159,5 +176,6 @@ int main(int, char**) {
   RUN_TEST(test_wifi_provisioning_keeps_its_text_in_flash);
   RUN_TEST(test_fry_text_is_a_flash_string_on_the_esp8266_and_the_plain_pointer_elsewhere);
   RUN_TEST(test_main_keeps_its_text_in_flash);
+  RUN_TEST(test_telemetry_and_hardwareapi_keep_their_header_names_and_url_pieces_in_flash);
   return UNITY_END();
 }
