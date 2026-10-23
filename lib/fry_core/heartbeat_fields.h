@@ -32,7 +32,7 @@ struct InstallationFields {
 };
 
 // The existing keys come first and unchanged (same order, same types); the four new ones follow.
-// Worst-case body is bounded: 14 members, each value a short string or a uint32 (<= 10 digits).
+// Worst-case body is bounded: 13 members, each value a short string or a uint32 (<= 10 digits); the ESP8266's four heap keys (addHeapFields) make it 17.
 inline void buildInstallationDoc(JsonDocument& doc, const InstallationFields& f) {
   doc["miner_key"] = f.minerKey;
   doc["install_id"] = f.installId;

@@ -221,7 +221,7 @@ bool otaBeginUrl(HTTPClient& http, WiFiClientSecure& sec, WiFiClient& plain, con
 // lifetime as the stack objects had: destroyed when the function returns), and the manifest decision, which needs
 // a JsonDocument and two key/digest buffers but no connection, runs in its own frame after the GET.
 // Frames (gcc -fstack-usage, tools/check_esp8266_stack_budget.py): checkNow 560 -> 128 B, downloadAndApply 512 ->
-// 112 B, evaluateManifest 208 B (sequential with the GET, not nested in it).
+// 96 B, evaluateManifest 320 B (sequential with the GET, not nested in it).
 struct ManifestClients {
   HTTPClient http;
   WiFiClientSecure sec;
