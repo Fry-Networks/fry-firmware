@@ -19,6 +19,7 @@
 
 #include "../core/fry_config.h"
 #include "../core/hardwareapi_client.h"
+#include "log_throttle.h"
 #include "socks5_parse.h"
 #include "socks_relay_core.h"
 #include "wg_provision.h"
@@ -641,7 +642,13 @@ bool loadConfig() {
   s_endpoint = fry_config::getWgEndpoint();
 
   if (s_priv.length() == 0 || s_pub.length() == 0 || s_endpoint.length() == 0) {
-    Serial.println("wg: no VPN config - skipping");
+    // State-change log, not a per-attempt one (lib/fry_core/log_throttle.h): this used to print
+    // every WG_BRINGUP_RETRY_MS for as long as the board was unprovisioned - 9 lines in 54 s in
+    // capture e32-a3b-224212. Now: once when the state is first seen, then at most every 10 min.
+    static fry::LogThrottle s_noConfigLog;
+    if (fry::shouldLogState(s_noConfigLog, /*state=*/1, millis(), fry::kLogStateMinIntervalMs)) {
+      Serial.println("wg: no VPN config - skipping");
+    }
     return false;
   }
 
@@ -770,6 +777,12 @@ void tick() {
     unsigned long now = millis();
     if (now - s_lastBringUpAttemptMs < WG_BRINGUP_RETRY_MS) return;
     s_lastBringUpAttemptMs = now;
+    // Checked BEFORE loadConfig(): loadConfig() reads five keys out of the fry_vpn namespace, and
+    // on ESP32 each read of a namespace that does not exist yet is an ESP-IDF
+    // "[E][Preferences.cpp] begin(): nvs_open failed: NOT_FOUND" line. On an unprovisioned board
+    // that was one line per second, forever, on top of the flood hasVpnConfig() used to cause
+    // (fry_config.cpp). hasVpnConfig() is cached, so this costs nothing per pass.
+    if (!fry_config::hasVpnConfig()) return;
     if (!loadConfig()) return;
     if (!provisioningGateOpen()) return;
     bringUp();

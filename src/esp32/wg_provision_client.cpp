@@ -12,6 +12,7 @@
 #include "../core/hardwareapi_client.h"
 #include "../core/http_tls.h"
 #include "../core/miner_key.h"
+#include "log_throttle.h"
 #include "config.h"
 #include "heap_gate.h"
 #include "wg_provision.h"
@@ -218,8 +219,15 @@ void tick() {
   fry::WgRetrySchedule sched = fry::wgRetryDelayMs(outcome, s_attemptNumber, retryAfterS);
   if (s_attemptNumber != 0xFFFFFFFFu) s_attemptNumber++;
   s_nextAttemptMs = now + sched.delayMs;
-  Serial.printf("wg: provision deferred reason=%s retry_in=%us\n", fry::wgOutcomeName(outcome),
-                static_cast<unsigned>(sched.delayMs / 1000));
+  // One line per state CHANGE, then at most one per 10 min (lib/fry_core/log_throttle.h). The
+  // NoClock retry is now bounded at 60 s (fry::wgRetryDelayMs), so an unthrottled line here would
+  // print up to 60 times an hour while NTP is out.
+  static fry::LogThrottle s_deferLog;
+  if (fry::shouldLogState(s_deferLog, static_cast<int32_t>(outcome), millis(),
+                          fry::kLogStateMinIntervalMs)) {
+    Serial.printf("wg: provision deferred reason=%s retry_in=%us\n", fry::wgOutcomeName(outcome),
+                  static_cast<unsigned>(sched.delayMs / 1000));
+  }
 }
 
 }  // namespace fry_wg_provision
