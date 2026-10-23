@@ -80,9 +80,10 @@ omitted entirely when both are empty.
 
 - `POST /installations/{miner_key}/installations/{install_id}` with body
   `{"miner_key","install_id","minerCode":"IOTVPN","software_version_installed","poc_version_installed":"1.0.0","hostname","os","is_installed":true,"device_name"}`.
-  Note that `minerCode` is camelCase while every sibling field is snake_case. Send no extra keys, except the ESP8266 heap keys below.
+  Note that `minerCode` is camelCase while every sibling field is snake_case. Send no extra keys, except the ones listed below.
   The response is `{"status","device_token"}`. Repeat hourly and once after every OTA.
-  Exception, ESP8266 only (`-DFRY_HEARTBEAT_HEAP=1`): four unsigned-integer keys follow the others, `free_heap` (total free heap, bytes), `max_free_block` (largest contiguous free block, bytes), `heap_frag` (fragmentation, percent, 0 = one free block) and `stack_high_water` (loop-stack bytes still unused at its deepest point since boot). Server acceptance of the body with these keys is evidenced (lead evidence, fixlog.md:242): the candidate production soak shows `api: registered` after boot.
+  Exception, all builds: four unsigned-integer keys follow the nine above, `flash_real_size` (physical flash chip size, bytes), `flash_ide_size` (the size the image header and core believe, bytes), `ota_free_bytes` (room for the next OTA image, bytes) and `sketch_size` (the running image, bytes), so every body has 13 keys.
+  Exception, ESP8266 only (`-DFRY_HEARTBEAT_HEAP=1`): four more unsigned-integer keys follow those 13, `free_heap` (total free heap, bytes), `max_free_block` (largest contiguous free block, bytes), `heap_frag` (fragmentation, percent, 0 = one free block) and `stack_high_water` (loop-stack bytes still unused at its deepest point since boot). The server accepts these keys.
 - `POST` or `PATCH /installations/{miner_key}/leases/{install_id}` with body `{"lease_seconds":900}`.
 - `PUT /PoC/{miner_key}/hardware` with body `{"document":{...}}`, one slot per call, where
   `slot_number = (UTC minutes since midnight / 10) % 144`. Success is any 2xx; there is no response body.
