@@ -24,6 +24,18 @@ uint32_t countTimeWaitPcbs() {
   for (const struct tcp_pcb* p = tcp_tw_pcbs; p; p = p->next) n++;
   return n;
 }
+
+static_assert(FIN_WAIT_1 == kTcpStateFinWait1 && FIN_WAIT_2 == kTcpStateFinWait2 && CLOSING == kTcpStateClosing &&
+                  LAST_ACK == kTcpStateLastAck,
+              "ota_timewait.h's tcp_state values must match lwIP's enum");
+
+uint32_t countClosingPcbs() {
+  uint32_t n = 0;
+  for (const struct tcp_pcb* p = tcp_active_pcbs; p; p = p->next) {
+    if (tcpStateIsClosing(static_cast<uint8_t>(p->state))) n++;
+  }
+  return n;
+}
 #endif
 
 }  // namespace fry

@@ -15,6 +15,11 @@
 // it did before, instead of being starved. The hold never blocks: the OTA tick returns and the
 // decision is taken again on the next loop pass.
 //
+// A pcb is also in the middle of the heap while this side is CLOSING its connection, before it reaches TIME_WAIT: FIN_WAIT_1 and FIN_WAIT_2
+// (until the peer's FIN, up to TCP_FIN_WAIT_TIMEOUT = 20 s), CLOSING, LAST_ACK. The boot registration's connection is in one of them at 8.3 s
+// (the sw9 capture: tw=0 there, tw=1 1.2 s later), so a hold that counts only TIME_WAIT let the first check start in that gap. The hold
+// counts those states too (countClosingPcbs); the bound is unchanged, so a pcb stuck in one of them cannot starve a check either.
+//
 // ESP8266 and host only: ESP32's heap is not split by these pcbs (blk 110580 on the bench), so the
 // translation unit is empty there and the ESP32/C3 images are untouched.
 #if !defined(ARDUINO) || defined(ARDUINO_ARCH_ESP8266)
@@ -40,9 +45,23 @@ enum class TwHold : uint8_t {
 // look). Proceeds when none remain, or when the bound is reached whatever remains.
 TwHold decideTimeWaitHold(uint32_t twPcbs, uint32_t heldMs, uint32_t maxHoldMs);
 
+// lwIP tcp_state values (lwip/tcpbase.h; the ESP8266 translation unit static_asserts them against the enum): FIN_WAIT_1, FIN_WAIT_2, CLOSING and
+// LAST_ACK are the states of an active pcb whose close this side started and the peer has not finished. CLOSE_WAIT (7) is the peer closing
+// first: the application still owns that connection. TIME_WAIT (10) pcbs live in tcp_tw_pcbs and are counted from there.
+constexpr uint8_t kTcpStateFinWait1 = 5;
+constexpr uint8_t kTcpStateFinWait2 = 6;
+constexpr uint8_t kTcpStateClosing = 8;
+constexpr uint8_t kTcpStateLastAck = 9;
+
+constexpr bool tcpStateIsClosing(uint8_t state) {
+  return state == kTcpStateFinWait1 || state == kTcpStateFinWait2 || state == kTcpStateClosing || state == kTcpStateLastAck;
+}
+
 #if defined(ARDUINO_ARCH_ESP8266)
 // Length of lwIP's tcp_tw_pcbs list.
 uint32_t countTimeWaitPcbs();
+// Pcbs of tcp_active_pcbs in a closing state (tcpStateIsClosing).
+uint32_t countClosingPcbs();
 #endif
 
 }  // namespace fry

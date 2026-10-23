@@ -928,30 +928,31 @@ FRY_OTA_ESP8266_NOINLINE static bool evaluateManifest(const String& body, OtaPla
 }
 
 #if defined(ARDUINO_ARCH_ESP8266)
-// Hold a due check while lwIP still has closed connections in TIME_WAIT, for at most
-// fry::kOtaTimeWaitMaxHoldMs (lib/fry_core/ota_timewait.h: two such pcbs cost the heap 7784 B of contiguous
-// block until they expire ~120 s after the TLS calls that left them). Never blocks: true means "skip this
-// loop pass", and the check stays due, so the decision is taken again on the next pass.
+// Hold a due check while lwIP still has closed connections in TIME_WAIT, or this side's pcbs in a closing state (FIN_WAIT_1/2,
+// CLOSING, LAST_ACK: the same pcb a moment before TIME_WAIT), for at most fry::kOtaTimeWaitMaxHoldMs (lib/fry_core/ota_timewait.h: two
+// such pcbs cost the heap 7784 B of contiguous block until they expire ~120 s after the TLS calls that left them). Never blocks: true
+// means "skip this loop pass", and the check stays due, so the decision is taken again on the next pass.
 static bool holdForTimeWait(unsigned long now) {
   static bool holding = false;
   static unsigned long since = 0;
   const uint32_t tw = fry::countTimeWaitPcbs();
+  const uint32_t closing = fry::countClosingPcbs();
   const uint32_t heldMs = holding ? static_cast<uint32_t>(now - since) : 0;
-  if (fry::decideTimeWaitHold(tw, heldMs, fry::kOtaTimeWaitMaxHoldMs) == fry::TwHold::Hold) {
+  if (fry::decideTimeWaitHold(tw + closing, heldMs, fry::kOtaTimeWaitMaxHoldMs) == fry::TwHold::Hold) {
     if (!holding) {
       holding = true;
       since = now;
-      Serial.printf_P(PSTR("ota: check held, %u TIME_WAIT pcb(s), at most %lu s\n"),
-                      static_cast<unsigned>(tw),
+      Serial.printf_P(PSTR("ota: check held, %u TIME_WAIT + %u closing pcb(s), at most %lu s\n"),
+                      static_cast<unsigned>(tw), static_cast<unsigned>(closing),
                       static_cast<unsigned long>(fry::kOtaTimeWaitMaxHoldMs / 1000UL));
     }
     return true;
   }
   if (holding) {
     holding = false;
-    Serial.printf_P(PSTR("ota: check released after %lu ms (tw=%u%s)\n"),
-                    static_cast<unsigned long>(heldMs), static_cast<unsigned>(tw),
-                    tw ? ", bound reached" : "");
+    Serial.printf_P(PSTR("ota: check released after %lu ms (tw=%u cl=%u%s)\n"),
+                    static_cast<unsigned long>(heldMs), static_cast<unsigned>(tw), static_cast<unsigned>(closing),
+                    tw + closing ? ", bound reached" : "");
   }
   return false;
 }
