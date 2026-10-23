@@ -19,6 +19,9 @@
 
 #include "../core/fry_config.h"
 #include "../core/hardwareapi_client.h"
+#include "relay_dns.h"
+#include "relay_guard.h"
+#include "relay_latency.h"
 #include "socks5_parse.h"
 #include "socks_relay_core.h"
 #include "wg_provision.h"
@@ -50,6 +53,15 @@ wireguard_ctx_t s_wgCtx;
 bool s_initialized = false;
 bool s_wasUp = false;
 volatile uint32_t s_relayedBytes = 0;
+
+// Relay connect-latency summary for the installation heartbeat. The ring belongs to the relay task
+// (the only writer); the three published values are plain 32-bit words so the loop task can read
+// them without a lock. A heartbeat that races one connect sees the previous triple: these are
+// trend numbers, and relay_samples says how many connects they were computed from.
+fry_relay::LatencyRing s_latency;
+volatile uint32_t s_latP50 = 0;
+volatile uint32_t s_latP95 = 0;
+volatile uint32_t s_latSamples = 0;
 
 // Config strings must outlive the wireguard_config_t (esp_wireguard keeps the pointers, does
 // not copy them), so these are file-scope statics rather than locals in init().
@@ -147,11 +159,14 @@ constexpr uint32_t kRelayStatEvery = 20;       // log the stack high-water mark 
 constexpr uint32_t kRelayEvictMinAgeMs = 1000;  // a stalled handshake may be evicted after this
 constexpr uint32_t kRelayMaxSelectMs = 1000;
 constexpr uint32_t kRelayFullSelectMs = 100;    // pool full: look again soon for an evictable slot
+constexpr uint32_t kRelayDnsPollMs = 50;        // a resolver job is in flight: how often to look at it
 
 struct RelayStats {
   uint32_t closed = 0, done = 0, hsTimeout = 0, hsEof = 0, hsBad = 0, connFail = 0, connTimeout = 0;
   uint32_t idle = 0, ioErr = 0, evicted = 0, fdGuard = 0, selFail = 0, einprog = 0, noMem = 0;
   uint32_t finHalf = 0, finClose = 0;
+  uint32_t srcDrop = 0;  // accepted peers dropped for a source address outside the tunnel subnet
+  uint32_t dnsFail = 0;  // requests failed because the name did not resolve inside the budget
 };
 
 bool setNonBlocking(int fd) {
@@ -164,7 +179,17 @@ void closeFd(int& fd) {
   fd = -1;
 }
 
-int openListener(uint16_t port) {
+// Nagle would hold a small write until the previous one is acknowledged, which on a relayed TLS
+// session is most of the added latency. Both sockets of a slot are relay sockets, so both are set.
+bool setNoDelay(int fd) {
+  int one = 1;
+  return setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one)) == 0;
+}
+
+// Binds to the device's OWN tunnel address (host order, as fry::parseIpv4Cidr returns it), never
+// INADDR_ANY: on INADDR_ANY the relay is an open proxy on the uplink, reachable by every host the
+// device can see. A bind that fails is retried by the caller, exactly as before.
+int openListener(uint32_t bindIp, uint16_t port) {
   const int fd = socket(AF_INET, SOCK_STREAM, 0);
   if (fd < 0) return -1;
   int one = 1;
@@ -172,7 +197,7 @@ int openListener(uint16_t port) {
   struct sockaddr_in sa;
   memset(&sa, 0, sizeof(sa));
   sa.sin_family = AF_INET;
-  sa.sin_addr.s_addr = htonl(INADDR_ANY);
+  sa.sin_addr.s_addr = htonl(bindIp);
   sa.sin_port = htons(port);
   if (bind(fd, reinterpret_cast<struct sockaddr*>(&sa), sizeof(sa)) < 0 || listen(fd, 4) < 0 ||
       !setNonBlocking(fd) || !fry_relay::fdInRange(fd, FD_SETSIZE)) {
@@ -180,6 +205,122 @@ int openListener(uint16_t port) {
     return -1;
   }
   return fd;
+}
+
+// ---- name resolution: bounded, asynchronous, cached -------------------------------------------
+//
+// 0.4.11 called WiFi.hostByName() from startConnect(), i.e. from inside the select loop, so one
+// slow lookup (a dead resolver, a 5 s retry cycle) stopped every other slot from being serviced.
+// Now a lookup runs in its own short-lived task and the loop only polls a flag once per pass:
+//   * the slot stays in Phase::NeedConnect, whose existing Timing::connectMs budget bounds the
+//     wait (onTimer -> ConnectTimeout). onConnectStarted() restarts that budget, so a lookup that
+//     finishes in time still gets the full connectMs for the connect itself.
+//   * the result (address or failure) is cached, so a repeated CONNECT to the same name needs no
+//     lookup and a failed name is not retried until its negative entry expires.
+//   * at most kDnsJobs tasks exist; a request for a third distinct name waits for a free job and
+//     fails on the NeedConnect budget, so a busy or broken resolver never grows the heap.
+//
+// All of this is in the relay task, which is created once, so the state is file-scope.
+constexpr uint32_t kDnsTtlMs = 300000;     // a resolved address stays usable for 5 min
+constexpr uint32_t kDnsFailTtlMs = 15000;  // a name that just failed is not retried for 15 s
+constexpr int kDnsJobs = 2;                 // concurrent resolver tasks
+constexpr uint32_t kDnsStackBytes = 3072;   // the task only waits on lwIP's own DNS callback
+
+struct DnsJob {
+  char host[256];
+  IPAddress ip;
+  volatile bool done;  // written by the resolver task, published with a memory barrier
+  bool ok;
+  int refs;     // client slots currently waiting on this job
+  bool cached;  // the result has been put into s_dns.cache
+};
+
+DnsJob* s_dnsJobs[kDnsJobs] = {};  // every live resolve, whether or not a slot still waits on it
+
+struct DnsState {
+  fry_relay::DnsCache cache;
+  DnsJob* job[FRY_RELAY_SLOTS] = {};  // per slot: the job it is waiting on (borrowed reference)
+};
+DnsState s_dns;
+
+void dnsTaskFn(void* arg) {
+  DnsJob* j = static_cast<DnsJob*>(arg);
+  IPAddress ip;
+  if (WiFi.hostByName(j->host, ip)) {
+    j->ip = ip;
+    j->ok = true;
+  }
+  __sync_synchronize();  // the address above must be visible before `done`
+  j->done = true;
+  vTaskDelete(nullptr);
+}
+
+DnsJob* dnsFind(const char* host) {
+  for (int i = 0; i < kDnsJobs; i++) {
+    if (s_dnsJobs[i] != nullptr && strcmp(s_dnsJobs[i]->host, host) == 0) return s_dnsJobs[i];
+  }
+  return nullptr;
+}
+
+// The job already resolving `host`, or a new one; nullptr when every job slot is busy.
+DnsJob* dnsBegin(const char* host) {
+  DnsJob* j = dnsFind(host);
+  if (j != nullptr) return j;
+  if (strlen(host) >= sizeof(DnsJob::host)) return nullptr;  // cannot be represented: fail the request
+  for (int i = 0; i < kDnsJobs; i++) {
+    if (s_dnsJobs[i] != nullptr) continue;
+    DnsJob* n = new (std::nothrow) DnsJob();
+    if (n == nullptr) return nullptr;
+    strncpy(n->host, host, sizeof(n->host) - 1);
+    n->host[sizeof(n->host) - 1] = 0;
+    n->done = false;
+    n->ok = false;
+    n->refs = 0;
+    n->cached = false;
+    if (xTaskCreate(dnsTaskFn, "fry_dns", kDnsStackBytes, n, 1, nullptr) != pdPASS) {
+      delete n;
+      return nullptr;
+    }
+    s_dnsJobs[i] = n;
+    return n;
+  }
+  return nullptr;
+}
+
+// Drops one slot's reference; the sweep frees the job once it is done and unreferenced.
+void dnsRelease(DnsJob*& j) {
+  if (j == nullptr) return;
+  if (j->refs > 0) j->refs--;
+  j = nullptr;
+}
+
+// Settles finished jobs into the cache and frees the ones nothing waits on any more, so a job whose
+// slot was evicted or closed still caches its answer for the next request.
+void dnsSweep(uint32_t now) {
+  for (int i = 0; i < kDnsJobs; i++) {
+    DnsJob* j = s_dnsJobs[i];
+    if (j == nullptr) continue;
+    if (!j->cached && j->done) {
+      __sync_synchronize();
+      if (j->ok) {
+        s_dns.cache.store(j->host, ntohl(static_cast<uint32_t>(j->ip)), now, kDnsTtlMs);
+      } else {
+        s_dns.cache.storeFailure(j->host, now, kDnsFailTtlMs);
+      }
+      j->cached = true;
+    }
+    if (j->cached && j->refs == 0) {
+      s_dnsJobs[i] = nullptr;
+      delete j;
+    }
+  }
+}
+
+bool dnsBusy() {
+  for (int i = 0; i < kDnsJobs; i++) {
+    if (s_dnsJobs[i] != nullptr) return true;
+  }
+  return false;
 }
 
 bool isSet(int fd, fd_set* set) { return fry_relay::fdInRange(fd, FD_SETSIZE) && FD_ISSET(fd, set); }
@@ -253,40 +394,50 @@ bool doSend(fry_relay::Slot& s, fry_relay::Side to, uint32_t now, RelayStats& st
   return fry_relay::classifySend(n, e) != fry_relay::IoResult::WouldBlock;
 }
 
-// Phase::NeedConnect: resolve (synchronously: DNS goes through WiFi.hostByName, as before) and
-// start the upstream connect.
-void startConnect(fry_relay::Slot& s, uint32_t now, RelayStats& st) {
+// Publishes the ring's current summary for the installation heartbeat (fry_vpn::relayLatency).
+// Only successful connects are recorded, and the time measured is the connect itself: onConnectStarted()
+// resets Slot::phaseStartMs when the connect is issued, so a lookup or a wait for a resolver never
+// shows up as connect latency.
+void recordLatency(uint32_t ms) {
+  s_latency.add(ms);
+  s_latP50 = s_latency.p50Ms();
+  s_latP95 = s_latency.p95Ms();
+  s_latSamples = s_latency.count();
+}
+
+void connectResult(fry_relay::Slot& s, bool ok, uint32_t now) {
+  if (ok && s.phase == fry_relay::Phase::Connecting) recordLatency(now - s.phaseStartMs);
+  fry_relay::onConnectResult(s, ok, now);
+}
+
+// Starts the upstream connect to an address that is already resolved (`ip` is host order, the
+// convention fry::parseIpv4Cidr and fry_relay::DnsCache use).
+void connectTo(fry_relay::Slot& s, uint32_t ip, uint32_t now, RelayStats& st) {
   using namespace fry_relay;
-  IPAddress ip;
-  const bool resolved = WiFi.hostByName(s.req.host, ip);
-  now = millis();  // the DNS wait can take seconds: the connect budget and replies start after it
-  if (!resolved) {
-    onConnectResult(s, false, now);
-    return;
-  }
   const int fd = socket(AF_INET, SOCK_STREAM, 0);
   if (fd < 0) {
-    onConnectResult(s, false, now);
+    connectResult(s, false, now);
     return;
   }
   if (!fdInRange(fd, FD_SETSIZE) || !setNonBlocking(fd)) {
     close(fd);
     st.fdGuard++;
-    onConnectResult(s, false, now);
+    connectResult(s, false, now);
     return;
   }
+  setNoDelay(fd);
   struct sockaddr_in sa;
   memset(&sa, 0, sizeof(sa));
   sa.sin_family = AF_INET;
   sa.sin_port = htons(s.req.port);
-  sa.sin_addr.s_addr = static_cast<uint32_t>(ip);
+  sa.sin_addr.s_addr = htonl(ip);
   errno = 0;
   const int r = connect(fd, reinterpret_cast<struct sockaddr*>(&sa), sizeof(sa));
   const int e = errno;
   switch (classifyConnectStart(r, e)) {
     case ConnectStart::Done:
       onConnectStarted(s, fd, now);
-      onConnectResult(s, true, millis());
+      connectResult(s, true, millis());
       break;
     case ConnectStart::InProgress:
 #if FRY_RELAY_H5
@@ -295,15 +446,57 @@ void startConnect(fry_relay::Slot& s, uint32_t now, RelayStats& st) {
     {
       const int err = waitConnectInline(fd, Timing().connectMs);
       onConnectStarted(s, fd, now);
-      onConnectResult(s, err == 0, millis());
+      connectResult(s, err == 0, millis());
     }
 #endif
       break;
     case ConnectStart::Failed:
       close(fd);
-      onConnectResult(s, false, now);
+      connectResult(s, false, now);
       break;
   }
+}
+
+// Phase::NeedConnect: resolve from the cache or start/join a resolver job, and never block on DNS.
+// Returns true when the slot moved on (the connect started, or the request failed); false while it
+// is still waiting, in which case the next pass polls again and onTimer's Timing::connectMs budget
+// (Phase::NeedConnect) bounds the wait.
+bool needConnect(fry_relay::Slot& s, int idx, uint32_t now, RelayStats& st) {
+  using namespace fry_relay;
+  uint32_t ip = 0;
+  if (s_dns.cache.lookup(s.req.host, now, &ip)) {
+    connectTo(s, ip, now, st);
+    return true;
+  }
+  if (s_dns.cache.blocked(s.req.host, now)) {
+    st.dnsFail++;  // this name failed a moment ago: fail fast for kDnsFailTtlMs
+    onConnectResult(s, false, now);
+    return true;
+  }
+  DnsJob*& job = s_dns.job[idx];
+  if (job == nullptr) {
+    job = dnsBegin(s.req.host);
+    if (job == nullptr) return false;  // no job slot or no heap: the connect budget fails the slot
+    job->refs++;
+  }
+  if (!job->done) return false;  // the resolver task is still running
+  __sync_synchronize();
+  const bool ok = job->ok;
+  const uint32_t addr = ok ? ntohl(static_cast<uint32_t>(job->ip)) : 0;
+  if (ok) {
+    s_dns.cache.store(job->host, addr, now, kDnsTtlMs);
+  } else {
+    s_dns.cache.storeFailure(job->host, now, kDnsFailTtlMs);
+  }
+  job->cached = true;
+  dnsRelease(s_dns.job[idx]);
+  if (!ok) {
+    st.dnsFail++;
+    onConnectResult(s, false, now);
+    return true;
+  }
+  connectTo(s, addr, now, st);
+  return true;
 }
 
 void tally(RelayStats& st, const fry_relay::Slot& s) {
@@ -342,14 +535,15 @@ void logStats(const RelayStats& st) {
                 static_cast<unsigned>(st.hsBad), static_cast<unsigned>(st.connFail),
                 static_cast<unsigned>(st.connTimeout), static_cast<unsigned>(st.idle));
   Serial.printf("ioerr=%u evict=%u fdg=%u selfail=%u einprog=%u nomem=%u stack_free_min=%u/%u heap=%u minheap=%u "
-                "fin_half=%u fin_close=%u\n",
+                "fin_half=%u fin_close=%u srcdrop=%u dnsfail=%u\n",
                 static_cast<unsigned>(st.ioErr), static_cast<unsigned>(st.evicted),
                 static_cast<unsigned>(st.fdGuard), static_cast<unsigned>(st.selFail),
                 static_cast<unsigned>(st.einprog), static_cast<unsigned>(st.noMem),
                 static_cast<unsigned>(uxTaskGetStackHighWaterMark(nullptr)),
                 static_cast<unsigned>(FRY_RELAY_STACK_BYTES),
                 static_cast<unsigned>(ESP.getFreeHeap()), static_cast<unsigned>(ESP.getMinFreeHeap()),
-                static_cast<unsigned>(st.finHalf), static_cast<unsigned>(st.finClose));
+                static_cast<unsigned>(st.finHalf), static_cast<unsigned>(st.finClose),
+                static_cast<unsigned>(st.srcDrop), static_cast<unsigned>(st.dnsFail));
 }
 
 #if !FRY_RELAY_HALFCLOSE
@@ -396,18 +590,19 @@ void forwardFin(fry_relay::Slot& s, fry_relay::Side side, uint32_t now, RelaySta
 }
 
 // One socket-level service pass over a slot after select(). Returns true if anything happened.
-bool serviceSlot(fry_relay::Slot& s, bool rdC, bool rdU, bool wrU, uint32_t now, RelayStats& st) {
+bool serviceSlot(fry_relay::Slot& s, int idx, bool rdC, bool rdU, bool wrU, uint32_t now, RelayStats& st) {
   using namespace fry_relay;
   bool progress = false;
   if (s.phase == Phase::Connecting && wrU) {
-    onConnectResult(s, sockError(s.upFd) == 0, now);
+    connectResult(s, sockError(s.upFd) == 0, now);
     progress = true;
   }
   if (rdC) progress |= doRecv(s, Side::Client, now, st);
   if (s.phase == Phase::NeedConnect) {
-    startConnect(s, now, st);
-    now = millis();  // startConnect may have blocked (DNS, inline connect): never reuse a stale time
-    progress = true;
+    // Never blocks on DNS now: a cache hit connects here, a miss joins a resolver job or starts
+    // one and this slot is polled again next pass.
+    progress |= needConnect(s, idx, now, st);
+    now = millis();  // FRY_RELAY_H5=0 still finishes the connect inline in this call
   }
   progress |= doSend(s, Side::Up, now, st);
   if (rdU) progress |= doRecv(s, Side::Up, now, st);
@@ -421,10 +616,17 @@ bool serviceSlot(fry_relay::Slot& s, bool rdC, bool rdU, bool wrU, uint32_t now,
 // valid and drop its slot; whatever remains is retried after a short backoff.
 bool fdAlive(int fd) { return fd < 0 || fcntl(fd, F_GETFL, 0) >= 0; }
 
+// The device's own tunnel address, as the listener and the source guard both need it.
+struct TunnelAddr {
+  uint32_t ip = 0;  // host order, bit 31 = first octet
+  int prefix = 0;
+};
+
 // Returns true once accept() has produced a descriptor, so a listener that stays readable while
 // accept() keeps failing (EMFILE, ECONNABORTED) does not count as progress and still gets the
 // anti-spin yield in the main loop.
-bool acceptClients(int listenFd, fry_relay::Slot** slots, uint32_t now, RelayStats& st) {
+bool acceptClients(int listenFd, const TunnelAddr& tun, fry_relay::Slot** slots, uint32_t now,
+                   RelayStats& st) {
   using namespace fry_relay;
   bool accepted = false;
   for (int i = 0; i < FRY_RELAY_SLOTS; i++) {
@@ -439,10 +641,26 @@ bool acceptClients(int listenFd, fry_relay::Slot** slots, uint32_t now, RelaySta
     const int fd = accept(listenFd, reinterpret_cast<struct sockaddr*>(&peer), &plen);
     if (fd < 0) return accepted;  // EAGAIN: backlog drained (or a transient error: select fires again)
     accepted = true;
+    // The relay is only for tunnel peers. Even though the listener is bound to the tunnel address,
+    // the source is checked as well and a stranger is dropped here, before a slot or a buffer is
+    // spent on it: a bind on a multi-homed stack (or a mis-set wgAddr) must not turn this into an
+    // open proxy. srcdrop is in the stat line as the bench-visible counter.
+    if (plen < sizeof(peer) || !ipInSubnet(ntohl(peer.sin_addr.s_addr), tun.ip, tun.prefix)) {
+      bumpSaturating(st.srcDrop);
+      if (st.srcDrop == 1) {
+        char tunStr[16];
+        fry::formatIpv4(tun.ip, tunStr, sizeof(tunStr));
+        Serial.printf("socks5: dropping peers outside %s/%d (srcdrop=%u)\n", tunStr, tun.prefix,
+                      static_cast<unsigned>(st.srcDrop));
+      }
+      close(fd);
+      continue;
+    }
     int idx = poolFreeIndex(slots, FRY_RELAY_SLOTS);
     if (idx < 0) {
       idx = poolEvictIndex(slots, FRY_RELAY_SLOTS, now, kRelayEvictMinAgeMs);
       slotForceClose(*slots[idx], CloseReason::Evicted);
+      dnsRelease(s_dns.job[idx]);
       releaseSlot(slots[idx], st);
     }
     if (!fdInRange(fd, FD_SETSIZE) || !setNonBlocking(fd)) {
@@ -458,6 +676,8 @@ bool acceptClients(int listenFd, fry_relay::Slot** slots, uint32_t now, RelaySta
     }
     int one = 1;
     setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &one, sizeof(one));  // as WiFiServer::available did
+    setNoDelay(fd);
+    dnsRelease(s_dns.job[idx]);  // a stale reference from the previous occupant of this slot
     slotInit(*s, fd, now);
 #if FRY_RELAY_HALFCLOSE
     s->finGraceMs = 0;  // the bench switch restores the old behaviour as a whole
@@ -474,15 +694,28 @@ void relayTaskFn(void*) {
   const Timing timing;
   const uint16_t port = static_cast<uint16_t>(fry_config::getSocksPort());
 
+  // The listener binds to the device's own tunnel address, never INADDR_ANY (see openListener).
+  // With no tunnel address there is nothing to bind to and no subnet to guard, so the relay simply
+  // does not run: one state-change line, no fallback to an open proxy.
+  TunnelAddr tun;
+  const String wgAddr = fry_config::getWgAddr();
+  if (!fry::parseIpv4Cidr(wgAddr.c_str(), &tun.ip, &tun.prefix) || tun.prefix < kMinTunnelPrefix) {
+    Serial.println("socks5: relay disabled - no usable tunnel address (fry/wgAddr), not listening");
+    return;
+  }
+  char tunStr[16];
+  fry::formatIpv4(tun.ip, tunStr, sizeof(tunStr));
+
   int listenFd = -1;
   for (uint32_t tries = 0; listenFd < 0; tries++) {
-    listenFd = openListener(port);
+    listenFd = openListener(tun.ip, port);
     if (listenFd >= 0) break;
-    if (tries % 10 == 0) Serial.printf("socks5: listen :%u failed errno=%d, retrying\n", port, errno);
+    if (tries % 10 == 0) Serial.printf("socks5: listen %s:%u failed errno=%d, retrying\n", tunStr, port, errno);
     vTaskDelay(pdMS_TO_TICKS(1000));
   }
-  Serial.printf("socks5: listening :%u slots=%d h5=%d h7=%d hc=%d fg=%u\n", port, FRY_RELAY_SLOTS, FRY_RELAY_H5,
-                FRY_RELAY_H7, FRY_RELAY_HALFCLOSE, static_cast<unsigned>(FRY_RELAY_HALFCLOSE ? 0u : Timing().finGraceMs));
+  Serial.printf("socks5: listening %s:%u slots=%d h5=%d h7=%d hc=%d fg=%u\n", tunStr, port, FRY_RELAY_SLOTS,
+                FRY_RELAY_H5, FRY_RELAY_H7, FRY_RELAY_HALFCLOSE,
+                static_cast<unsigned>(FRY_RELAY_HALFCLOSE ? 0u : Timing().finGraceMs));
 #if FRY_RELAY_H7
   if (esp_bt_controller_get_status() != ESP_BT_CONTROLLER_STATUS_ENABLED) {
     // persists across reconnects (WiFiGenericClass::_sleepEnabled)
@@ -503,6 +736,9 @@ void relayTaskFn(void*) {
 
   for (;;) {
     uint32_t now = millis();
+    // Finished resolver jobs are settled here first, so a slot waiting on one sees its answer in
+    // this same pass.
+    dnsSweep(now);
     for (int i = 0; i < FRY_RELAY_SLOTS; i++) {
       if (!slots[i]) continue;
       onTimer(*slots[i], timing, now);
@@ -512,7 +748,10 @@ void relayTaskFn(void*) {
       forwardFin(*slots[i], Side::Client, now, st);
     }
     for (int i = 0; i < FRY_RELAY_SLOTS; i++) {
-      if (slots[i] && slotClosed(*slots[i])) releaseSlot(slots[i], st);
+      if (slots[i] && slotClosed(*slots[i])) {
+        dnsRelease(s_dns.job[i]);  // the job finishes on its own and still caches its answer
+        releaseSlot(slots[i], st);
+      }
     }
     if (st.closed != lastLoggedClosed && (st.closed == 1 || st.closed % kRelayStatEvery == 0)) {
       lastLoggedClosed = st.closed;
@@ -527,13 +766,14 @@ void relayTaskFn(void*) {
     for (int i = 0; i < FRY_RELAY_SLOTS; i++) {
       if (slots[i] && wl.slotBad[i]) {
         slotForceClose(*slots[i], CloseReason::FdGuard);
+        dnsRelease(s_dns.job[i]);
         releaseSlot(slots[i], st);
         dropped = true;
       }
     }
     if (wl.listenBad) {
       closeFd(listenFd);
-      while ((listenFd = openListener(port)) < 0) vTaskDelay(pdMS_TO_TICKS(1000));
+      while ((listenFd = openListener(tun.ip, port)) < 0) vTaskDelay(pdMS_TO_TICKS(1000));
       dropped = true;
     }
     if (dropped) continue;
@@ -545,8 +785,11 @@ void relayTaskFn(void*) {
       if (wl.w[i].rd) FD_SET(wl.w[i].fd, &rd);
       if (wl.w[i].wr) FD_SET(wl.w[i].fd, &wr);
     }
-    const uint32_t tmo = poolSelectTimeoutMs(slots, FRY_RELAY_SLOTS, timing, now,
-                                             poolFull ? kRelayFullSelectMs : kRelayMaxSelectMs);
+    uint32_t tmo = poolSelectTimeoutMs(slots, FRY_RELAY_SLOTS, timing, now,
+                                       poolFull ? kRelayFullSelectMs : kRelayMaxSelectMs);
+    // A slot waiting on a resolver has no descriptor in the select() set, so nothing would wake the
+    // loop when its answer lands: poll at this cadence until every job has settled.
+    if (dnsBusy() && tmo > kRelayDnsPollMs) tmo = kRelayDnsPollMs;
     int sr = 0;
     int se = 0;
     if (wl.n == 0) {
@@ -565,12 +808,13 @@ void relayTaskFn(void*) {
       for (int i = 0; i < FRY_RELAY_SLOTS; i++) {
         if (slots[i] && (!fdAlive(slots[i]->clientFd) || !fdAlive(slots[i]->upFd))) {
           slotForceClose(*slots[i], CloseReason::IoError);
+          dnsRelease(s_dns.job[i]);
           releaseSlot(slots[i], st);
         }
       }
       if (!fdAlive(listenFd)) {
         closeFd(listenFd);
-        while ((listenFd = openListener(port)) < 0) vTaskDelay(pdMS_TO_TICKS(1000));
+        while ((listenFd = openListener(tun.ip, port)) < 0) vTaskDelay(pdMS_TO_TICKS(1000));
       }
       vTaskDelay(pdMS_TO_TICKS(selectFailBackoffMs(selFails)));
       continue;
@@ -582,16 +826,19 @@ void relayTaskFn(void*) {
     for (int i = 0; i < FRY_RELAY_SLOTS; i++) {
       Slot* s = slots[i];
       if (!s) continue;
-      now = millis();  // an earlier slot may have blocked in DNS / inline connect
-      progress |= serviceSlot(*s, isSet(s->clientFd, &rd), isSet(s->upFd, &rd), isSet(s->upFd, &wr),
+      now = millis();  // an earlier slot may have finished an inline connect (FRY_RELAY_H5=0)
+      progress |= serviceSlot(*s, i, isSet(s->clientFd, &rd), isSet(s->upFd, &rd), isSet(s->upFd, &wr),
                               now, st);
-      if (slotClosed(*s)) releaseSlot(slots[i], st);
+      if (slotClosed(*s)) {
+        dnsRelease(s_dns.job[i]);
+        releaseSlot(slots[i], st);
+      }
     }
     // Existing slots are serviced BEFORE new connections are accepted: a handshake whose bytes are
-    // already queued must not be evicted as "stalled" because the loop was blocked in DNS.
+    // already queued must not be evicted as "stalled" because the loop was busy.
     if (watchListen && isSet(listenFd, &rd)) {
       now = millis();
-      progress |= acceptClients(listenFd, slots, now, st);
+      progress |= acceptClients(listenFd, tun, slots, now, st);
     }
     if (!progress) vTaskDelay(1);  // readable/writable but nothing moved (e.g. ENOMEM): do not spin
   }
@@ -787,6 +1034,14 @@ void tick() {
 
 bool isUp() { return s_initialized && s_wasUp; }
 uint32_t relayedBytes() { return s_relayedBytes; }
+
+RelayLatency relayLatency() {
+  RelayLatency l;
+  l.samples = s_latSamples;  // read first: it says what the other two describe
+  l.p50Ms = s_latP50;
+  l.p95Ms = s_latP95;
+  return l;
+}
 
 }  // namespace fry_vpn
 
