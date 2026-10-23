@@ -311,9 +311,15 @@ void init(const char* deviceName, const char* minerKey) {
   s_server->begin();
 
   if (s_apSecure) {
-    // The one place the setup code is shown besides Improv 0xF1: this is the USB serial log.
+    // The setup code is a WPA2 passphrase and must not sit in a serial log. Only its last 4
+    // characters are printed (key_policy.h's maskSecretLast4), which is enough for the owner to
+    // confirm they typed the right one; the FULL code is still delivered by the read-only Improv
+    // 0xF1 status frame (lib/fry_core/improv_serial.cpp), which is the surface the app reads, so
+    // the setup flow stays enterable.
+    char maskedCode[8];
+    fry::maskSecretLast4(s_apCode, maskedCode, sizeof(maskedCode));
     FRY_PRINTF("AP started %s ip=192.168.4.1 wpa2 setup-code=%s (no miner key yet)\n", s_apName,
-                  s_apCode);
+                  maskedCode);
   } else {
     FRY_PRINTF("AP started %s ip=192.168.4.1\n", s_apName);
   }

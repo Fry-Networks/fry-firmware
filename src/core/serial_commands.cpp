@@ -8,6 +8,7 @@
 
 #include "config.h"
 #include "fry_config.h"
+#include "key_policy.h"
 #include "miner_key.h"
 #include "trigger_hooks.h"
 #include "wg_endpoint.h"
@@ -60,7 +61,12 @@ void cmdSetWifi(JsonDocument& doc) {
     return;
   }
   fry_config::setWifi(ssid, pass);
-  Serial.printf("[serial] set_wifi: ssid='%s' password=%s\n", ssid, redactedLen(pass).c_str());
+  // The SSID names a private network and is not needed in full to confirm the write: the last 4
+  // characters plus the length identify it without logging it (key_policy.h's maskSecretLast4).
+  char maskedSsid[8];
+  fry::maskSecretLast4(ssid, maskedSsid, sizeof(maskedSsid));
+  Serial.printf("[serial] set_wifi: ssid=%s (%u chars) password=%s\n", maskedSsid,
+                static_cast<unsigned>(strlen(ssid)), redactedLen(pass).c_str());
   respond("ok", "set_wifi");
 }
 

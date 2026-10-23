@@ -101,4 +101,13 @@ size_t maskMinerKeyLast4(const char* key, char* out, size_t outCap);
 // the WPA2 passphrase of the ESP8266 setup AP. Returns false if outCap < 9.
 bool makeSetupCode(uint32_t r0, uint32_t r1, char* out, size_t outCap);
 
+// The form every OTHER secret takes in a log line: a Wi-Fi SSID the owner typed, or the setup-AP
+// code above. U+2026 followed by the last 4 characters ("…Home", 7 bytes); a value shorter than
+// 4 characters prints the ellipsis and all of it. A byte outside printable ASCII in the shown part
+// prints as '?', so a corrupt stored value cannot inject a line break into the log. Writes "" and
+// returns 0 for a NULL/empty value or a buffer too small for the whole form (it never truncates);
+// outCap 8 always suffices. The full value never leaves the device: the SSID is still readable
+// from the board's own config and the setup code is still delivered over Improv 0xF1.
+size_t maskSecretLast4(const char* value, char* out, size_t outCap);
+
 }  // namespace fry
