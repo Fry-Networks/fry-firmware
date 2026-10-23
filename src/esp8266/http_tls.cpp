@@ -1,7 +1,9 @@
 #include "../core/http_tls.h"
+#include "../core/flash_print.h"
 
-#include "../core/heap_gate_wait.h"
 #include "heap_gate.h"
+#include "mfln_cache.h"
+#include "tls_sizing.h"
 #include "config.h"
 
 namespace fry_http {
@@ -18,10 +20,14 @@ String extractHost(const String& url) {
   return url.substring(start, end);
 }
 
+bool probeMfln512(const char* host, void*) {
+  return WiFiClientSecure::probeMaxFragmentLength(host, 443, 512);
+}
+
 }  // namespace
 
-bool beginHttpsUrl(HTTPClient& http, WiFiClientSecure& sec, const String& url,
-                   bool mflnProbeWorthwhile) {
+bool beginHttpsUrl(HTTPClient& http, WiFiClientSecure& sec, const String& url, bool mflnProbeWorthwhile,
+                   bool smallReply) {
   // DOCUMENTED LIMITATION (v0.2.0), not a bug for this run: unlike the ESP32 fix in this same
   // release (src/esp32/http_tls.cpp, sec.setCACertBundle()), this chip stays on setInsecure().
   // BearSSL trust-anchor verification (setTrustAnchors()/setX509Time()) needs its own
@@ -46,11 +52,12 @@ bool beginHttpsUrl(HTTPClient& http, WiFiClientSecure& sec, const String& url,
   //
   // So: only probe when there is genuinely room for the big path. When there is not, skip the
   // probe and take the cheap 512/512 buffers. hardwareapi honours MFLN, so registration, lease
-  // renewal and PoC keep working on a fragmented heap; a peer that does NOT honour it (GitHub,
-  // i.e. OTA) then fails the handshake and returns an error instead of killing the chip.
+  // renewal and PoC keep working on a fragmented heap. A peer that does NOT honour it (GitHub,
+  // i.e. OTA) is NOT given 512/512: the 0.3.3 bench board soft-reset (Exception 4) in that
+  // handshake, so fry::planTls refuses the session instead and the caller gets `false`.
   // Gating everything on the OTA-sized threshold would block those small calls too.
   //
-  // attempts=1: no bounded wait here. This helper runs on every HTTPS call, and spinning up to
+  // One sample, no bounded wait here. This helper runs on every HTTPS call, and spinning up to
   // 3 s each time starved the loop badly enough to trip the software watchdog. The bounded
   // wait still applies where it belongs, at the OTA download gate in src/core/ota_client.cpp.
   // A caller that already knows the peer refuses MFLN (GitHub, i.e. OTA) must not pay for the
@@ -59,29 +66,80 @@ bool beginHttpsUrl(HTTPClient& http, WiFiClientSecure& sec, const String& url,
   // the 16.4 KB the gate was sized for. The gate SAMPLES and does not RESERVE, so the block it
   // saw did not survive to the allocation. Skipping the probe removes the 32 KB spike entirely
   // and leaves only the buffers we actually intend to use.
-  const bool canAffordBigTls = fry::waitForHeapGate(HEAP_GATE_OTA, HEAP_GATE_OTA_BLOCK, 1);
-  const bool runProbe = fry::shouldRunMflnProbe(canAffordBigTls, mflnProbeWorthwhile);
+  // ONE sample drives the verdict and the buffer choice (fry::planTls, tested natively), taken now
+  // that `sec` exists: constructing a WiFiClientSecure allocates BearSSL's 6200 B stack thunk, so a
+  // sample taken before it (checkNow's gate) overstates what is left. A short heap is no longer
+  // allowed to fall through to 512/512 for a peer that does not honour MFLN - see tls_sizing.h.
+  // The OTA gates in ota_client.cpp sampled BEFORE `sec` and its HTTPClient existed; this sample is after, so it is
+  // judged against their floors less what the constructor took (the thunk above + the clients). The raw gate numbers
+  // here refused every OTA manifest check 15 ms after the gate had passed it ("manifest fetch begin failed").
+  const fry::HeapSample heap{static_cast<uint32_t>(ESP.getFreeHeap()), fry::queryMaxFreeBlock()};
+  // Three sessions, three measured needs (lib/fry_core/ota_heap_budget.h): the manifest (Medium 8192/512), the image
+  // download (Big 16384/512, a peer that does not honour MFLN), and a peer that may honour MFLN, whose 32 KB probe
+  // allocates after the constructor so the original floors are already in its terms.
+  uint32_t gateFree = HEAP_GATE_OTA;
+  uint32_t gateBlock = HEAP_GATE_OTA_BLOCK;
+  if (smallReply) {
+    gateFree = HEAP_GATE_OTA_MANIFEST;
+    gateBlock = HEAP_GATE_OTA_MANIFEST_BLOCK;
+  } else if (!mflnProbeWorthwhile) {
+    gateFree = HEAP_GATE_OTA_DOWNLOAD;
+    gateBlock = HEAP_GATE_OTA_DOWNLOAD_BLOCK;
+  }
+  const fry::TlsFloors floors = fry::tlsFloorsAtBegin(gateFree, gateBlock, mflnProbeWorthwhile);
+  const fry::TlsPlan plan =
+      fry::planTls(heap, floors.freeTotal, floors.block, mflnProbeWorthwhile, smallReply);
   String host = extractHost(url);
-  if (!canAffordBigTls) {
-    Serial.println("tls: low contiguous heap - MFLN probe skipped, 512/512");
-    sec.setBufferSizes(512, 512);
-  } else if (!runProbe) {
-    // blk is logged because the 30 s [health] line samples far too coarsely to catch this peak,
-    // and HTTP -1 collapses connect-refused, iobuf-OOM and handshake-failure into one code. This
-    // is the only place the deciding quantity is visible at the deciding moment.
-    Serial.printf("tls: peer does not honour MFLN - probe skipped, 16384/512 (blk=%u)\n",
-                  static_cast<unsigned>(fry::queryMaxFreeBlock()));
-    sec.setBufferSizes(16384, 512);
-  } else if (!WiFiClientSecure::probeMaxFragmentLength(host, 443, 512)) {
-    sec.setBufferSizes(16384, 512);
-  } else {
-    sec.setBufferSizes(512, 512);
+  switch (plan.sizing) {
+    case fry::TlsSizing::Refuse:
+      // printf_P/PSTR: the string stays in flash instead of costing ~130 B of the 80 KB heap budget.
+      Serial.printf_P(PSTR("tls: refusing %s - heap too short for the big buffers and the peer does "
+                           "not honour MFLN (need blk>=%u free>=%u, have blk=%u free=%u)\n"),
+                      host.c_str(), static_cast<unsigned>(floors.block),
+                      static_cast<unsigned>(floors.freeTotal), static_cast<unsigned>(heap.maxBlock),
+                      static_cast<unsigned>(heap.freeTotal));
+      return false;
+    case fry::TlsSizing::Small:
+      FRY_PRINTLN("tls: low contiguous heap - MFLN probe skipped, 512/512");
+      sec.setBufferSizes(512, 512);
+      break;
+    case fry::TlsSizing::Big:
+      // blk is logged because the 30 s [health] line samples far too coarsely to catch this peak,
+      // and HTTP -1 collapses connect-refused, iobuf-OOM and handshake-failure into one code. This
+      // is the only place the deciding quantity is visible at the deciding moment.
+      FRY_PRINTF("tls: peer does not honour MFLN - probe skipped, 16384/512 (blk=%u)\n",
+                    static_cast<unsigned>(heap.maxBlock));
+      sec.setBufferSizes(16384, 512);
+      break;
+    case fry::TlsSizing::Medium:
+      // The OTA manifest: github.com honours MFLN 512, the last hop (release-assets) does not and sends one 4146 B
+      // Certificate record, then a ~2 KB JSON. 8192 holds that 1.98x over for 8 KB less heap than 16384.
+      Serial.printf_P(PSTR("tls: small replies expected - probe skipped, %u/%u (blk=%u)\n"),
+                      static_cast<unsigned>(fry::kTlsMediumRxBytes), static_cast<unsigned>(fry::kTlsTxBytes),
+                      static_cast<unsigned>(heap.maxBlock));
+      sec.setBufferSizes(fry::kTlsMediumRxBytes, fry::kTlsTxBytes);
+      break;
+    case fry::TlsSizing::ProbeFirst: {
+      // The probe is a throwaway ~32 KB session plus a TIME_WAIT pcb: ask once per host per boot, not on
+      // every call (positive answers only, see lib/fry_core/mfln_cache.h).
+      static fry::MflnCache mflnCache;
+      if (!fry::mflnHonours(mflnCache, host.c_str(), probeMfln512, nullptr)) {
+        sec.setBufferSizes(16384, 512);
+      } else {
+        sec.setBufferSizes(512, 512);
+      }
+      break;
+    }
   }
 
   if (!http.begin(sec, url)) return false;
   http.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);
   http.setRedirectLimit(5);
   return true;
+}
+
+bool beginHttpsUrl(HTTPClient& http, WiFiClientSecure& sec, const String& url, bool mflnProbeWorthwhile) {
+  return beginHttpsUrl(http, sec, url, mflnProbeWorthwhile, /*smallReply=*/false);
 }
 
 }  // namespace fry_http

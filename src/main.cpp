@@ -10,6 +10,7 @@
 #include "boot_policy.h"
 #include "config.h"
 #include "core/fry_config.h"
+#include "core/flash_print.h"
 #include "core/improv_serial_glue.h"
 #include "core/miner_key.h"
 #include "core/ota_client.h"
@@ -19,6 +20,7 @@
 #include "core/vpn_relay.h"
 #include "core/wifi_station.h"
 #include "heap_gate.h"
+#include "flash_fmt.h"
 #include "key_policy.h"
 #include "reset_button.h"
 
@@ -60,7 +62,7 @@ void pollFactoryResetButton() {
   bool pressed = digitalRead(FRY_RESET_BUTTON_PIN) == LOW;
 
   if (s_resetButton.update(pressed, static_cast<uint32_t>(now))) {
-    Serial.println("[reset] factory reset - clearing wifi + wallet, identity preserved");
+    FRY_PRINTLN("[reset] factory reset - clearing wifi + wallet, identity preserved");
     Serial.flush();
     fry_config::factoryReset();
     ESP.restart();
@@ -71,7 +73,7 @@ void pollFactoryResetButton() {
   uint32_t held = s_resetButton.heldMs(static_cast<uint32_t>(now));
   if (held >= 1000 && now - s_lastResetHintMs >= 1000) {
     s_lastResetHintMs = now;
-    Serial.printf("[reset] hold %lus/%lus\n", (unsigned long)(held / 1000),
+    FRY_PRINTF("[reset] hold %lus/%lus\n", (unsigned long)(held / 1000),
                   (unsigned long)(fry::kFactoryResetHoldMs / 1000));
   }
 }
@@ -79,8 +81,8 @@ void pollFactoryResetButton() {
 void print_mac(char* out, size_t outLen) {
   uint8_t mac[6];
   WiFi.macAddress(mac);
-  snprintf(out, outLen, "%02X:%02X:%02X:%02X:%02X:%02X", mac[0], mac[1], mac[2], mac[3], mac[4],
-           mac[5]);
+  FRY_SNPRINTF(out, outLen, "%02X:%02X:%02X:%02X:%02X:%02X", mac[0], mac[1], mac[2], mac[3], mac[4],
+               mac[5]);
 }
 
 // PROTOCOL.md section 9: `[health] up=<s> heap=<free> blk=<maxblock> rssi=<dbm> vpn=<up|down>
@@ -93,7 +95,7 @@ void emitHealthLogIfDue() {
   // for both, so the field that the OTA gate actually decides on was invisible in every log we
   // have — a board could report blk=149668 while refusing an update for want of a 36 KB block.
   // fry::queryMaxFreeBlock() is the same source the gate reads.
-  Serial.printf("[health] up=%lus heap=%u blk=%u rssi=%d vpn=%s relayed=%u temp=na\n",
+  FRY_PRINTF("[health] up=%lus heap=%u blk=%u rssi=%d vpn=%s relayed=%u temp=na\n",
                 now / 1000, static_cast<unsigned>(ESP.getFreeHeap()),
                 static_cast<unsigned>(fry::queryMaxFreeBlock()),
                 fry_wifi::isConnected() ? fry_wifi::rssi() : 0, fry_vpn::isUp() ? "up" : "down",
@@ -113,8 +115,18 @@ void attemptWifiConnect() {
     // one optional subsystem, not a boot gate: VPN and the Ready-phase report loop start
     // unconditionally below regardless of whether it succeeds, so a hardwareapi outage or a
     // rejected miner code never stops WiFi, the relay endpoint, health logging, or OTA.
+#if defined(ARDUINO_ARCH_ESP8266)
+    // The relay's two persistent 40 B blocks (the WiFiServer object and its listening pcb) are allocated BEFORE the registration: umm_malloc is
+    // best-fit, and the registration's TLS POST leaves an island of lwIP blocks (a 104 B hole among them) for up to 120 s. Started after it, the
+    // first block went into that hole whenever the neighbouring pbuf was not freed yet, which split the contiguous tail the image download needs.
+    // Started first, both land in the boot heap's lowest fitting hole, the same way on every boot. Nothing waits: the relay only runs in Ready.
+    fry_trigger_start_vpn();  // T6 overrides
+#endif
     fry_trigger_register_now();  // T5 overrides; weak default just logs and returns
-    fry_trigger_start_vpn(); FRY_OLOSTEP_ON_READY()  // T6 overrides
+#if !defined(ARDUINO_ARCH_ESP8266)
+    fry_trigger_start_vpn();  // T6 overrides
+#endif
+    FRY_OLOSTEP_ON_READY()
     setPhase(BootPhase::Ready);
   } else {
     // Back to provisioning so the transport can surface the error and accept a retry. On a board
@@ -134,7 +146,7 @@ void attemptWifiConnect() {
 // A 0xF0 write over USB stored a different key. A board still provisioning simply registers with
 // it after the join; one that is already Ready restarts so every subsystem (registration, lease,
 // PoC, WireGuard) starts over under the new identity.
-void restartToApply(const char* why) {
+void restartToApply(FryText why) {
   Serial.println(why);
   // Not a failure: if this image is still pending, the bootloader rolls it back on this restart,
   // and the previous image must not count that as a strike against it (PROTOCOL.md 11.8).
@@ -147,7 +159,7 @@ void restartToApply(const char* why) {
 void onOwnerKeyChanged() {
   fry_identity::ensureMinerKey(s_minerKey, sizeof(s_minerKey));
   if (s_phase != BootPhase::Ready) return;
-  restartToApply("[prov] miner key changed - restarting to register with the new key");
+  restartToApply(FRY_TEXT("[prov] miner key changed - restarting to register with the new key"));
 }
 
 }  // namespace
@@ -174,13 +186,13 @@ void setup() {
     fry::maskMinerKeyLast4(s_minerKey, keyMasked, sizeof(keyMasked));
     keyForLog = keyMasked;
   }
-  Serial.printf("FRY boot v%s chip=%s mac=%s minerkey=%s\n", FRY_FIRMWARE_VERSION, FRY_CHIP, mac,
+  FRY_PRINTF("FRY boot v%s chip=%s mac=%s minerkey=%s\n", FRY_FIRMWARE_VERSION, FRY_CHIP, mac,
                 keyForLog);
 
 #if defined(FRY_TEST_FAULT) && FRY_TEST_FAULT == 1
   // Test channel only (src/core/ota_client.h #errors otherwise): an image that dies before it can
   // prove itself, so the bootloader must roll it back.
-  Serial.println("[fault] FRY_TEST_FAULT=1 - aborting in setup() after the banner");
+  FRY_PRINTLN("[fault] FRY_TEST_FAULT=1 - aborting in setup() after the banner");
   Serial.flush();
   abort();
 #endif
@@ -202,11 +214,11 @@ void setup() {
       fry_config::hasWifi(), fry_config::hasWallet(), fry_config::hasProvDone());
   const bool keyOk = fry::keyAllowsJoin(fry::kBuildKeyModel, s_minerKey[0] != 0);
   if (hasCredentials && !keyOk) {
-    Serial.println("[boot] wifi credentials stored but no miner key - staying provisionable");
+    FRY_PRINTLN("[boot] wifi credentials stored but no miner key - staying provisionable");
   }
   setPhase(fry::initialBootPhase(hasCredentials && keyOk));
 
-  Serial.println("[boot] ready");
+  FRY_PRINTLN("[boot] ready");
 }
 
 void loop() {
@@ -244,7 +256,7 @@ void loop() {
       // running, e.g. the app after a Wi-Fi-only Improv setup. They are persisted; nothing in this
       // phase would ever act on them, so boot into them.
       if (fry_provisioning::readyToConnect()) {
-        restartToApply("[prov] new settings committed while running - restarting to join with them");
+        restartToApply(FRY_TEXT("[prov] new settings committed while running - restarting to join with them"));
       }
       fry_vpn::tick();  // ESP8266: pumps the SOCKS5 relay; ESP32: polls the WG handshake state
       fry_trigger_report_loop_tick(); FRY_OLOSTEP_TICK()  // T5 overrides; weak default is a no-op

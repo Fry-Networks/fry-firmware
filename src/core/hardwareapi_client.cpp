@@ -4,8 +4,13 @@
 
 #include <cstring>
 #include <ctime>
+#if defined(ARDUINO_ARCH_ESP8266)
+#include <memory>
+#include <new>
+#endif
 
 #include "config.h"
+#include "flash_print.h"
 #include "fry_config.h"
 #include "heartbeat_fields.h"
 #include "http_tls.h"
@@ -66,6 +71,17 @@ fry::FlashInfo flashInfo() {
   return cached;
 }
 
+#if defined(FRY_HEARTBEAT_HEAP) && defined(ARDUINO_ARCH_ESP8266)
+__attribute__((noinline)) void addHeartbeatHeap(JsonDocument& doc) {
+  // Own frame (noinline) so registerInstallation(), which sits on the deepest loop-stack path, does not grow. One umm_info pass gives
+  // the three heap numbers coherently; the loop stack's high water is what the cont stack has never come back from since boot.
+  uint32_t freeHeap = 0, maxBlock = 0;
+  uint8_t frag = 0;
+  ESP.getHeapStats(&freeHeap, &maxBlock, &frag);
+  fry::addHeapFields(doc, {freeHeap, maxBlock, frag, ESP.getFreeContStack()});
+}
+#endif
+
 // Updated unconditionally BEFORE every registration attempt (success or failure) so a rejected
 // or failed call backs off to INSTALL_HEARTBEAT_MS just like a successful heartbeat does — the
 // old design only updated this on success, which meant a persistent failure (e.g. the server
@@ -104,7 +120,7 @@ void readServerDetail(HTTPClient& http, const char* minerKey, char* out, size_t 
 void addAuthHeader(HTTPClient& http) {
   String token = fry_config::getDeviceToken();
   if (token.length() == 0) token = String(FRY_API_TOKEN);
-  if (token.length() > 0) http.addHeader("Authorization", "Bearer " + token);
+  if (token.length() > 0) http.addHeader(FRY_TEXT("Authorization"), "Bearer " + token);
 }
 
 int computeSlot() {
@@ -132,21 +148,57 @@ bool ensureNtpSynced(uint32_t timeoutMs) {
   return false;
 }
 
-bool registerInstallation() {
+#if defined(ARDUINO_ARCH_ESP8266)
+// registerInstallation() sits on the deepest boot-time loop-stack path: loop() -> tick() -> here -> the TLS connect below it, a few
+// hundred bytes from the end of the 4 KB cont stack (bench: 736..1152 B free at the end of the registration interval). What it holds
+// across the connect lives in heap blocks, as ota_client.cpp's ManifestClients does: the four text buffers for the whole call, the two
+// TLS clients for one attempt: the frame goes from 736 B to 352 B (-fstack-usage). The ESP32 keeps its stack locals.
+namespace {
+struct RegText {
   char minerKey[40];
+  char installId[40];
+  char deviceName[32];
+  char detail[128];
+};
+struct RegClients {
+  WiFiClientSecure sec;
+  HTTPClient http;
+};
+}  // namespace
+#endif
+
+bool registerInstallation() {
+#if defined(ARDUINO_ARCH_ESP8266)
+  std::unique_ptr<RegText> text(new (std::nothrow) RegText());
+  if (!text) {
+    FRY_PRINTLN("api: no memory for the registration");
+    return false;
+  }
+  char (&minerKey)[40] = text->minerKey;
+#else
+  char minerKey[40];
+#endif
   fry_identity::ensureMinerKey(minerKey, sizeof(minerKey));
   if (minerKey[0] == 0) {
     // USER_SUPPLIED board without a key: there is nothing to register as. Not an API failure.
     if (!s_loggedNoKey) {
       s_loggedNoKey = true;
-      Serial.println("api: registration skipped - no miner key yet");
+      FRY_PRINTLN("api: registration skipped - no miner key yet");
     }
     fry_provisioning::notifyKeyMissing();
     return false;
   }
+#if defined(ARDUINO_ARCH_ESP8266)
+  char (&installId)[40] = text->installId;
+#else
   char installId[40];
+#endif
   fry_identity::ensureInstallId(installId, sizeof(installId));
+#if defined(ARDUINO_ARCH_ESP8266)
+  char (&deviceName)[32] = text->deviceName;
+#else
   char deviceName[32];
+#endif
   fry_identity::getDeviceName(deviceName, sizeof(deviceName));
 
   fry::InstallationFields fields{};
@@ -161,23 +213,40 @@ bool registerInstallation() {
   fields.flash = flashInfo();
   JsonDocument doc;
   fry::buildInstallationDoc(doc, fields);
+#if defined(FRY_HEARTBEAT_HEAP) && defined(ARDUINO_ARCH_ESP8266)
+  addHeartbeatHeap(doc);
+#endif
   String body;
   serializeJson(doc, body);
 
-  String url = fry_config::getApiBase() + "/installations/" + minerKey + "/installations/" + installId;
+  String url = fry_config::getApiBase() + FRY_TEXT("/installations/") + minerKey + FRY_TEXT("/installations/") + installId;
 
   // One attempt plus one quick retry for an outage only. Anything longer is tick()'s schedule, so
   // the loop (Improv, the reset button, the relay) is never held for more than one retry.
   int code = -1;
   fry::RegClass cls = fry::RegClass::Unreachable;
+#if defined(ARDUINO_ARCH_ESP8266)
+  char (&detail)[128] = text->detail;
+#else
   char detail[128] = {0};
+#endif
   for (int attempt = 0; attempt < 2; attempt++) {
+#if defined(ARDUINO_ARCH_ESP8266)
+    std::unique_ptr<RegClients> clients(new (std::nothrow) RegClients());
+    if (!clients) {
+      FRY_PRINTLN("api: no memory for the registration client");
+      break;  // code -1, Unreachable: the failure bookkeeping below backs off as for an unreachable server
+    }
+    WiFiClientSecure& sec = clients->sec;
+    HTTPClient& http = clients->http;
+#else
     WiFiClientSecure sec;
     HTTPClient http;
+#endif
     code = -1;
     if (fry_http::beginHttpsUrl(http, sec, url)) {
       addAuthHeader(http);
-      http.addHeader("Content-Type", "application/json");
+      http.addHeader(FRY_TEXT("Content-Type"), FRY_TEXT("application/json"));
       code = http.POST(body);
     }
     s_lastRegHttp = code;
@@ -190,7 +259,7 @@ bool registerInstallation() {
       const char* token = rdoc["device_token"] | "";
       if (strlen(token) > 0) fry_config::setDeviceToken(token);
       http.end();
-      Serial.printf("api: registered install=%s token=%s\n", installId,
+      FRY_PRINTF("api: registered install=%s token=%s\n", installId,
                     strlen(token) > 0 ? "present" : "none");
       if (!fry_config::getKeyOk()) fry_config::setKeyOk(true);  // the key is now confirmed
       s_regFailures = 0;
@@ -214,11 +283,11 @@ bool registerInstallation() {
   s_nextRegisterDelayMs = fry::nextRegisterDelayMs(cls, s_regFailures);
   const fry::ProvErr err = fry::regClassProvErr(cls);
   if (cls == fry::RegClass::Unreachable) {
-    Serial.printf("api: registration failed install=%s http=%d detail=%u (%s) next=%lus\n", installId,
+    FRY_PRINTF("api: registration failed install=%s http=%d detail=%u (%s) next=%lus\n", installId,
                   code, static_cast<unsigned>(err), fry::regClassText(cls),
                   s_nextRegisterDelayMs / 1000UL);
   } else {
-    Serial.printf("api: register rejected http=%d detail=%u (%s) server=\"%s\" next=%lus\n", code,
+    FRY_PRINTF("api: register rejected http=%d detail=%u (%s) server=\"%s\" next=%lus\n", code,
                   static_cast<unsigned>(err), fry::regClassText(cls), detail,
                   s_nextRegisterDelayMs / 1000UL);
   }
@@ -240,12 +309,12 @@ bool renewLease() {
   String body;
   serializeJson(doc, body);
 
-  String url = fry_config::getApiBase() + "/installations/" + minerKey + "/leases/" + installId;
+  String url = fry_config::getApiBase() + FRY_TEXT("/installations/") + minerKey + FRY_TEXT("/leases/") + installId;
   WiFiClientSecure sec;
   HTTPClient http;
   if (!fry_http::beginHttpsUrl(http, sec, url)) return false;
   addAuthHeader(http);
-  http.addHeader("Content-Type", "application/json");
+  http.addHeader(FRY_TEXT("Content-Type"), FRY_TEXT("application/json"));
   int code = http.sendRequest("PATCH", body);  // String overload — avoids a const/non-const
                                                 // uint8_t* signature mismatch between cores
   http.end();
@@ -271,12 +340,12 @@ int putPoc() {
   String body;
   serializeJson(doc, body);
 
-  String url = fry_config::getApiBase() + "/PoC/" + minerKey + "/hardware";
+  String url = fry_config::getApiBase() + FRY_TEXT("/PoC/") + minerKey + FRY_TEXT("/hardware");
   WiFiClientSecure sec;
   HTTPClient http;
   if (!fry_http::beginHttpsUrl(http, sec, url)) return -1;
   addAuthHeader(http);
-  http.addHeader("Content-Type", "application/json");
+  http.addHeader(FRY_TEXT("Content-Type"), FRY_TEXT("application/json"));
   int code = http.PUT(body);
   http.end();
   fry_ota::noteHeartbeat(code, "poc");
@@ -284,7 +353,7 @@ int putPoc() {
 }
 
 bool getVersions(String& outJson) {
-  String url = fry_config::getApiBase() + "/versions/" FRY_MINER_CODE "?platform=" FRY_BUILD_ENV;
+  String url = fry_config::getApiBase() + FRY_TEXT("/versions/" FRY_MINER_CODE "?platform=" FRY_BUILD_ENV);
   WiFiClientSecure sec;
   HTTPClient http;
   if (!fry_http::beginHttpsUrl(http, sec, url)) return false;
@@ -296,7 +365,7 @@ bool getVersions(String& outJson) {
   } else if (code >= 400 && code < 500) {
     // Terminal, same as registration — e.g. a 422 because FRY_MINER_CODE isn't in the server's
     // accepted enum yet. Not retried here; the caller's own cadence decides when to try again.
-    Serial.printf("api: version check rejected http=%d - server does not accept this miner code yet\n",
+    FRY_PRINTF("api: version check rejected http=%d - server does not accept this miner code yet\n",
                   code);
   }
   http.end();
@@ -336,13 +405,34 @@ void tick() {
     int slot = computeSlot();
     int putCode = putPoc();
     bool leaseOk = renewLease();
-    Serial.printf("poc: slot=%d put=%d lease=%s\n", slot, putCode, leaseOk ? "true" : "false");
+    FRY_PRINTF("poc: slot=%d put=%d lease=%s\n", slot, putCode, leaseOk ? "true" : "false");
   }
 }
+
+#if defined(ARDUINO_ARCH_ESP8266)
+// The boot-time registration (main.cpp attemptWifiConnect() -> fry_trigger_register_now()). tick() registers whenever
+// s_lastRegisterAttemptMs is 0 and nothing recorded this call, so the first tick registered AGAIN about a second later: a second ~8 KB
+// TLS session low in the 40 KB heap and a second TIME_WAIT pcb (test/test_hwapi_register_once). A success is recorded the way tick()
+// records its own (registerInstallation() has already set s_nextRegisterDelayMs to the heartbeat). A failure, or a call that skipped
+// for want of a miner key, is not: tick() retries at once, as before.
+bool registerAtBoot() {
+  const unsigned long started = millis();
+  if (!registerInstallation()) return false;
+  s_lastRegisterAttemptMs = started ? started : 1;
+  s_registered = true;
+  return true;
+}
+#endif
 
 }  // namespace fry_hwapi
 
 // Strong overrides of the weak defaults in trigger_stubs.cpp (see trigger_hooks.h).
-extern "C" void fry_trigger_register_now() { fry_hwapi::registerInstallation(); }
+extern "C" void fry_trigger_register_now() {
+#if defined(ARDUINO_ARCH_ESP8266)
+  fry_hwapi::registerAtBoot();
+#else
+  fry_hwapi::registerInstallation();
+#endif
+}
 extern "C" void fry_trigger_poc_now() { fry_hwapi::putPoc(); }
 extern "C" void fry_trigger_report_loop_tick() { fry_hwapi::tick(); }

@@ -1,6 +1,8 @@
 // PrefsStore — Preferences-compatible LittleFS JSON store (ESP8266 port; see prefs_store.h).
 #include "prefs_store.h"
 
+#include "flash_fmt.h"
+
 #include <ArduinoJson.h>
 #include <LittleFS.h>
 #include <libb64/cdecode.h>
@@ -23,7 +25,7 @@ static JsonDocument& doc_of(void* p) { return *(JsonDocument*)p; }
 bool PrefsStore::begin(const char* ns, bool readOnly) {
   if (_open) end();
   if (!fs_ensure()) return false;
-  snprintf(_path, sizeof(_path), "/fry_ns_%s.json", ns);
+  FRY_SNPRINTF(_path, sizeof(_path), "/fry_ns_%s.json", ns);
   _readOnly = readOnly;
   _doc = new JsonDocument();
   if (!_doc) return false;
@@ -36,7 +38,7 @@ bool PrefsStore::begin(const char* ns, bool readOnly) {
 bool PrefsStore::load() {
   // Drop a stale <path>.tmp left by a write interrupted before its atomic rename.
   char tmp[56];
-  snprintf(tmp, sizeof(tmp), "%s.tmp", _path);
+  FRY_SNPRINTF(tmp, sizeof(tmp), "%s.tmp", _path);
   if (LittleFS.exists(tmp)) LittleFS.remove(tmp);
   File f = LittleFS.open(_path, "r");
   if (!f) return false;
@@ -52,7 +54,7 @@ bool PrefsStore::save() {
   // A reset mid-write leaves either the complete old file or the complete new file — never a
   // truncated one (open(_path,"w") would truncate the live file before the new content lands).
   char tmp[56];
-  snprintf(tmp, sizeof(tmp), "%s.tmp", _path);
+  FRY_SNPRINTF(tmp, sizeof(tmp), "%s.tmp", _path);
   File f = LittleFS.open(tmp, "w");
   if (!f) return false;
   serializeJson(doc_of(_doc), f);

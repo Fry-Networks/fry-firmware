@@ -80,3 +80,25 @@
 #ifndef HEAP_GATE_OTA_BLOCK
 #define HEAP_GATE_OTA_BLOCK 36864
 #endif
+
+// The ESP8266 HTTPS manifest check (8192/512 session, lib/fry_core/tls_sizing.h) has its own, MEASURED gate, in the units
+// checkNow() samples (the heap before its TLS clients exist): lib/fry_core/ota_heap_budget.h derives 29976 free / 29808
+// block, and [env:esp8266] sets them. Every other build keeps the two numbers above.
+#ifndef HEAP_GATE_OTA_MANIFEST
+#define HEAP_GATE_OTA_MANIFEST HEAP_GATE_OTA
+#endif
+#ifndef HEAP_GATE_OTA_MANIFEST_BLOCK
+#define HEAP_GATE_OTA_MANIFEST_BLOCK HEAP_GATE_OTA_BLOCK
+#endif
+
+// The same for the ESP8266 image DOWNLOAD session (16384/512, begin-time floors in beginHttpsUrl) and for what is left to
+// allocate once that session is connected (HEAP_GATE_OTA_STREAM, a total-free floor: BearSSL's buffers already exist then).
+#ifndef HEAP_GATE_OTA_DOWNLOAD
+#define HEAP_GATE_OTA_DOWNLOAD HEAP_GATE_OTA
+#endif
+#ifndef HEAP_GATE_OTA_DOWNLOAD_BLOCK
+#define HEAP_GATE_OTA_DOWNLOAD_BLOCK HEAP_GATE_OTA_BLOCK
+#endif
+#ifndef HEAP_GATE_OTA_STREAM
+#define HEAP_GATE_OTA_STREAM HEAP_GATE_OTA
+#endif

@@ -59,7 +59,7 @@ AP SSID `FRY-SETUP-<MAC6>`, open, IP `192.168.4.1`, DNS catch-all on port 53, HT
 - `POST /provision` takes form-encoded `ssid`, `pass`, `wallet` and returns `200 {"ok":true}` or `400 {"ok":false,"err":"<reason>"}`
 - `GET /status` returns `{"status":0..4,"err":0..5,"minerKey":"FEM-...","ip":"..."}`
 
-The AP is torn down 10 seconds after status reaches 3.
+The AP is torn down 10 seconds after status reaches 3. On the ESP8266 the HTTP server, the DNS catch-all and the scan cache are stopped and freed at the teardown, so none of the endpoints above, `GET /status` included, is served afterwards, not on the station address either.
 
 ## 4. Identity
 
@@ -80,8 +80,10 @@ omitted entirely when both are empty.
 
 - `POST /installations/{miner_key}/installations/{install_id}` with body
   `{"miner_key","install_id","minerCode":"IOTVPN","software_version_installed","poc_version_installed":"1.0.0","hostname","os","is_installed":true,"device_name"}`.
-  Note that `minerCode` is camelCase while every sibling field is snake_case. Send no extra keys.
+  Note that `minerCode` is camelCase while every sibling field is snake_case. Send no extra keys, except the ones listed below.
   The response is `{"status","device_token"}`. Repeat hourly and once after every OTA.
+  Exception, all builds: four unsigned-integer keys follow the nine above, `flash_real_size` (physical flash chip size, bytes), `flash_ide_size` (the size the image header and core believe, bytes), `ota_free_bytes` (room for the next OTA image, bytes) and `sketch_size` (the running image, bytes), so every body has 13 keys.
+  Exception, ESP8266 only (`-DFRY_HEARTBEAT_HEAP=1`): four more unsigned-integer keys follow those 13, `free_heap` (total free heap, bytes), `max_free_block` (largest contiguous free block, bytes), `heap_frag` (fragmentation, percent, 0 = one free block) and `stack_high_water` (loop-stack bytes still unused at its deepest point since boot). The server accepts these keys.
 - `POST` or `PATCH /installations/{miner_key}/leases/{install_id}` with body `{"lease_seconds":900}`.
 - `PUT /PoC/{miner_key}/hardware` with body `{"document":{...}}`, one slot per call, where
   `slot_number = (UTC minutes since midnight / 10) % 144`. Success is any 2xx; there is no response body.
