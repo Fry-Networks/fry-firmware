@@ -55,8 +55,10 @@ constexpr uint32_t kManifestGateFree = kManifestNeedFree + kMarginBytes + kCtorB
 
 // Image download, Big 16384/512 session (release-assets.githubusercontent.com sends 16400 B application records for the
 // body: host probe c1/tools/record_sizes.py, c1/logs/record-sizes-asset.log - 34 of 60 records over 16384 - so no smaller
-// receive buffer can carry it; the manifest's Medium buffer cannot). Measured by sweep C (lo/c1-c9-115327.lines.txt,
-// lo/c1-c9b-120136.lines.txt, 05ffb66 tree + trace, the same 3-hop GitHub chain with every hop on 16384/512), post-ctor:
+// receive buffer can carry it; the manifest's Medium buffer cannot). Two measurements, the second replaces the first.
+//
+// Sweep C (GET only; lo/c1-c9-115327.lines.txt, lo/c1-c9b-120136.lines.txt, 05ffb66 tree + trace, the 3-hop GitHub chain with every
+// hop on 16384/512), post-ctor, total free and largest block forced TOGETHER, so its failures were short of free as much as of block:
 //
 //   post-ctor blk   free    result
 //   28912           29528   PASS 1/1  (unforced)
@@ -64,17 +66,23 @@ constexpr uint32_t kManifestGateFree = kManifestNeedFree + kMarginBytes + kCtorB
 //   25992           26608   PASS 1/3, CRASH 2/3 (reset cause 4, OOM panic)
 //   23992           24368   CRASH (reset cause 2)
 //
-// The download's own chain has one hop fewer than the manifest's (github.com -> release-assets), so the 3-hop figure is an
-// upper bound on its need. The stack thunk is normally already held when downloadAndApply() runs (checkNow()'s manifest
-// clients are still alive), so its begin-time sample is "post-constructor" in exactly the sweep's sense.
-constexpr uint32_t kDownloadPassBlk = 27992;   // lowest forced largest free block that passed 3/3
-constexpr uint32_t kDownloadPassFree = 28608;  // total free at that point
-constexpr uint32_t kDownloadFailBlk = 25992;   // PASS 1/3, CRASH 2/3
+// The whole-stream sweeps dl-30 .. dl-32b2 (lo/c1-sw7 .. c1-sw11-all.lines.txt; c1/reports/dl32ab2-floors.md) held what the download
+// begins with ("post-ctor", the same point) and streamed the full image to the sha256 check:
+//   free: 18 stream-gate FAILs over dl-30, dl-31 and dl-32a2 show the session's use at the gate (held free - the last gate sample) as
+//         25120 x10, 25144 x4, 25560 x4. The gate needs kStreamGateFree on top of the worst of them.
+//   blk:  dl-32b2 held total free at 32400 and stepped the largest block only: PASS 3/3 at every target from 31000 down to 26000
+//         (18 of 18), 25000 2/3 (no buffer), 24000 2/3 and 22000 1/3 (Update.begin), 20000 0/2 (GET -1). Every failure is the 4096 B
+//         Updater buffer (taken when more than 8192 B are free) plus the 1024 B download buffer not fitting in what the 20152 B
+//         session leaves of the held block: 20152 + 4104 + 1032 = 25288, so 26000 is the lowest target that never failed.
+constexpr uint32_t kDownloadSessionUsedWorst = 25560;  // worst session use at the stream gate, 4 of 18 stream-gate FAILs
+constexpr uint32_t kDownloadSessionBlkTaken = 20152;   // what the session takes from the held block (target - post-GET block, dl-32b2)
+constexpr uint32_t kDownloadPassBlk = 26000;           // lowest forced largest free block that passed 3/3 at every target down to it
+constexpr uint32_t kDownloadFailBlk = 25000;           // 2/3: the first target that failed
 constexpr uint32_t kDownloadNeedBlk = kDownloadPassBlk;
-constexpr uint32_t kDownloadNeedFree = kDownloadPassFree;
-// In the same pre-constructor units as the manifest gate; beginHttpsUrl() sees them through tlsFloorsAtBegin().
-constexpr uint32_t kDownloadGateBlock = kDownloadNeedBlk + kMarginBytes + kCtorBytes;  // 38808
-constexpr uint32_t kDownloadGateFree = kDownloadNeedFree + kMarginBytes + kCtorBytes;  // 39424
+constexpr uint32_t kDownloadNeedFree = 30936;          // kDownloadSessionUsedWorst + kStreamGateFree (static_assert'ed below)
+// In the same pre-constructor units as the manifest gate; beginHttpsUrl() sees them through tlsFloorsAtBegin(): 35032 free, 30096 block.
+constexpr uint32_t kDownloadGateBlock = kDownloadNeedBlk + kMarginBytes + kCtorBytes;  // 36816
+constexpr uint32_t kDownloadGateFree = kDownloadNeedFree + kMarginBytes + kCtorBytes;  // 41752
 
 // After the connect: BearSSL's contexts and its 16 KB input buffer are ALREADY allocated, so a contiguous-block gate
 // there (the old 36864) measures a heap this session itself just consumed and can never pass. What streaming still
@@ -85,7 +93,13 @@ constexpr uint32_t kStreamGateFree = kStreamNeedBytes + kMarginBytes;  // 5376
 
 static_assert(kManifestFailBlk < kManifestPassBlk, "the sweep fails below it and passes at it");
 static_assert(kDownloadFailBlk < kDownloadPassBlk, "the sweep fails below it and passes at it");
+static_assert(kDownloadNeedFree == kDownloadSessionUsedWorst + kStreamGateFree, "free need = worst session use + the stream gate");
+static_assert(kDownloadPassBlk >= kDownloadSessionBlkTaken + (4096 + 8) + (1024 + 8), "block need = session + Updater buffer + download buffer");
 static_assert(kDownloadGateBlock >= kDownloadPassBlk + kMarginBytes + kBearsslStackThunkBytes, "gate below need + margin");
+// The shipped download gate, from the named needs and the literal margin: an edit that drops the 4096 margin, the BearSSL thunk or the clients block
+// from the gate (or edits kMarginBytes) fails here. 41752 free / 36816 block; at begin (tlsFloorsAtBegin) 35032 / 30096.
+static_assert(kDownloadGateFree == kDownloadNeedFree + 4096 + kBearsslStackThunkBytes + kOtaClientsBytes, "download free gate = need + 4096 + thunk + clients");
+static_assert(kDownloadGateBlock == kDownloadNeedBlk + 4096 + kBearsslStackThunkBytes + kOtaClientsBytes, "download block gate = need + 4096 + thunk + clients");
 static_assert(kManifestGateBlock >= kManifestPassBlk + kMarginBytes + kBearsslStackThunkBytes, "gate below need + margin");
 
 }  // namespace ota_heap
