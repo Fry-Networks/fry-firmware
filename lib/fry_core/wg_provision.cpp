@@ -409,7 +409,12 @@ WgRetrySchedule wgRetryDelayMs(WgFetchOutcome outcome, uint32_t attemptNumber,
       sched.delayMs = 60000;
       break;
     case WgFetchOutcome::NoClock:
-      sched.delayMs = 300000;
+      // Bounded NTP wait, not a 5-minute deferral: NTP normally lands a few seconds after Wi-Fi,
+      // so retrying at 5, 10, 20, 40 s and then every 60 s creates the peer within a minute of the
+      // clock coming up instead of up to 300 s later. The clock gate itself is unchanged: nothing
+      // is sent while the clock is implausible (classifyWgFetch still returns NoClock).
+      sched.delayMs = 5000u << (attemptNumber < 4 ? attemptNumber : 4);
+      if (sched.delayMs > 60000u) sched.delayMs = 60000u;
       break;
     case WgFetchOutcome::Unauthorized401:
       sched.delayMs = 900000;

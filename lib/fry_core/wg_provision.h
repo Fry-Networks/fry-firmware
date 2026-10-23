@@ -190,7 +190,9 @@ struct WgRetrySchedule {
 // delay. `retryAfterHeaderS` is only consulted for Conflict409/RateLimited429 and is otherwise
 // ignored; 0 means "no Retry-After header was present."
 //   NoToken / NoHeap        -> 60,000 ms flat
-//   NoClock                 -> 300,000 ms flat
+//   NoClock                 -> bounded NTP wait: 5,000 * 2^attemptNumber ms, capped at 60,000 ms
+//                               (a peer exists within a minute of NTP syncing; nothing is sent
+//                               until the clock is plausible)
 //   TransientError / 5xx    -> 30,000 * 2^attemptNumber, capped at 1,800,000 ms
 //   Unauthorized401         -> 900,000 ms flat
 //   Forbidden403            -> 21,600,000 ms flat (deliberately long: a non-QA board that
