@@ -10,10 +10,12 @@ name: release-fw
 #
 # Round 2 (R5): ESP32-S3 is held back ENTIRELY - not built, not attached and not in the manifest; the
 # Pages flasher keeps serving its 0.3.3 parts (and ESP8266's) from docs/flash/fw/hold/. ESP8266 is
-# built and attached as a release asset, but tools/ota_channels.json still leaves it out of the prod
-# manifest, so no board updates itself to it. The flasher moves ESP32/ESP32-C3 to the new version
-# only after the canary, so the tagged commit's flasher is checked for consistency and for the
-# hold, not for the version.
+# built and attached as a release asset. From 0.4.11 it is also in the prod manifest: the manifest
+# step passes `--include-env esp8266` as a committed literal (tools/ota_channels.json is unchanged
+# and still lists it, so the flag is the one place that decides), with NO rollout key. The 0.3.x
+# ESP8266 fleet cannot complete a manifest check, so only 0.4.x boards (the bench) can take it. The
+# flasher moves ESP32/ESP32-C3 to the new version only after the canary, so the tagged commit's
+# flasher is checked for consistency and for the hold, not for the version.
 
 on:
   push:
@@ -120,6 +122,7 @@ jobs:
           python3 tools/test_make_manifest_exclude.py
           python3 tools/test_make_manifest_envs.py
           python3 tools/test_manifest_esp8266_compat.py
+          python3 tools/test_make_manifest_include_env.py
           python3 tools/test_check_no_token.py
           python3 tools/test_check_prod_channel.py
           python3 tools/test_ble_key_write_security.py
@@ -200,20 +203,26 @@ jobs:
             if [ -f "$fac" ]; then cp "$fac" "release/firmware-$env-factory.bin"; fi
           done
 
-      - name: Generate ota/manifest.json (prod channel, committed exclusions)
+      - name: Generate ota/manifest.json (prod channel, committed exclusions, esp8266 included)
         run: |
           set -eu
           python3 tools/make_manifest.py --version "${GITHUB_REF_NAME#fw-v}" --channel prod \
-            --envs esp32,esp32c3,esp8266 --release-base "https://github.com/${{ github.repository }}/releases/download/${GITHUB_REF_NAME}" \
+            --envs esp32,esp32c3,esp8266 --include-env esp8266 --release-base "https://github.com/${{ github.repository }}/releases/download/${GITHUB_REF_NAME}" \
             --build-dir manifest_input --out ota/manifest.json --dist release
           python3 - <<'EOF'
           import json
           m = json.load(open("ota/manifest.json"))
           cfg = json.load(open("tools/ota_channels.json"))
           excluded = set(cfg["channels"]["prod"]["exclude_from_builds"])
+          excluded -= {"esp8266"}  # included by --include-env esp8266 above; the config still lists it
           want = {"esp32", "esp32c3", "esp8266"} - excluded  # R5: the held chips are not even built
           assert m["channel"] == "prod", m
           assert set(m["builds"]) == want, (sorted(m["builds"]), sorted(want))
+          assert "esp8266" in m["builds"], sorted(m["builds"])
+          for env, b in m["builds"].items():
+              assert b["url"] and len(b["sha256"]) == 64, (env, b)
+              assert "rollout" not in b, (env, b)
+          assert "rollout" not in m, m
           print("manifest builds:", sorted(m["builds"]), "excluded:", sorted(excluded))
           EOF
 

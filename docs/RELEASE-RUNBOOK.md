@@ -28,12 +28,14 @@ latest_manifest_location() { curl -sI "$LATEST_URL" | grep -i '^location:' | hea
    does not match this line. Commit on a branch GitHub Pages does not serve (the flasher moves
    separately, section 5).
 2. **Tag → draft.** `git tag fw-vX.Y.Z <commit> && git push origin fw-vX.Y.Z`. `release-fw.yml`
-   builds esp32 and esp32c3 token-free (`check_no_token`, `check_prod_channel` + its `esp32_test`
-   control), runs the native and tool tests, checks the flasher and creates a **DRAFT** release
-   with `firmware-esp32.bin`, `firmware-esp32c3.bin`, the two `-factory.bin` images and
-   `manifest.json` (`builds` = esp32, esp32c3 only; `channel: prod`). A draft never resolves at
-   `releases/latest`, so nothing has shipped yet. ESP32-S3 and ESP8266 are held: not built, not
-   attached, not in the manifest (`tools/ota_channels.json`).
+   builds esp32, esp32c3 and esp8266 token-free (`check_no_token`, `check_prod_channel` + its
+   `esp32_test` control), runs the native and tool tests, checks the flasher and creates a **DRAFT**
+   release with `firmware-esp32.bin`, `firmware-esp32c3.bin`, `firmware-esp8266.bin`, the two
+   `-factory.bin` images and `manifest.json` (`builds` = esp32, esp32c3, esp8266; `channel: prod`;
+   no rollout key). esp8266 is in the manifest from 0.4.11 because the workflow passes
+   `--include-env esp8266`; the 0.3.x fleet cannot complete a manifest check, so it is unaffected.
+   A draft never resolves at `releases/latest`, so nothing has shipped yet. ESP32-S3 is held: not
+   built, not attached, not in the manifest (`tools/ota_channels.json`).
 3. **Canary.** From the tag (`--ref` takes a branch or tag, not a SHA; the dispatch only works once
    test-channel.yml is on the default branch): `gh workflow run test-channel.yml --repo $REPO --ref fw-vX.Y.Z -f fault=0`
    (the `ota-test` prerelease must exist and stay a prerelease; the job refuses if
