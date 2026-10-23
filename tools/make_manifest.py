@@ -37,6 +37,8 @@ committed tools/ota_channels.json is applied: an env listed under the channel's 
 is LEFT OUT of builds{}, so boards of that chip get no automatic update, while its images are still
 copied to --dist for manual flashing. --no-exclusions keeps every env (e.g. for the Pages flasher's
 docs/flash/fw/manifest.json, which is a download list, not an OTA source).
+--include-env ENV (repeatable) overrides the exclusion for that env only, for one run: a release that
+decides a held chip now ships passes it on its command line instead of editing the committed config.
 """
 import argparse
 import hashlib
@@ -399,6 +401,9 @@ def main():
     ap.add_argument("--ewt-merge", default=None,
                     help="with --ewt-out: carry over this EWT manifest's builds for chip families "
                          "not built here (held chips keep their previous parts)")
+    ap.add_argument("--include-env", action="append", default=[], metavar="ENV",
+                    help="release ENV even though the channel's exclusion config lists it (repeatable): "
+                         "its build entry stays in builds{}. The committed exclusions are not edited.")
     ap.add_argument("--rollout-lo", type=int, default=None,
                     help="staged rollout: lowest device bucket (0..99) that may take this update; "
                          "needs --rollout-hi. Without both flags the manifest has no rollout key.")
@@ -417,6 +422,12 @@ def main():
     for env in envs:
         if env not in ENVS:
             raise SystemExit("make_manifest: unknown env %s" % env)
+    for env in a.include_env:
+        if env not in ENVS:
+            raise SystemExit("make_manifest: --include-env: unknown env %s" % env)
+        if env not in envs:
+            raise SystemExit("make_manifest: --include-env %s is not among the built envs (%s)"
+                             % (env, ",".join(envs)))
     if a.ewt_merge and not a.ewt_out:
         raise SystemExit("make_manifest: --ewt-merge needs --ewt-out")
 
@@ -481,6 +492,10 @@ def main():
     if not a.no_exclusions:
         excluded, reason = load_exclusions(a.channels_config, a.channel)
         for env in excluded:
+            if env in a.include_env:
+                print("make_manifest: %s kept in builds{} for channel %s (--include-env overrides the "
+                      "exclusion config)" % (env, a.channel))
+                continue
             if builds.pop(env, None) is not None:
                 print("make_manifest: %s left out of builds{} for channel %s (%s)" % (env, a.channel, reason))
 

@@ -341,7 +341,9 @@ kFryStatusKeyRequired    494d50524f56010429f127013101340134013601300005302e342e3
 - **Manifest additions** (section 6 shape unchanged): optional `"channel":"prod"|"test"`; a missing
   channel reads as `prod`. Firmware 0.4+ ignores a manifest whose channel is not its own.
 - **Left-out chips.** `builds` may omit an environment on purpose. The prod manifest omits the envs
-  listed in `tools/ota_channels.json` (from 0.4.0: `esp32s3`, `esp8266`). A board whose
+  listed in `tools/ota_channels.json` (from 0.4.0: `esp32s3`, `esp8266`), except an env the release
+  command line includes with `--include-env` (`release-fw.yml` does that for `esp8266` from 0.4.11,
+  with no rollout key; the config file still lists it). A board whose
   `FRY_BUILD_ENV` has no entry does not update, and never takes another chip's image; v0.3.1 and
   0.3.3 behave the same (`test/test_legacy_manifest_select`). Their images are still published for
   manual flashing.
@@ -470,7 +472,9 @@ AP restarted FRY-SETUP-<MAC6> after the failed join - /provision accepts a new a
   boot. It never mints a new key and never re-derives an owner's key.
 - **Held chips.** 0.4.0 is not released for ESP32-S3 and ESP8266: not in any manifest and not
   attached to any release; the web flasher keeps their 0.3.3 parts in `docs/flash/fw/hold/`
-  (`manifest-hold.json`).
+  (`manifest-hold.json`). Since 0.4.11 ESP8266 is built, attached and in the prod manifest (no
+  rollout key; the 0.3.x fleet cannot complete a manifest check, so it is unaffected); ESP32-S3
+  stays held, and the flasher keeps ESP8266 on its 0.3.3 parts until a post-canary flasher commit.
 - **Serial lines added or changed:**
 
 ```
