@@ -3,6 +3,7 @@
 #include <cstdio>
 #include <cstring>
 
+#include "flash_fmt.h"
 #include "sha256.h"
 
 namespace fry {
@@ -29,7 +30,7 @@ void computeMinerKey(const uint8_t mac6[3], const uint8_t salt[16], char* outKey
   char hex[33];
   bytesToHexUpper(digest, 16, hex, sizeof(hex));  // truncate to first 16 bytes = 32 hex chars
 
-  snprintf(outKey, outKeyLen, "FEM-%s", hex);
+  FRY_SNPRINTF(outKey, outKeyLen, "FEM-%s", hex);
 }
 
 bool isValidMinerKey(const char* key) {
@@ -62,7 +63,7 @@ bool migrateLegacyMinerKey(const char* in, char* out, size_t outLen) {
 }
 
 void formatDeviceName(const char* chipTag, const uint8_t mac6[3], char* outName, size_t outNameLen) {
-  snprintf(outName, outNameLen, "FRY-%s-%02X%02X%02X", chipTag, mac6[0], mac6[1], mac6[2]);
+  FRY_SNPRINTF(outName, outNameLen, "FRY-%s-%02X%02X%02X", chipTag, mac6[0], mac6[1], mac6[2]);
 }
 
 bool isValidDeviceName(const char* name) {

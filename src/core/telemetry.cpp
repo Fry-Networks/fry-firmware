@@ -9,6 +9,7 @@
 // family. Including the ESP32 spellings directly here is a hard build break on ESP8266 --
 // HTTPClient.h does not exist in that core at all.
 #include "config.h"
+#include "flash_print.h"
 #include "fry_config.h"
 #include "hardwareapi_client.h"
 #include "heap_gate.h"
@@ -79,7 +80,7 @@ void tick() {
   // posting before that is accepted but never persisted ("unknown_install").
   if (fry_config::getDeviceToken().length() == 0) {
     if (!s_loggedSkipNoToken) {
-      Serial.println("telemetry: not registered yet - skipping until registration succeeds");
+      FRY_PRINTLN("telemetry: not registered yet - skipping until registration succeeds");
       s_loggedSkipNoToken = true;
     }
     return;
@@ -89,7 +90,7 @@ void tick() {
   String auth = String(FRY_API_TOKEN);
   if (auth.length() == 0) {
     if (!s_loggedSkipNoAuth) {
-      Serial.println("telemetry: no FRY_API_TOKEN compiled in - skipping (a POST would only earn a 401)");
+      FRY_PRINTLN("telemetry: no FRY_API_TOKEN compiled in - skipping (a POST would only earn a 401)");
       s_loggedSkipNoAuth = true;
     }
     return;
@@ -106,7 +107,7 @@ void tick() {
   fry_identity::ensureMinerKey(minerKey, sizeof(minerKey));
   if (strlen(installId) == 0 || strlen(minerKey) == 0) {
     if (!s_loggedSkipIdentity) {
-      Serial.println("telemetry: install id or miner key is empty - skipping");
+      FRY_PRINTLN("telemetry: install id or miner key is empty - skipping");
       s_loggedSkipIdentity = true;
     }
     return;
@@ -116,7 +117,7 @@ void tick() {
   // The path parameter is the miner key. The server's fallback device lookup resolves that
   // hexId against minerKey/canonicalId, so sending the key (not the install id) is what makes
   // an unresolvable install still attributable.
-  String url = fry_config::getApiBase() + "/measurements/" + minerKey;
+  String url = fry_config::getApiBase() + FRY_TEXT("/measurements/") + minerKey;
 
   // TOTAL-FREE gate only. One attempt, no blocking wait: a bounded wait inside the loop has
   // previously starved it badly enough to trip the software watchdog.
@@ -143,7 +144,7 @@ void tick() {
   const uint32_t blkNow = static_cast<uint32_t>(fry::queryMaxFreeBlock());
   if (!fry::waitForHeapGate(HEAP_GATE_OTA, 0, 1)) {
     if (!s_loggedSkipHeap) {
-      Serial.printf("telemetry: heap gate not met - need free>=%u, have free=%u blk=%u\n",
+      FRY_PRINTF("telemetry: heap gate not met - need free>=%u, have free=%u blk=%u\n",
                     static_cast<unsigned>(HEAP_GATE_OTA),
                     static_cast<unsigned>(freeNow), static_cast<unsigned>(blkNow));
       s_loggedSkipHeap = true;
@@ -159,7 +160,7 @@ void tick() {
   char ts[32] = {0};
   if (!fry_hwapi::ensureNtpSynced() || !nowIso8601(ts, sizeof(ts))) {
     if (!s_loggedSkipClock) {
-      Serial.println("telemetry: clock not NTP-synced - skipping (a 1970 timestamp would mis-date the sample)");
+      FRY_PRINTLN("telemetry: clock not NTP-synced - skipping (a 1970 timestamp would mis-date the sample)");
       s_loggedSkipClock = true;
     }
     return;
@@ -180,7 +181,7 @@ void tick() {
   // fry_telemetry, so an unqualified call compiles only by ADL on the fry::TelemetrySample
   // argument -- it would break the moment the first parameter changed type.
   if (fry::buildTelemetryBody(sample, FRY_MINER_CODE, installId, ts, body, sizeof(body)) == 0) {
-    Serial.println("telemetry: body build failed - skipping");
+    FRY_PRINTLN("telemetry: body build failed - skipping");
     return;
   }
 
@@ -188,14 +189,14 @@ void tick() {
   HTTPClient http;
   int code = -1;
   if (fry_http::beginHttpsUrl(http, sec, url)) {
-    http.addHeader("Authorization", "Bearer " + auth);
-    http.addHeader("Content-Type", "application/json");
+    http.addHeader(FRY_TEXT("Authorization"), "Bearer " + auth);
+    http.addHeader(FRY_TEXT("Content-Type"), FRY_TEXT("application/json"));
     code = http.POST(body);
   }
   http.end();
 
   if (code > 0 && code < 300) {
-    Serial.printf("telemetry: posted http=%d heap=%u blk=%u rssi=%d\n", code,
+    FRY_PRINTF("telemetry: posted http=%d heap=%u blk=%u rssi=%d\n", code,
                   static_cast<unsigned>(sample.heapFree),
                   static_cast<unsigned>(sample.heapMaxBlock), static_cast<int>(sample.rssi));
     s_loggedFailure = false;
@@ -205,7 +206,7 @@ void tick() {
   // Log once per failure run, never per cycle: a server-side outage must not turn into a serial
   // flood, and there is no retry here — the next interval is the retry.
   if (!s_loggedFailure) {
-    Serial.printf("telemetry: post failed http=%d (will retry at the next interval)\n", code);
+    FRY_PRINTF("telemetry: post failed http=%d (will retry at the next interval)\n", code);
     s_loggedFailure = true;
   }
 }

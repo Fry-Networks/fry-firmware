@@ -3,6 +3,7 @@
 #include <cstring>
 
 #include "fry_config.h"
+#include "flash_print.h"
 #include "miner_identity.h"
 #include "sha256.h"
 
@@ -101,7 +102,7 @@ void ensureMinerKey(char* outKey, size_t outKeyLen) {
     if (outKey && outKeyLen) outKey[0] = 0;
     if (!s_waitLogged) {
       s_waitLogged = true;
-      Serial.println("[identity] no miner key - waiting for the owner's FEM- key (web setup page over "
+      FRY_PRINTLN("[identity] no miner key - waiting for the owner's FEM- key (web setup page over "
                      "USB, app >= 0.4, or the setup AP)");
     }
     return;
@@ -125,14 +126,14 @@ void ensureMinerKey(char* outKey, size_t outKeyLen) {
       char readBack[40] = {0};
       if (fry_config::getMinerKey(readBack, sizeof(readBack)) && strcmp(readBack, migrated) == 0) {
         copyKey(outKey, outKeyLen, migrated);
-        Serial.println("[identity] migrated legacy key prefix IOT- -> FEM- (hex preserved)");
+        FRY_PRINTLN("[identity] migrated legacy key prefix IOT- -> FEM- (hex preserved)");
         return;
       }
     }
     // The store would not take it. Run this boot on the migrated key anyway so nothing downstream
     // sees the legacy prefix; the write is attempted again on the next boot.
     copyKey(outKey, outKeyLen, migrated);
-    Serial.println("[identity] legacy key migration could not be persisted - using the migrated "
+    FRY_PRINTLN("[identity] legacy key migration could not be persisted - using the migrated "
                    "key for this boot, retrying on the next one");
     return;
   }
@@ -140,7 +141,7 @@ void ensureMinerKey(char* outKey, size_t outKeyLen) {
   // Mint (DEVICE_KEEPS builds only) and Recover (any build, salt present) share the derivation;
   // Recover never generates a salt, so it can only ever reproduce the key this board minted.
   if (action == fry::BootKeyAction::Recover) {
-    Serial.println("[identity] miner key missing - re-deriving it from the stored salt "
+    FRY_PRINTLN("[identity] miner key missing - re-deriving it from the stored salt "
                    "(recovery, not a new key)");
   }
   uint8_t mac6[3];
@@ -173,7 +174,7 @@ fry::KeyWriteVerdict setOwnerKey(const char* key, fry::KeyTransport transport, b
     const char* why = verdict == fry::KeyWriteVerdict::BadKey          ? "bad_key"
                       : verdict == fry::KeyWriteVerdict::NeedsSecureAp ? "key_needs_secure_ap"
                                                                        : "key_locked";
-    Serial.printf("[identity] owner key refused via %s: %s\n", transportName(transport), why);
+    FRY_PRINTF("[identity] owner key refused via %s: %s\n", transportName(transport), why);
     return verdict;
   }
   if (same) return verdict;  // already the stored key: nothing to write, nothing to reset
@@ -187,7 +188,7 @@ fry::KeyWriteVerdict setOwnerKey(const char* key, fry::KeyTransport transport, b
     stored_ok = fry_config::getMinerKey(readBack, sizeof(readBack)) && strcmp(readBack, key) == 0;
   }
   if (!stored_ok) {
-    Serial.printf("[identity] owner key via %s could not be persisted\n", transportName(transport));
+    FRY_PRINTF("[identity] owner key via %s could not be persisted\n", transportName(transport));
     return fry::KeyWriteVerdict::StoreFailed;
   }
   // A different key is a different installation: the old install id, device token and WireGuard
@@ -198,7 +199,7 @@ fry::KeyWriteVerdict setOwnerKey(const char* key, fry::KeyTransport transport, b
   fry_config::setKeySrc("user");
   fry_config::setKeyOk(false);
   if (changed) *changed = true;
-  Serial.printf("[identity] owner key stored via %s (%s)\n", transportName(transport), masked);
+  FRY_PRINTF("[identity] owner key stored via %s (%s)\n", transportName(transport), masked);
   return verdict;
 }
 

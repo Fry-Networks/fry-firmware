@@ -9,6 +9,7 @@
 #include <ESP8266WiFi.h>
 
 #include "../core/fry_config.h"
+#include "../core/flash_print.h"
 #include "socks5_parse.h"
 
 namespace fry_vpn {
@@ -82,7 +83,7 @@ void init() {
   uint16_t port = static_cast<uint16_t>(fry_config::getSocksPort());
   s_server = new WiFiServer(port);
   s_server->begin();
-  Serial.printf("socks5: listening :%u\n", port);
+  FRY_PRINTF("socks5: listening :%u\n", port);
 }
 
 void tick() {

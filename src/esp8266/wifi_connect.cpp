@@ -2,6 +2,7 @@
 // wifi_manager.cpp: softAP teardown before STA, forced 802.11g PHY, event-aware connect wait
 // with a DHCP-completion extension, disconnect-reason decoding, and a reconnect watchdog.
 #include "../core/wifi_station.h"
+#include "../core/flash_print.h"
 #include "wifi_reason.h"
 
 #include <ESP8266WiFi.h>
@@ -53,7 +54,7 @@ bool connect(const char* ssid, const char* pass, uint32_t timeoutMs, fry::ProvEr
   while (millis() - start < budget) {
     if (WiFi.status() == WL_CONNECTED) {
       s_everConnected = true;
-      Serial.printf("wifi connected ip=%s rssi=%d\n", WiFi.localIP().toString().c_str(), WiFi.RSSI());
+      FRY_PRINTF("wifi connected ip=%s rssi=%d\n", WiFi.localIP().toString().c_str(), WiFi.RSSI());
       return true;
     }
     // L2 association succeeded but no lease yet — extend the window instead of declaring
@@ -61,7 +62,7 @@ bool connect(const char* ssid, const char* pass, uint32_t timeoutMs, fry::ProvEr
     if (s_l2Associated && !extended) {
       extended = true;
       budget += 45000;
-      Serial.println("wifi: associated - extending wait for DHCP");
+      FRY_PRINTLN("wifi: associated - extending wait for DHCP");
     }
     delay(250);
   }
@@ -76,7 +77,7 @@ bool connect(const char* ssid, const char* pass, uint32_t timeoutMs, fry::ProvEr
   }
   // WIFI_REASON_* (e.g. 2 AUTH_EXPIRE, 15 4WAY_HANDSHAKE_TIMEOUT, 201 NO_AP_FOUND, 202
   // AUTH_FAIL) is logged verbatim for diagnosis.
-  Serial.printf("wifi connect failed reason=%u associated=%d\n", s_lastDiscReason, (int)s_l2Associated);
+  FRY_PRINTF("wifi connect failed reason=%u associated=%d\n", s_lastDiscReason, (int)s_l2Associated);
   return false;
 }
 
@@ -98,7 +99,7 @@ void maintain() {
   if (!s_everConnected) return;  // never connected yet — the boot sequence owns the first attempt
   if (!s_lost) {
     s_lost = now;
-    Serial.println("wifi: link DOWN - recovering");
+    FRY_PRINTLN("wifi: link DOWN - recovering");
   }
   if (now - s_lost > 20000) {
     WiFi.reconnect();
