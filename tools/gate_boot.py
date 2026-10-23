@@ -1,10 +1,15 @@
 # Boot gate: reset the board and assert the boot banner appears with a masked/NONE/PENDING miner key
 # and no crash marker within the window.
-#   py -3 tools/gate_boot.py [--port COMx] [--seconds 20] [--out FILE]
-# Exit 0 = PASS, 1 = FAIL.
+#   py -3 tools/gate_boot.py [--port COMx] [--seconds 20] [--out FILE] [--raw-to FILE]
+#
+# --out receives the REDACTED stream (tools/redact.py), so it is safe to keep and paste.
+# --raw-to additionally writes the unredacted stream, and is refused unless it resolves inside
+#   <run>/secret (--run-dir, or $RUN). See redact.resolve_raw_path.
+# Exit 0 = PASS, 1 = FAIL, 2 = usage.
 import sys, os, re, time, argparse
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import _serialutil as su
+import redact
 
 BANNER_RE = re.compile(r"FRY boot v\S+ chip=\S+ mac=[0-9A-Fa-f:]+ minerkey=(\S+)")
 # Accepted banner forms: masked key (prefix + U+2026 + last 4), NONE, or FEM-PENDING.
@@ -27,10 +32,24 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", default=None)
     ap.add_argument("--seconds", type=int, default=20)
-    ap.add_argument("--out", default=None)
+    ap.add_argument("--out", default=None, help="redacted capture (safe to keep)")
+    ap.add_argument("--raw-to", default=None,
+                    help="also write the UNREDACTED stream; only inside <run>/secret")
+    ap.add_argument("--run-dir", default=None,
+                    help="oneshot RUN directory that --raw-to must stay inside (default: $RUN)")
     a = ap.parse_args()
 
     out_fh = open(a.out, "w", encoding="utf-8") if a.out else None
+    raw_fh = None
+    if a.raw_to:
+        try:
+            raw_path = redact.resolve_raw_path(a.raw_to, a.run_dir)
+        except redact.RawPathRefused as e:
+            # Refusal is the safety property; never echo the path back into a log.
+            sys.stderr.write("[gate_boot] REFUSED --raw-to: %s\n" % e)
+            sys.exit(2)
+        raw_fh = open(raw_path, "w", encoding="utf-8")
+    redactor = redact.Redactor()
     ser = su.open_with_retry(a.port, 115200, do_reset=True)
     start = time.time()
     buf = b""
@@ -46,17 +65,21 @@ def main():
                 raw, buf = buf.split(b"\n", 1)
                 ms = int((time.time() - start) * 1000)
                 text = raw.decode("utf-8", "replace").rstrip("\r")
+                # Every byte that reaches disk is filtered first; the checks below run on the raw
+                # in-memory line because the gate must see the real banner form.
+                safe = redactor.line(text)
                 if out_fh:
-                    out_fh.write("[%7dms] %s\n" % (ms, text)); out_fh.flush()
+                    out_fh.write("[%7dms] %s\n" % (ms, safe)); out_fh.flush()
+                if raw_fh:
+                    raw_fh.write("[%7dms] %s\n" % (ms, text)); raw_fh.flush()
                 if any(m in text for m in CRASH_MARKERS):
-                    print("[gate_boot] FAIL crash marker: %s" % text, flush=True)
+                    print("[gate_boot] FAIL crash marker: %s" % safe, flush=True)
                     sys.exit(1)
                 m = BANNER_RE.search(text)
                 if m:
                     banner_ok = True
                     miner_key = m.group(1)
-                    shown = text if check_minerkey(miner_key) is None else text.replace(miner_key, "<redacted len=%d>" % len(miner_key))
-                    print("[gate_boot] banner: %s" % shown, flush=True)
+                    print("[gate_boot] banner: %s" % safe, flush=True)
 
         if not banner_ok:
             print("[gate_boot] FAIL: no boot banner in %ds" % a.seconds, flush=True)
@@ -71,6 +94,8 @@ def main():
         ser.close()
         if out_fh:
             out_fh.close()
+        if raw_fh:
+            raw_fh.close()
 
 
 if __name__ == "__main__":
