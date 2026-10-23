@@ -3,9 +3,12 @@
 #include <ArduinoJson.h>
 #if defined(ARDUINO_ARCH_ESP8266)
 #include <Updater.h>  // ESP8266 core header is named Updater.h, not Update.h
+#include <eboot_command.h>  // eboot_command_clear()
 
 #include <memory>
 #include <new>
+
+#include "ota_stage_guard.h"
 #else
 #include <Update.h>
 #endif
@@ -404,6 +407,8 @@ FRY_OTA_ESP8266_NOINLINE bool downloadAndApply(const String& url, const String& 
 
 #if defined(ARDUINO_ARCH_ESP8266)
   fry::Sha256& sha = work->sha;
+  // The Updater has no abort() and end(false) STAGES a complete stream, so the last byte stays out of it until the digest matched.
+  fry::HeldTailWriter<UpdaterClass> upd(Update, static_cast<size_t>(len));
 #else
   fry::Sha256 sha;
 #endif
@@ -415,7 +420,7 @@ FRY_OTA_ESP8266_NOINLINE bool downloadAndApply(const String& url, const String& 
   std::unique_ptr<uint8_t[]> bufHeap(new (std::nothrow) uint8_t[kBufBytes]);
   if (!bufHeap) {
     FRY_PRINTLN("ota: no memory for the download buffer");
-    Update.end(false);
+    upd.discard();
     http.end();
     return false;
   }
@@ -432,10 +437,14 @@ FRY_OTA_ESP8266_NOINLINE bool downloadAndApply(const String& url, const String& 
       int r = stream->readBytes(buf, avail > kBufBytes ? kBufBytes : avail);
       if (r <= 0) break;
       sha.update(buf, r);
+#if defined(ARDUINO_ARCH_ESP8266)
+      if (!upd.write(buf, r)) {
+#else
       if (Update.write(buf, r) != static_cast<size_t>(r)) {
+#endif
         FRY_PRINTLN("ota: write failed");
 #if defined(ARDUINO_ARCH_ESP8266)
-        Update.end(false);
+        upd.discard();
 #else
         Update.abort();
 #endif
@@ -463,7 +472,7 @@ FRY_OTA_ESP8266_NOINLINE bool downloadAndApply(const String& url, const String& 
   if (done != static_cast<size_t>(len)) {
     FRY_PRINTF("ota: incomplete download %u/%d\n", static_cast<unsigned>(done), len);
 #if defined(ARDUINO_ARCH_ESP8266)
-    Update.end(false);
+    upd.discard();
 #else
     Update.abort();
 #endif
@@ -486,14 +495,21 @@ FRY_OTA_ESP8266_NOINLINE bool downloadAndApply(const String& url, const String& 
   if (got != want) {
     FRY_PRINTF("ota: sha256 mismatch (got %.16s want %.16s) - rejected\n", got.c_str(), want.c_str());
 #if defined(ARDUINO_ARCH_ESP8266)
-    Update.end(false);
+    // The last byte is still held, so this drops an unfinished update and nothing is staged (lib/fry_core/ota_stage_guard.h). Clearing the
+    // eboot command as well is what eboot does itself after it has run one: a command left in RTC memory by anything else cannot boot this image.
+    upd.discard();
+    eboot_command_clear();
 #else
     Update.abort();
 #endif
     return false;
   }
 
+#if defined(ARDUINO_ARCH_ESP8266)
+  if (!upd.commit()) {
+#else
   if (!Update.end(true)) {
+#endif
     FRY_PRINTLN("ota: Update.end failed");
     return false;
   }
