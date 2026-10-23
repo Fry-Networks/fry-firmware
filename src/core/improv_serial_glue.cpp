@@ -14,6 +14,7 @@
 #endif
 
 #include "fry_config.h"
+#include "heap_gate.h"
 #include "improv_scan.h"
 #include "improv_serial.h"
 #include "key_policy.h"
@@ -55,6 +56,20 @@ const unsigned long kKeyRestartIdleMs = 3000;
 bool s_scanRunning = false;
 #if defined(ARDUINO_ARCH_ESP8266)
 WiFiMode_t s_scanPrevMode = WIFI_OFF;  // restored when the scan ends
+#endif
+// A board that joined its network answers a scan at most every kRunningScanMinIntervalMs, so the
+// window starts when a running-phase scan started; a refused request does not move it.
+unsigned long s_lastRunningScanMs = 0;
+bool s_haveLastRunningScan = false;
+bool s_scanOnRunningBoard = false;  // the scan in flight was admitted on a joined running board
+
+// Smallest contiguous free block a running board may scan with. Only the ESP8266 has one: its
+// scan took ~146 bytes of the largest block per network, while the ESP32 family showed no drop (see
+// kRunningScanMinBlockEsp8266).
+#if defined(ARDUINO_ARCH_ESP8266)
+const uint32_t kScanMinBlock = fry::improv::kRunningScanMinBlockEsp8266;
+#else
+const uint32_t kScanMinBlock = 0;
 #endif
 
 void writePacket(size_t n) {
@@ -143,23 +158,40 @@ void handleGetStatus() {
   writePacket(fry::improv::encodeFryStatus(status, s_out, sizeof(s_out)));
 }
 
-void handleScanRequest() {
-  if (s_scanRunning) return;  // the running scan will answer; a second request adds nothing
+#if defined(ARDUINO_ARCH_ESP8266)
+// Back to what it was, unless a join began meanwhile and has taken the mode over.
+void restoreScanMode() {
+  if (!s_awaitingWifi && WiFi.getMode() != s_scanPrevMode) WiFi.mode(s_scanPrevMode);
+}
+#endif
+
+// True when a scan started and will be answered by pollScan().
+bool handleScanRequest() {
+  if (s_scanRunning) return false;  // the running scan will answer; a second request adds nothing
 #if defined(ARDUINO_ARCH_ESP8266)
   // The provisioning transport on this chip is a softAP and the captive portal may be in use, so
   // the AP is never dropped: AP_STA keeps it up while the station side scans. A join in flight owns
   // the radio, so it gets the empty result that ends a scan.
   if (s_awaitingWifi) {
     sendResult(Command::RequestScannedWifi, nullptr, 0);
-    return;
+    return false;
   }
   s_scanPrevMode = WiFi.getMode();
   WiFi.mode(static_cast<WiFiMode_t>(s_scanPrevMode | WIFI_STA));
 #else
   WiFi.mode(WIFI_STA);
 #endif
-  WiFi.scanNetworks(true /* async */, true /* show hidden */);
+  // A start that failed (the radio is busy joining, say) is an error, never an empty list.
+  if (fry::improv::classifyScanStart(WiFi.scanNetworks(true /* async */, true /* show hidden */)) ==
+      fry::improv::ScanStart::Failed) {
+#if defined(ARDUINO_ARCH_ESP8266)
+    restoreScanMode();
+#endif
+    sendError(Error::Unknown);
+    return false;
+  }
   s_scanRunning = true;
+  return true;
 }
 
 // An async scan is answered over later polls, so the loop is never blocked for the seconds a
@@ -167,8 +199,17 @@ void handleScanRequest() {
 void pollScan() {
   if (!s_scanRunning) return;
   const int n = WiFi.scanComplete();
-  if (n == WIFI_SCAN_RUNNING) return;
+  const fry::improv::ScanPoll state = fry::improv::classifyScanPoll(n, s_scanOnRunningBoard);
+  if (state == fry::improv::ScanPoll::Wait) return;
   s_scanRunning = false;
+  if (state == fry::improv::ScanPoll::Failed) {
+    WiFi.scanDelete();
+#if defined(ARDUINO_ARCH_ESP8266)
+    restoreScanMode();
+#endif
+    sendError(Error::Unknown);
+    return;
+  }
 #if defined(ARDUINO_ARCH_ESP8266)
   // Reduced to one row per SSID, hidden dropped, bounded, strongest first (lib/fry_core/improv_scan).
   // static: ~1 KB would sit on the 4 KB ESP8266 cont stack. Reset, so a rescan starts empty.
@@ -186,8 +227,7 @@ void pollScan() {
   }
   sendResult(Command::RequestScannedWifi, nullptr, 0);
   WiFi.scanDelete();
-  // Back to what it was, unless a join began meanwhile and has taken the mode over.
-  if (!s_awaitingWifi && WiFi.getMode() != s_scanPrevMode) WiFi.mode(s_scanPrevMode);
+  restoreScanMode();
 #else
   if (n > 0) {
     for (int i = 0; i < n; i++) {
@@ -251,11 +291,20 @@ void dispatch(bool transportRunning) {
       sendDeviceInfo();
       break;
     case Command::RequestScannedWifi:
-      if (!transportRunning) {
-        sendError(Error::NotAuthorized);  // a scan would disturb the joined station
+      // A board that joined its network is scanned only when that cannot disturb the station.
+      if (fry::improv::admitScan(transportRunning, fry_wifi::isConnected(), s_haveLastRunningScan,
+                                 millis(), s_lastRunningScanMs, fry::queryMaxFreeBlock(),
+                                 kScanMinBlock) == fry::improv::ScanAdmit::Refuse) {
+        sendError(Error::NotAuthorized);
         break;
       }
-      handleScanRequest();
+      if (handleScanRequest()) {
+        s_scanOnRunningBoard = !transportRunning;
+        if (!transportRunning) {
+          s_lastRunningScanMs = millis();
+          s_haveLastRunningScan = true;
+        }
+      }
       break;
     case Command::FrySetMinerKey:
       handleSetMinerKey();

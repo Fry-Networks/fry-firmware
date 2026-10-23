@@ -36,5 +36,23 @@ void formatRssi(int rssi, char* out, size_t outLen) { snprintf(out, outLen, "%d"
 
 const char* authCell(bool secure) { return secure ? "YES" : "NO"; }
 
+ScanAdmit admitScan(bool transportRunning, bool staConnected, bool haveLast, unsigned long nowMs,
+                    unsigned long lastScanMs, uint32_t maxFreeBlock, uint32_t minBlock) {
+  if (transportRunning) return ScanAdmit::Run;
+  if (!staConnected) return ScanAdmit::Refuse;
+  if (haveLast && nowMs - lastScanMs < kRunningScanMinIntervalMs) return ScanAdmit::Refuse;
+  return maxFreeBlock >= minBlock ? ScanAdmit::Run : ScanAdmit::Refuse;
+}
+
+ScanStart classifyScanStart(int rc) {
+  return rc == kScanFailed ? ScanStart::Failed : ScanStart::Started;
+}
+
+ScanPoll classifyScanPoll(int n, bool runningBoard) {
+  if (n == kScanRunning) return ScanPoll::Wait;
+  if (n == kScanFailed) return ScanPoll::Failed;
+  return (n == 0 && runningBoard) ? ScanPoll::Failed : ScanPoll::Done;
+}
+
 }  // namespace improv
 }  // namespace fry

@@ -39,7 +39,8 @@ enum class Error : uint8_t {
   InvalidRpc = 0x01,
   UnknownCommand = 0x02,
   UnableToConnect = 0x03,
-  NotAuthorized = 0x04,  // command not available in this phase (e.g. Wi-Fi settings once Ready)
+  NotAuthorized = 0x04,  // command not available right now (e.g. a scan on a running board that
+                         // is not joined, was scanned within 30 s, or is short of heap)
   Unknown = 0xFF,
 };
 
