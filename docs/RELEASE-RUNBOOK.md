@@ -33,8 +33,12 @@ latest_manifest_location() { curl -sI "$LATEST_URL" | grep -i '^location:' | hea
    release with `firmware-esp32.bin`, `firmware-esp32c3.bin`, `firmware-esp8266.bin`, the two
    `-factory.bin` images and `manifest.json` (`builds` = esp32, esp32c3, esp8266; `channel: prod`;
    no rollout key). esp8266 is in the manifest from 0.4.11 because the workflow passes
-   `--include-env esp8266`; the 0.3.x fleet cannot complete a manifest check, so it is unaffected.
-   A draft never resolves at `releases/latest`, so nothing has shipped yet. ESP32-S3 is held: not
+   `--include-env esp8266`. The 0.3.1/0.3.3 selection code DOES select that entry
+   (`test_legacy_manifest_select` fails when fed this manifest through `FRY_A2_MANIFEST`), so nothing
+   in the repo bounds the 0.3.x ESP8266 fleet. What bounds it is an operator-run hardware gate (esp6
+   gate a, 2026-10-22): the 0.3.3 boards completed 0 of 6 manifest checks (boot checks skip at blk
+   32880 < 36864; scheduled checks crash or end HTTP -5). A 0.3.x board that ever completes a check
+   would take the update. A draft never resolves at `releases/latest`, so nothing has shipped yet. ESP32-S3 is held: not
    built, not attached, not in the manifest (`tools/ota_channels.json`).
 3. **Canary.** From the tag (`--ref` takes a branch or tag, not a SHA; the dispatch only works once
    test-channel.yml is on the default branch): `gh workflow run test-channel.yml --repo $REPO --ref fw-vX.Y.Z -f fault=0`

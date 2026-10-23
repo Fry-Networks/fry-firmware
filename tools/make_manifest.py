@@ -39,6 +39,7 @@ copied to --dist for manual flashing. --no-exclusions keeps every env (e.g. for 
 docs/flash/fw/manifest.json, which is a download list, not an OTA source).
 --include-env ENV (repeatable) overrides the exclusion for that env only, for one run: a release that
 decides a held chip now ships passes it on its command line instead of editing the committed config.
+It must name an env the channel excludes (anything else is refused, so a typo is not a silent no-op).
 """
 import argparse
 import hashlib
@@ -428,6 +429,14 @@ def main():
         if env not in envs:
             raise SystemExit("make_manifest: --include-env %s is not among the built envs (%s)"
                              % (env, ",".join(envs)))
+    if a.include_env:
+        if a.no_exclusions:
+            raise SystemExit("make_manifest: --include-env has no effect with --no-exclusions (nothing is excluded)")
+        excluded_now, _ = load_exclusions(a.channels_config, a.channel)
+        for env in a.include_env:
+            if env not in excluded_now:
+                raise SystemExit("make_manifest: --include-env %s: channel %s does not exclude it "
+                                 "(excluded: %s)" % (env, a.channel, ",".join(excluded_now) or "none"))
     if a.ewt_merge and not a.ewt_out:
         raise SystemExit("make_manifest: --ewt-merge needs --ewt-out")
 

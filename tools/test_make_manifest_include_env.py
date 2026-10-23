@@ -11,9 +11,11 @@
 #   (b) with it the manifest differs from (a) ONLY by builds.esp8266 {url, sha256}; esp32/esp32c3
 #       entries byte-identical; no "rollout" key anywhere (neither top-level nor per build)
 #   (c) esp32s3 stays excluded when only esp8266 is included
-#   (d) bad input is refused by the tool itself (non-zero exit, no manifest written)
+#   (d) bad input is refused by the tool itself (non-zero exit, no manifest written), including an
+#       env the channel does not exclude (a typo would otherwise be a silent no-op) and --no-exclusions
 #   (e) the shipped client's selection (ota_client.cpp: builds[env].url|sha256) finds esp8266
-#   (f) release-fw.yml passes the flag as a committed literal and keeps the exclusion-aware assertion
+#   (f) release-fw.yml passes the flag as a committed literal, and its manifest assertion (the python
+#       heredoc, extracted and EXECUTED here) passes the good manifest and fails each bad one
 import json
 import os
 import re
@@ -21,6 +23,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import textwrap
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -61,6 +64,34 @@ def run(tmp, tag, *extra):
 
 def refused(rc, log, raw):
     return rc != 0 and raw is None and "unrecognized arguments" not in log and "include-env" in log
+
+
+def workflow_assertion(wf):
+    """The python heredoc of release-fw.yml's manifest step (the one that reads ota/manifest.json),
+    dedented, or None."""
+    lines = wf.split("\n")
+    for i, line in enumerate(lines):
+        if line.strip() == "python3 - <<'EOF'":
+            j = i + 1
+            while j < len(lines) and lines[j].strip() != "EOF":
+                j += 1
+            body = textwrap.dedent("\n".join(lines[i + 1:j]))
+            if 'open("ota/manifest.json")' in body:
+                return body
+    return None
+
+
+def run_assertion(script, manifest, tmp, tag):
+    """Runs the workflow's assertion in a scratch tree holding ota/manifest.json and the committed
+    tools/ota_channels.json, exactly as the release job's working directory does. Returns rc, output."""
+    root = os.path.join(tmp, "assert-" + tag)
+    os.makedirs(os.path.join(root, "ota"))
+    os.makedirs(os.path.join(root, "tools"))
+    shutil.copy(os.path.join(HERE, "ota_channels.json"), os.path.join(root, "tools", "ota_channels.json"))
+    with open(os.path.join(root, "ota", "manifest.json"), "w", encoding="utf-8") as f:
+        json.dump(manifest, f)
+    proc = subprocess.run([sys.executable, "-I", "-c", script], cwd=root, capture_output=True, text=True)
+    return proc.returncode, proc.stdout + proc.stderr
 
 
 def client_select(manifest, own_env):
@@ -128,9 +159,14 @@ def main():
                             ("empty value", ["--envs", "esp32,esp8266", "--include-env", ""])):
             rc, log, raw = run(tmp, "bad", *args)
             check("%s -> refused, no manifest" % label, refused(rc, log, raw), (rc, log))
+        rc, log, raw = run(tmp, "bad", "--envs", "esp32,esp8266", "--include-env", "esp32")
+        check("an env the channel does not exclude -> refused, no manifest", refused(rc, log, raw), (rc, log))
+        rc, log, raw = run(tmp, "bad", "--envs", "esp32,esp8266", "--include-env", "esp8266", "--no-exclusions")
+        check("--include-env with --no-exclusions -> refused, no manifest", refused(rc, log, raw), (rc, log))
         rc, log, raw = run(tmp, "bad", "--envs", "esp32,esp8266", "--include-env", "esp8266", "--include-env", "esp8266")
         check("repeating the same env is harmless", rc == 0 and "esp8266" in json.loads(raw).get("builds", {}), log)
 
+        good, nofl = inc, base
         print("(e) the shipped client's selection:")
         check("esp8266 picks its own build",
               bool(ib.get("esp8266")) and client_select(inc, "esp8266") == (ib["esp8266"]["url"], ib["esp8266"]["sha256"]))
@@ -148,8 +184,36 @@ def main():
     check("no repo variable or rollout flag feeds the manifest",
           "vars." not in wf and "--rollout" not in wf and "--env-rollout" not in wf)
     check("the assertion keeps the exclusion-aware literal", '{"esp32", "esp32c3", "esp8266"} - excluded' in wf)
-    check("the assertion requires url + sha256 for esp8266 and no rollout key",
-          'assert "esp8266" in m["builds"]' in wf and "rollout" in wf)
+    script = workflow_assertion(wf)
+    check("the manifest assertion heredoc is found in the workflow", script is not None)
+    if script is not None and good:
+        tmp2 = tempfile.mkdtemp(prefix="mm-assert-")
+        try:
+            rc, out = run_assertion(script, good, tmp2, "good")
+            check("assertion passes the good manifest (esp8266 included, no rollout)", rc == 0, out)
+
+            def mutated(fn):
+                m = json.loads(json.dumps(good))
+                fn(m)
+                return m
+
+            bad = (
+                ("no esp8266 entry (the flag removed)", nofl),
+                ("a per-build rollout key", mutated(lambda m: m["builds"]["esp8266"].update(
+                    rollout={"bucket_lo": 0, "bucket_hi": 9}))),
+                ("a per-build rollout key on esp32", mutated(lambda m: m["builds"]["esp32"].update(
+                    rollout={"bucket_lo": 0, "bucket_hi": 9}))),
+                ("a top-level rollout key", mutated(lambda m: m.update(rollout={"bucket_lo": 0, "bucket_hi": 9}))),
+                ("esp32s3 present", mutated(lambda m: m["builds"].update(esp32s3=dict(m["builds"]["esp32"])))),
+                ("a short sha256", mutated(lambda m: m["builds"]["esp8266"].update(sha256="ab"))),
+                ("an empty url", mutated(lambda m: m["builds"]["esp8266"].update(url=""))),
+                ("channel test", mutated(lambda m: m.update(channel="test"))),
+            )
+            for n, (label, m) in enumerate(bad):
+                rc, out = run_assertion(script, m, tmp2, "bad%d" % n)
+                check("assertion fails: %s" % label, rc != 0 and "AssertionError" in out, (rc, out))
+        finally:
+            shutil.rmtree(tmp2, ignore_errors=True)
     check("the new test runs in the release tooling tests", "tools/test_make_manifest_include_env.py" in wf)
 
     print("%d passed, %d failed" % (passed, failed))
