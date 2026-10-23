@@ -11,9 +11,10 @@
 // chip and for the MFLN-probe path.
 //
 // The image download (Big 16384/512, no smaller buffer can carry its 16400 B records) is derived the same way from the
-// whole-stream sweeps dl-30 .. dl-32b2 (worst session use at the stream gate 25560 + the stream gate 5376; PASS 3/3 at every
-// largest-block target from 31000 down to 26000): begin-time floors 35032 free / 30096 block, i.e. 41752 / 36816 in the
-// pre-constructor units (sweep C, GET only, had given 32704 / 32088, i.e. 39424 / 38808). The post-connect gate of
+// whole-stream sweeps dl-30 .. dl-32b2 (worst PASS peak use of free, 32400 held - 936 min_free = 31464; PASS 3/3 at every
+// largest-block target from 31000 down to 26000): begin-time floors 35560 free / 30096 block, i.e. 42280 / 36816 in the
+// pre-constructor units (sweep C, GET only, had given 32704 / 32088, i.e. 39424 / 38808; the first whole-stream floor, the worst
+// gate-time use 25560 + the stream gate 5376, had given 35032 free, i.e. 41752). The post-connect gate of
 // downloadAndApply() used to demand 20000 free and a
 // 36864 B contiguous block AFTER BearSSL had allocated its 16 KB buffer: it could not pass on this chip; it now asks only
 // for what streaming still allocates (kStreamGateFree).
@@ -83,15 +84,15 @@ void test_the_gate_is_a_function_of_the_measurement_not_of_the_old_constant() {
 
 void test_the_download_gate_is_derived_the_same_way_from_the_16384_sweep() {
   TEST_ASSERT_EQUAL_UINT32(26000, budget::kDownloadNeedBlk);   // whole-stream sweep dl-32b2: PASS 3/3 at every target down to it
-  TEST_ASSERT_EQUAL_UINT32(30936, budget::kDownloadNeedFree);  // worst session use at the stream gate 25560 + 5376
+  TEST_ASSERT_EQUAL_UINT32(31464, budget::kDownloadNeedFree);  // worst PASS peak use of free: dl-32b2 attempt 3, 32400 held - 936 min_free
   TEST_ASSERT_EQUAL_UINT32(25000, budget::kDownloadFailBlk);   // 2/3
   TEST_ASSERT_EQUAL_UINT32(26000 + 4096 + 6208 + 512, budget::kDownloadGateBlock);
   TEST_ASSERT_EQUAL_UINT32(36816, budget::kDownloadGateBlock);
-  TEST_ASSERT_EQUAL_UINT32(30936 + 4096 + 6208 + 512, budget::kDownloadGateFree);
-  TEST_ASSERT_EQUAL_UINT32(41752, budget::kDownloadGateFree);
+  TEST_ASSERT_EQUAL_UINT32(31464 + 4096 + 6208 + 512, budget::kDownloadGateFree);
+  TEST_ASSERT_EQUAL_UINT32(42280, budget::kDownloadGateFree);
   const fry::TlsFloors f = fry::tlsFloorsAtBegin(budget::kDownloadGateFree, budget::kDownloadGateBlock, false);
   TEST_ASSERT_EQUAL_UINT32(26000 + 4096, f.block);      // 30096
-  TEST_ASSERT_EQUAL_UINT32(30936 + 4096, f.freeTotal);  // 35032
+  TEST_ASSERT_EQUAL_UINT32(31464 + 4096, f.freeTotal);  // 35560
 }
 
 void test_the_big_session_is_refused_in_the_crash_band_and_just_above_it() {
@@ -104,7 +105,7 @@ void test_the_big_session_is_refused_in_the_crash_band_and_just_above_it() {
     TEST_ASSERT_EQUAL_INT_MESSAGE(static_cast<int>(fry::TlsSizing::Refuse), static_cast<int>(p.sizing),
                                   "a Big session below need + margin must be refused, never 512/512");
   }
-  const fry::TlsPlan ok = fry::planTls({35032, 30096}, f.freeTotal, f.block, false);
+  const fry::TlsPlan ok = fry::planTls({35560, 30096}, f.freeTotal, f.block, false);
   TEST_ASSERT_EQUAL_INT(static_cast<int>(fry::TlsSizing::Big), static_cast<int>(ok.sizing));
 }
 
@@ -177,7 +178,7 @@ void test_only_env_esp8266_carries_the_new_gate_numbers() {
   const std::string blk = "-DHEAP_GATE_OTA_MANIFEST_BLOCK=29808";
   const std::string fre = "-DHEAP_GATE_OTA_MANIFEST=29976";
   const std::string dlb = "-DHEAP_GATE_OTA_DOWNLOAD_BLOCK=36816";
-  const std::string dlf = "-DHEAP_GATE_OTA_DOWNLOAD=41752";
+  const std::string dlf = "-DHEAP_GATE_OTA_DOWNLOAD=42280";
   const std::string stf = "-DHEAP_GATE_OTA_STREAM=5376";
   TEST_ASSERT_EQUAL_INT_MESSAGE(1, countOf(ini, blk), "the block gate is set once in the whole file");
   TEST_ASSERT_EQUAL_INT_MESSAGE(1, countOf(ini, fre), "the free gate is set once in the whole file");

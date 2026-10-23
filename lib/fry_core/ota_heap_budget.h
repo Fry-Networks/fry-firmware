@@ -69,7 +69,10 @@ constexpr uint32_t kManifestGateFree = kManifestNeedFree + kMarginBytes + kCtorB
 // The whole-stream sweeps dl-30 .. dl-32b2 (lo/c1-sw7 .. c1-sw11-all.lines.txt; c1/reports/dl32ab2-floors.md) held what the download
 // begins with ("post-ctor", the same point) and streamed the full image to the sha256 check:
 //   free: 18 stream-gate FAILs over dl-30, dl-31 and dl-32a2 show the session's use at the gate (held free - the last gate sample) as
-//         25120 x10, 25144 x4, 25560 x4. The gate needs kStreamGateFree on top of the worst of them.
+//         25120 x10, 25144 x4, 25560 x4. The gate needs kStreamGateFree on top of the worst of them (30936, the first reading of the need).
+//         The PASSes show what a whole stream really took: dl-32a2 and dl-32b2 logged min_free (the lowest free of the stream) on every
+//         RESULT line, 61 PASSes, and the worst is dl-32b2 attempt 3 (target 30000): free held at 32400, min_free 936, so 31464 used. The need
+//         is that peak, the stricter reading (31464 > 30936): a heap below it has no run that is known to survive the stream.
 //   blk:  dl-32b2 held total free at 32400 and stepped the largest block only: PASS 3/3 at every target from 31000 down to 26000
 //         (18 of 18), 25000 2/3 (no buffer), 24000 2/3 and 22000 1/3 (Update.begin), 20000 0/2 (GET -1). Every failure is the 4096 B
 //         Updater buffer (taken when more than 8192 B are free) plus the 1024 B download buffer not fitting in what the 20152 B
@@ -79,10 +82,13 @@ constexpr uint32_t kDownloadSessionBlkTaken = 20152;   // what the session takes
 constexpr uint32_t kDownloadPassBlk = 26000;           // lowest forced largest free block that passed 3/3 at every target down to it
 constexpr uint32_t kDownloadFailBlk = 25000;           // 2/3: the first target that failed
 constexpr uint32_t kDownloadNeedBlk = kDownloadPassBlk;
-constexpr uint32_t kDownloadNeedFree = 30936;          // kDownloadSessionUsedWorst + kStreamGateFree (static_assert'ed below)
-// In the same pre-constructor units as the manifest gate; beginHttpsUrl() sees them through tlsFloorsAtBegin(): 35032 free, 30096 block.
+constexpr uint32_t kDownloadPeakHeldFree = 32400;      // free held at the begin of the worst PASS (dl-32b2 attempt 3, lo/c1-sw11-all.lines.txt)
+constexpr uint32_t kDownloadPeakMinFree = 936;         // the lowest free of that stream (min_free of its RESULT line)
+constexpr uint32_t kDownloadPeakUsed = kDownloadPeakHeldFree - kDownloadPeakMinFree;  // 31464
+constexpr uint32_t kDownloadNeedFree = kDownloadPeakUsed;
+// In the same pre-constructor units as the manifest gate; beginHttpsUrl() sees them through tlsFloorsAtBegin(): 35560 free, 30096 block.
 constexpr uint32_t kDownloadGateBlock = kDownloadNeedBlk + kMarginBytes + kCtorBytes;  // 36816
-constexpr uint32_t kDownloadGateFree = kDownloadNeedFree + kMarginBytes + kCtorBytes;  // 41752
+constexpr uint32_t kDownloadGateFree = kDownloadNeedFree + kMarginBytes + kCtorBytes;  // 42280
 
 // After the connect: BearSSL's contexts and its 16 KB input buffer are ALREADY allocated, so a contiguous-block gate
 // there (the old 36864) measures a heap this session itself just consumed and can never pass. What streaming still
@@ -93,11 +99,12 @@ constexpr uint32_t kStreamGateFree = kStreamNeedBytes + kMarginBytes;  // 5376
 
 static_assert(kManifestFailBlk < kManifestPassBlk, "the sweep fails below it and passes at it");
 static_assert(kDownloadFailBlk < kDownloadPassBlk, "the sweep fails below it and passes at it");
-static_assert(kDownloadNeedFree == kDownloadSessionUsedWorst + kStreamGateFree, "free need = worst session use + the stream gate");
+static_assert(kDownloadNeedFree == kDownloadPeakHeldFree - kDownloadPeakMinFree, "free need = the worst PASS's peak use of free");
+static_assert(kDownloadNeedFree >= kDownloadSessionUsedWorst + kStreamGateFree, "free need is not below worst gate-time use + the stream gate");
 static_assert(kDownloadPassBlk >= kDownloadSessionBlkTaken + (4096 + 8) + (1024 + 8), "block need = session + Updater buffer + download buffer");
 static_assert(kDownloadGateBlock >= kDownloadPassBlk + kMarginBytes + kBearsslStackThunkBytes, "gate below need + margin");
 // The shipped download gate, from the named needs and the literal margin: an edit that drops the 4096 margin, the BearSSL thunk or the clients block
-// from the gate (or edits kMarginBytes) fails here. 41752 free / 36816 block; at begin (tlsFloorsAtBegin) 35032 / 30096.
+// from the gate (or edits kMarginBytes) fails here. 42280 free / 36816 block; at begin (tlsFloorsAtBegin) 35560 / 30096.
 static_assert(kDownloadGateFree == kDownloadNeedFree + 4096 + kBearsslStackThunkBytes + kOtaClientsBytes, "download free gate = need + 4096 + thunk + clients");
 static_assert(kDownloadGateBlock == kDownloadNeedBlk + 4096 + kBearsslStackThunkBytes + kOtaClientsBytes, "download block gate = need + 4096 + thunk + clients");
 static_assert(kManifestGateBlock >= kManifestPassBlk + kMarginBytes + kBearsslStackThunkBytes, "gate below need + margin");
