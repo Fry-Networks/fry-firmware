@@ -456,8 +456,12 @@ AP restarted FRY-SETUP-<MAC6> after the failed join - /provision accepts a new a
 - **Held chips.** 0.4.0 is not released for ESP32-S3 and ESP8266: not in any manifest and not
   attached to any release; the web flasher keeps their 0.3.3 parts in `docs/flash/fw/hold/`
   (`manifest-hold.json`). Since 0.4.11 ESP8266 is built, attached and in the prod manifest (no
-  rollout key; the 0.3.x fleet cannot complete a manifest check, so it is unaffected); ESP32-S3
-  stays held, and the flasher keeps ESP8266 on its 0.3.3 parts until a post-canary flasher commit.
+  rollout key). The 0.3.1/0.3.3 selection code selects that entry; the 0.3.x ESP8266 fleet is
+  bounded only by an operator-run hardware gate (esp6 gate a, 2026-10-22: the 0.3.3 boards completed
+  0 of 6 manifest checks, boot checks skipping at blk 32880 < 36864 and scheduled checks crashing or
+  ending HTTP -5), not by anything in the repo; a 0.3.x board that ever completes a check would take
+  the update. ESP32-S3 stays held, and the flasher keeps ESP8266 on its 0.3.3 parts until a
+  post-canary flasher commit.
 - **Serial lines added or changed:**
 
 ```
