@@ -22,6 +22,7 @@
 #include "key_policy.h"
 #include "miner_key.h"
 #include "ota_boot_counter.h"
+#include "ota_first_check.h"
 #include "ota_health.h"
 #include "ota_heap_budget.h"
 #include "ota_manifest_read.h"
@@ -971,6 +972,10 @@ void tick() {
   unsigned long now = millis();
   if (!s_firstCheckDone) {
 #if defined(ARDUINO_ARCH_ESP8266)
+    // Until the first check s_lastCheckMs is unused (0): it holds the time of the first tick (tick() is only reached once Wi-Fi is up).
+    if (s_lastCheckMs == 0) s_lastCheckMs = now;
+    // Not while the boot's asynchronous 504 B allocation (7.8 s after the connect) can still land inside the check.
+    if (fry::otaFirstCheckWaitMs(static_cast<uint32_t>(now), static_cast<uint32_t>(s_lastCheckMs)) != 0) return;
     if (holdForTimeWait(now)) return;
 #endif
     s_firstCheckDone = true;
