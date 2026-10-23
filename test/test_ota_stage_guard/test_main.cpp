@@ -601,9 +601,9 @@ bool downloadText(const std::string& src, std::string& body) {
   return true;
 }
 
-// The mismatch branch inside it: from `if (got != want) {` to the `return false;` that ends it.
+// The mismatch branch inside it: from `if (shaMismatch) {` to the `return false;` that ends it.
 bool mismatchBranch(const std::string& fn, std::string& branch) {
-  const size_t a = fn.find("if (got != want) {");
+  const size_t a = fn.find("if (shaMismatch) {");
   if (a == std::string::npos) return false;
   const size_t b = fn.find("return false;", a);
   if (b == std::string::npos) return false;
@@ -633,6 +633,17 @@ std::string inspect(const std::string& src) {
   if (countOf(c8266, "upd.discard()") != 4) return "ESP8266: expected 4 discard sites (no buffer, write failed, incomplete, sha mismatch)";
   if (countOf(c8266, "eboot_command_clear()") != 1) return "ESP8266: expected one eboot_command_clear(), in the sha mismatch branch";
 
+  // The digest compare allocates nothing: two Strings whose copies both fail are both empty, and empty Strings are equal (lib/fry_core/ota_sha_match.h).
+  if (countOf(e8266, "\n#include \"ota_sha_match.h\"") != 1) return "ESP8266 view lacks ota_sha_match.h";
+  if (countOf(e32, "ota_sha_match.h") != 0) return "ESP32 view includes ota_sha_match.h";
+  if (countOf(c8266, "const bool shaMismatch = !fry::sha256HexMatches(hex, shaExpect.c_str(), shaExpect.length());") != 1) {
+    return "ESP8266: the sha256 compare must be !fry::sha256HexMatches(hex, shaExpect.c_str(), shaExpect.length())";
+  }
+  if (countOf(c8266, "fry::asciiLowerInPlace(hex);") != 1) return "ESP8266: the digest is lowercased in place before it is compared and logged (the mismatch line prints it in lowercase)";
+  if (countOf(c8266, "String got") != 0 || countOf(c8266, "String want") != 0 || countOf(c8266, "got != want") != 0 || countOf(c8266, "toLowerCase") != 0) {
+    return "ESP8266: the sha256 compare builds Strings (a failed allocation makes two empty Strings equal)";
+  }
+
   std::string mm;
   if (!mismatchBranch(c8266, mm)) return "ESP8266: sha mismatch branch not found";
   const size_t dis = mm.find("upd.discard()");
@@ -642,6 +653,8 @@ std::string inspect(const std::string& src) {
   if (clr < dis) return "ESP8266: the eboot command must be cleared after the discard";
 
   // the ESP32 family is the code it was
+  if (countOf(c32, "String got = hex;") != 1 || countOf(c32, "if (got != want) {") != 1) return "ESP32: the String compare changed";
+  if (c32.find("sha256HexMatches") != std::string::npos || c32.find("asciiLowerInPlace") != std::string::npos) return "ESP32: the ESP8266 compare leaked into the ESP32 view";
   if (countOf(c32, "Update.abort()") != 3) return "ESP32: expected the 3 Update.abort() calls";
   if (countOf(c32, "Update.write(buf, r)") != 1) return "ESP32: Update.write(buf, r) changed";
   if (countOf(c32, "Update.end(true)") != 1) return "ESP32: Update.end(true) changed";
@@ -691,6 +704,14 @@ void test_pin_controls_each_break_is_caught() {
   TEST_ASSERT_TRUE(inspect(edit(s, "#include \"ota_stage_guard.h\"", "")) != "");
   // an ESP32-view change
   TEST_ASSERT_TRUE(inspect(edit(s, "Update.abort();", "Update.end(false);")) != "");
+  // the digest compare: the helper's include gone, its result inverted, its length argument made a constant, the Strings back in the ESP8266 view
+  TEST_ASSERT_TRUE(inspect(edit(s, "#include \"ota_sha_match.h\"", "")) != "");
+  TEST_ASSERT_TRUE(inspect(edit(s, "  fry::asciiLowerInPlace(hex);\n", "")) != "");
+  TEST_ASSERT_TRUE(inspect(edit(s, "const bool shaMismatch = !fry::sha256HexMatches(", "const bool shaMismatch = fry::sha256HexMatches(")) != "");
+  TEST_ASSERT_TRUE(inspect(edit(s, "shaExpect.c_str(), shaExpect.length());", "shaExpect.c_str(), 64);")) != "");
+  TEST_ASSERT_TRUE(inspect(edit(s, "#if defined(ARDUINO_ARCH_ESP8266)\n  // The digest compare allocates nothing", "#if !defined(ARDUINO_ARCH_ESP8266)\n  // The digest compare allocates nothing")) != "");
+  // an ESP32-view change in the compare
+  TEST_ASSERT_TRUE(inspect(edit(s, "if (got != want) {", "if (!got.equals(want)) {")) != "");
 }
 
 }  // namespace

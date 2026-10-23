@@ -8,6 +8,7 @@
 #include <memory>
 #include <new>
 
+#include "ota_sha_match.h"
 #include "ota_stage_guard.h"
 #else
 #include <Update.h>
@@ -488,22 +489,30 @@ FRY_OTA_ESP8266_NOINLINE bool downloadAndApply(const String& url, const String& 
 #endif
   sha.finish(digest);
   fry::bytesToHexUpper(digest, 32, hex, sizeof(hex));
+#if defined(ARDUINO_ARCH_ESP8266)
+  // The digest compare allocates nothing: two Strings whose copies both fail are both empty, and empty Strings are equal, which would accept ANY image
+  // when the stream has used up the heap (lib/fry_core/ota_sha_match.h). An empty or invalid manifest digest has length 0 and never matches.
+  fry::asciiLowerInPlace(hex);
+  const bool shaMismatch = !fry::sha256HexMatches(hex, shaExpect.c_str(), shaExpect.length());
+  if (shaMismatch) {
+    FRY_PRINTF("ota: sha256 mismatch (got %.16s want %.16s) - rejected\n", hex, shaExpect.c_str());
+    // The last byte is still held, so this drops an unfinished update and nothing is staged (lib/fry_core/ota_stage_guard.h). Clearing the
+    // eboot command as well is what eboot does itself after it has run one: a command left in RTC memory by anything else cannot boot this image.
+    upd.discard();
+    eboot_command_clear();
+    return false;
+  }
+#else
   String got = hex;
   got.toLowerCase();
   String want = shaExpect;
   want.toLowerCase();
   if (got != want) {
     FRY_PRINTF("ota: sha256 mismatch (got %.16s want %.16s) - rejected\n", got.c_str(), want.c_str());
-#if defined(ARDUINO_ARCH_ESP8266)
-    // The last byte is still held, so this drops an unfinished update and nothing is staged (lib/fry_core/ota_stage_guard.h). Clearing the
-    // eboot command as well is what eboot does itself after it has run one: a command left in RTC memory by anything else cannot boot this image.
-    upd.discard();
-    eboot_command_clear();
-#else
     Update.abort();
-#endif
     return false;
   }
+#endif
 
 #if defined(ARDUINO_ARCH_ESP8266)
   if (!upd.commit()) {
