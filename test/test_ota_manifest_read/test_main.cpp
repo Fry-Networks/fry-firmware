@@ -37,6 +37,11 @@ const std::string kBody = [] {
   return s;
 }();
 
+// The most available() + idle() calls any test may make on one connection. The longest legitimate wait is the 5000 ms read timeout at 1 ms per pass
+// (one available() and one idle() each, 10000 calls), so this is 5x that: a reader that has lost its timeout, or that no longer idles, reaches it and
+// is cut off (see guard()) instead of hanging the whole suite, which it did.
+constexpr uint32_t kMaxCalls = 50000;
+
 // The network as the app sees it: bytes lwIP holds, bytes still in flight, and the TCP state.
 struct SimConn {
   std::string pending;   // in lwIP's queue, readable
@@ -47,7 +52,19 @@ struct SimConn {
   size_t maxPiece = 0;   // 0: everything pending at once
   bool readReturnsNothing = false;
   uint32_t t = 0;
+  uint32_t calls = 0;
+  bool runaway = false;  // available() + idle() were called more than kMaxCalls times: the reader under test is not giving up
 
+  // Cut the reader off: the connection ends with nothing queued, so a reader that never times out returns Closed instead of looping forever, and the
+  // test that expected TimedOut (or Ok) fails on its assertion. runaway names the cause.
+  void guard() {
+    if (++calls > kMaxCalls) {
+      runaway = true;
+      open = false;
+      pending.clear();
+      inflight.clear();
+    }
+  }
   void yield() {
     pending += inflight;
     inflight.clear();
@@ -57,6 +74,7 @@ struct SimConn {
   bool connected() { return open; }
   // WiFiClient::available(): getSize() first, optimistic_yield() only when it was 0, the stale result returned.
   int available() {
+    guard();
     int result = static_cast<int>(pending.size());
     if (maxPiece && static_cast<size_t>(result) > maxPiece) result = static_cast<int>(maxPiece);
     if (pending.empty() && staleAvailable) yield();
@@ -73,6 +91,7 @@ struct SimConn {
   }
   uint32_t nowMs() { return t; }
   void idle() {
+    guard();
     t += 1;
     yield();
   }
@@ -178,6 +197,7 @@ void test_silence_on_an_open_connection_times_out() {
   VecSink out;
   TEST_ASSERT_EQUAL_INT(static_cast<int>(fry::ManifestRead::TimedOut),
                         static_cast<int>(fry::readManifestBody(c, kBody.size(), fry::kManifestReadTimeoutMs, out)));
+  TEST_ASSERT_FALSE_MESSAGE(c.runaway, "the reader kept waiting far past its timeout: it never gives up");
   TEST_ASSERT_TRUE_MESSAGE(c.t >= fry::kManifestReadTimeoutMs && c.t < fry::kManifestReadTimeoutMs + 50, "it waited the timeout, not forever");
 }
 
@@ -200,6 +220,30 @@ void test_a_read_that_returns_nothing_does_not_spin() {
   VecSink out;
   TEST_ASSERT_EQUAL_INT(static_cast<int>(fry::ManifestRead::TimedOut),
                         static_cast<int>(fry::readManifestBody(c, kBody.size(), 200, out)));
+  TEST_ASSERT_FALSE_MESSAGE(c.runaway, "a read that returns nothing must end in the timeout, not spin");
+}
+
+// CONTROL for the cap itself: a reader with no timeout (what removing the check from readManifestBody() makes it), and one that polls without ever
+// idling, are stopped by the fake connection within kMaxCalls calls. Without the cap these loops do not end.
+void test_control_a_reader_without_a_timeout_is_cut_off_by_the_fake_connection() {
+  SimConn c;  // open, nothing ever comes
+  uint32_t passes = 0;
+  while (c.connected()) {
+    c.available();
+    c.idle();
+    passes++;
+  }
+  TEST_ASSERT_TRUE(c.runaway);
+  TEST_ASSERT_EQUAL_UINT32(kMaxCalls / 2 + 1, passes);  // two calls per pass; the cap trips inside available() of the next pass
+  TEST_ASSERT_EQUAL_UINT32(0, static_cast<uint32_t>(c.pending.size()));
+  SimConn d;
+  uint32_t polls = 0;
+  while (d.connected()) {
+    d.available();
+    polls++;
+  }
+  TEST_ASSERT_TRUE(d.runaway);
+  TEST_ASSERT_EQUAL_UINT32(kMaxCalls + 1, polls);
 }
 
 void test_a_sink_that_cannot_hold_the_body_is_no_room() {
@@ -352,6 +396,7 @@ int main(int, char**) {
   RUN_TEST(test_silence_on_an_open_connection_times_out);
   RUN_TEST(test_progress_restarts_the_timeout);
   RUN_TEST(test_a_read_that_returns_nothing_does_not_spin);
+  RUN_TEST(test_control_a_reader_without_a_timeout_is_cut_off_by_the_fake_connection);
   RUN_TEST(test_a_sink_that_cannot_hold_the_body_is_no_room);
   RUN_TEST(test_it_reads_exactly_the_announced_length);
   RUN_TEST(test_the_announced_size_decides_how_the_body_is_read);
