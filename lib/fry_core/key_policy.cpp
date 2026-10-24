@@ -117,13 +117,16 @@ size_t maskSecretLast4(const char* value, char* out, size_t outCap) {
   out[0] = 0;
   if (!value || !value[0]) return 0;
   const size_t n = strlen(value);
-  const size_t shown = n < 4 ? n : 4;
+  // NEVER print the whole value. "The last 4 characters" of a 4-character secret IS the secret, so
+  // a value of 4 characters or fewer prints the ellipsis and nothing else; only a value longer than
+  // 4 has a tail that is not all of it.
+  const size_t shown = n > 4 ? 4 : 0;
   if (outCap < 3 + shown + 1) return 0;  // never truncates, and never splits U+2026
   out[0] = static_cast<char>(0xE2);  // U+2026 HORIZONTAL ELLIPSIS
   out[1] = static_cast<char>(0x80);
   out[2] = static_cast<char>(0xA6);
   size_t w = 3;
-  for (size_t i = n - shown; i < n; i++) {
+  for (size_t i = n - shown; shown != 0 && i < n; i++) {
     const unsigned char c = static_cast<unsigned char>(value[i]);
     out[w++] = (c >= 0x21 && c <= 0x7E) ? static_cast<char>(c) : '?';
   }

@@ -642,13 +642,9 @@ bool loadConfig() {
   s_endpoint = fry_config::getWgEndpoint();
 
   if (s_priv.length() == 0 || s_pub.length() == 0 || s_endpoint.length() == 0) {
-    // State-change log, not a per-attempt one (lib/fry_core/log_throttle.h): this used to print
-    // every WG_BRINGUP_RETRY_MS for as long as the board was unprovisioned - 9 lines in 54 s in
-    // capture e32-a3b-224212. Now: once when the state is first seen, then at most every 10 min.
-    static fry::LogThrottle s_noConfigLog;
-    if (fry::shouldLogState(s_noConfigLog, /*state=*/1, millis(), fry::kLogStateMinIntervalMs)) {
-      Serial.println("wg: no VPN config - skipping");
-    }
+    // Silent: tick() owns the "no VPN config" line (one state-change line, then at most every
+    // 10 minutes) so this path cannot print once per WG_BRINGUP_RETRY_MS - 9 lines in 54 s in
+    // capture e32-a3b-224212.
     return false;
   }
 
@@ -782,7 +778,18 @@ void tick() {
     // "[E][Preferences.cpp] begin(): nvs_open failed: NOT_FOUND" line. On an unprovisioned board
     // that was one line per second, forever, on top of the flood hasVpnConfig() used to cause
     // (fry_config.cpp). hasVpnConfig() is cached, so this costs nothing per pass.
-    if (!fry_config::hasVpnConfig()) return;
+    // The state is tracked on EVERY pass, present or absent, so a real transition in either
+    // direction is reported immediately: absent is restated at most every 10 minutes (so an
+    // operator who attaches later still sees it), present is change-only (lib/fry_core/log_throttle.h).
+    static fry::LogThrottle s_configLog;
+    const bool configPresent = fry_config::hasVpnConfig();
+    const bool logNow = fry::shouldLogState(s_configLog, configPresent ? 0 : 1, millis(),
+                                            configPresent ? 0 : fry::kLogStateMinIntervalMs);
+    if (!configPresent) {
+      if (logNow) Serial.println("wg: no VPN config - skipping");
+      return;
+    }
+    if (logNow) Serial.println("wg: VPN config present - bringing it up");
     if (!loadConfig()) return;
     if (!provisioningGateOpen()) return;
     bringUp();

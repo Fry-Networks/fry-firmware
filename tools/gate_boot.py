@@ -88,7 +88,9 @@ def main():
         if err:
             print("[gate_boot] FAIL: %s" % err, flush=True)
             sys.exit(1)
-        print("[gate_boot] PASS minerkey=%s" % miner_key, flush=True)
+        # Even this line goes through the filter: it is the same value the board printed, and no
+        # path in this tool may emit a raw secret, whatever the accepted-form regex let through.
+        print("[gate_boot] PASS minerkey=%s" % redactor.line(miner_key), flush=True)
         sys.exit(0)
     finally:
         ser.close()
