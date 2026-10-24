@@ -66,4 +66,21 @@ inline void addHeapFields(JsonDocument& doc, const HeapInfo& h) {
   doc["stack_high_water"] = h.stackHighWater;
 }
 
+// Relay connect latency, from lib/fry_core/relay_latency.h's bounded ring in the ESP32 relay task.
+// Appended the same way as addHeapFields: after buildInstallationDoc(), so the 13-member body and
+// the 0.4.7 prefix are untouched. Only builds with the WireGuard relay (-DFRY_HAS_WIREGUARD=1, i.e.
+// the ESP32 family) call it; there it is always present, with 0/0 and relay_samples 0 before the
+// first successful connect, because every other appended field is unconditional too.
+struct RelayLatencyInfo {
+  uint32_t p50Ms;   // median of the recent successful upstream connects
+  uint32_t p95Ms;   // nearest-rank 95th percentile of the same samples
+  uint32_t samples; // how many samples the two values were computed from (0..kLatencySamples)
+};
+
+inline void addRelayLatencyFields(JsonDocument& doc, const RelayLatencyInfo& r) {
+  doc["relay_p50_ms"] = r.p50Ms;
+  doc["relay_p95_ms"] = r.p95Ms;
+  doc["relay_samples"] = r.samples;
+}
+
 }  // namespace fry

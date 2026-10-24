@@ -21,6 +21,9 @@
 #include "telemetry.h"
 #include "trigger_hooks.h"
 #include "wifi_station.h"
+#if defined(FRY_HAS_WIREGUARD) && FRY_HAS_WIREGUARD
+#include "vpn_relay.h"  // fry_vpn::relayLatency(): the ESP32 relay's connect-latency summary
+#endif
 
 #include <generated/fry_secrets.h>
 
@@ -79,6 +82,15 @@ __attribute__((noinline)) void addHeartbeatHeap(JsonDocument& doc) {
   uint8_t frag = 0;
   ESP.getHeapStats(&freeHeap, &maxBlock, &frag);
   fry::addHeapFields(doc, {freeHeap, maxBlock, frag, ESP.getFreeContStack()});
+}
+#endif
+
+#if defined(FRY_HAS_WIREGUARD) && FRY_HAS_WIREGUARD
+__attribute__((noinline)) void addHeartbeatRelayLatency(JsonDocument& doc) {
+  // Appended after the 13-member body exactly like addHeapFields above, and in its own frame for
+  // the same reason: registerInstallation() sits on the deepest loop-stack path.
+  const fry_vpn::RelayLatency l = fry_vpn::relayLatency();
+  fry::addRelayLatencyFields(doc, {l.p50Ms, l.p95Ms, l.samples});
 }
 #endif
 
@@ -215,6 +227,9 @@ bool registerInstallation() {
   fry::buildInstallationDoc(doc, fields);
 #if defined(FRY_HEARTBEAT_HEAP) && defined(ARDUINO_ARCH_ESP8266)
   addHeartbeatHeap(doc);
+#endif
+#if defined(FRY_HAS_WIREGUARD) && FRY_HAS_WIREGUARD
+  addHeartbeatRelayLatency(doc);
 #endif
   String body;
   serializeJson(doc, body);
