@@ -574,17 +574,11 @@ bool serviceSlot(fry_relay::Slot& s, int idx, bool rdC, bool rdU, bool wrU, uint
 // valid and drop its slot; whatever remains is retried after a short backoff.
 bool fdAlive(int fd) { return fd < 0 || fcntl(fd, F_GETFL, 0) >= 0; }
 
-// The device's own tunnel address, as the listener and the source guard both need it.
-struct TunnelAddr {
-  uint32_t ip = 0;  // host order, bit 31 = first octet
-  int prefix = 0;
-};
-
 // Returns true once accept() has produced a descriptor, so a listener that stays readable while
 // accept() keeps failing (EMFILE, ECONNABORTED) does not count as progress and still gets the
 // anti-spin yield in the main loop.
-bool acceptClients(int listenFd, const TunnelAddr& tun, fry_relay::Slot** slots, uint32_t now,
-                   RelayStats& st) {
+bool acceptClients(int listenFd, const fry_relay::GuardConfig& guard, fry_relay::Slot** slots,
+                   uint32_t now, RelayStats& st) {
   using namespace fry_relay;
   bool accepted = false;
   for (int i = 0; i < FRY_RELAY_SLOTS; i++) {
@@ -602,13 +596,15 @@ bool acceptClients(int listenFd, const TunnelAddr& tun, fry_relay::Slot** slots,
     // The relay is only for tunnel peers. Even though the listener is bound to the tunnel address,
     // the source is checked as well and a stranger is dropped here, before a slot or a buffer is
     // spent on it: a bind on a multi-homed stack (or a mis-set wgAddr) must not turn this into an
-    // open proxy. srcdrop is in the stat line as the bench-visible counter.
-    if (plen < sizeof(peer) || !ipInSubnet(ntohl(peer.sin_addr.s_addr), tun.ip, tun.prefix)) {
+    // open proxy. admitSet names what is allowed, srcdrop is the bench-visible counter.
+    if (plen < sizeof(peer) || !peerAdmitted(ntohl(peer.sin_addr.s_addr), guard)) {
       bumpSaturating(st.srcDrop);
       if (st.srcDrop == 1) {
-        char tunStr[16];
-        fry::formatIpv4(tun.ip, tunStr, sizeof(tunStr));
-        Serial.printf("socks5: dropping peers outside %s/%d (srcdrop=%u)\n", tunStr, tun.prefix,
+        char devStr[16], srvStr[16];
+        fry::formatIpv4(guard.deviceIp, devStr, sizeof(devStr));
+        fry::formatIpv4(guard.serverIp, srvStr, sizeof(srvStr));
+        Serial.printf("socks5: relay dropping a peer outside subnet %s/%d / server %s (srcdrop=%u)\n",
+                      devStr, guard.prefix, guard.serverIp != 0 ? srvStr : "none",
                       static_cast<unsigned>(st.srcDrop));
       }
       close(fd);
@@ -652,35 +648,50 @@ void relayTaskFn(void*) {
   const Timing timing;
   const uint16_t port = static_cast<uint16_t>(fry_config::getSocksPort());
 
-  // The listener binds to the device's own tunnel address, never INADDR_ANY (see openListener).
-  // With no usable tunnel address there is nothing to bind to and no subnet to guard, so the relay
-  // simply does not run: one state-change line, no fallback to an open proxy. "Usable" excludes a
-  // prefix wider than /8 (every uplink address would be "in the tunnel", the guard would be a
-  // no-op) and a /32 (the subnet holds only this device, so every real tunnel peer is outside it
-  // and would be dropped - a bound port that can never serve anyone). Both fail closed instead.
-  TunnelAddr tun;
+  // The listener binds to the device's own tunnel address, never INADDR_ANY (see openListener), and
+  // admits only the WireGuard server's own tunnel address and/or the device's tunnel subnet
+  // (relay_guard.h). Fleet devices are provisioned with a bare /32 each and the server with its own
+  // /32, so the server address is usually the ONLY thing that can be admitted. With neither a
+  // subnet that leaves room for a peer nor a server /32 there is nobody to serve: one state-change
+  // line, no listener, and never a fallback to INADDR_ANY.
+  GuardConfig guard;
   const String wgAddr = fry_config::getWgAddr();
-  if (!fry::parseIpv4Cidr(wgAddr.c_str(), &tun.ip, &tun.prefix) ||
-      !fry_relay::tunnelPrefixUsable(tun.prefix)) {
-    Serial.printf("socks5: relay disabled - no usable tunnel address (fry/wgAddr, prefix must be /%d../%d), not listening\n",
-                  fry_relay::kMinTunnelPrefix, fry_relay::kMaxTunnelPrefix);
+  const bool haveAddr = fry::parseIpv4Cidr(wgAddr.c_str(), &guard.deviceIp, &guard.prefix);
+  const String wgAllowed = fry_config::getWgAllowed();
+  if (haveAddr) guard.serverIp = pickServerTunnelAddress(wgAllowed.c_str(), guard.deviceIp);
+  char devStr[16];
+  char srvStr[16];
+  fry::formatIpv4(guard.deviceIp, devStr, sizeof(devStr));
+  fry::formatIpv4(guard.serverIp, srvStr, sizeof(srvStr));
+  if (!haveAddr || !relayEnabled(guard)) {
+    Serial.printf("socks5: relay disabled - wgAddr %s does not parse or admits no peer (prefix /%d) and "
+                  "wgAllowed names no server /32, not listening\n",
+                  haveAddr ? devStr : "(unparseable)", guard.prefix);
     vTaskDelete(nullptr);  // this task is the relay: there is nothing left for it to do
     return;
   }
   s_dnsLock = xSemaphoreCreateMutex();  // serializes WiFi.hostByName(); see the DNS section
   if (s_dnsLock == nullptr) Serial.println("socks5: no memory for the DNS lock - resolver tasks are unsequenced");
-  char tunStr[16];
-  fry::formatIpv4(tun.ip, tunStr, sizeof(tunStr));
+
+  // What the accept guard admits, in one bench-readable field.
+  char peers[64];
+  if (guard.serverIp != 0 && prefixAdmitsPeers(guard.prefix)) {
+    snprintf(peers, sizeof(peers), "server:%s/32,subnet:%s/%d", srvStr, devStr, guard.prefix);
+  } else if (guard.serverIp != 0) {
+    snprintf(peers, sizeof(peers), "server:%s/32", srvStr);
+  } else {
+    snprintf(peers, sizeof(peers), "subnet:%s/%d", devStr, guard.prefix);
+  }
 
   int listenFd = -1;
   for (uint32_t tries = 0; listenFd < 0; tries++) {
-    listenFd = openListener(tun.ip, port);
+    listenFd = openListener(guard.deviceIp, port);
     if (listenFd >= 0) break;
-    if (tries % 10 == 0) Serial.printf("socks5: listen %s:%u failed errno=%d, retrying\n", tunStr, port, errno);
+    if (tries % 10 == 0) Serial.printf("socks5: listen %s:%u failed errno=%d, retrying\n", devStr, port, errno);
     vTaskDelay(pdMS_TO_TICKS(1000));
   }
-  Serial.printf("socks5: listening %s:%u slots=%d h5=%d h7=%d hc=%d fg=%u\n", tunStr, port, FRY_RELAY_SLOTS,
-                FRY_RELAY_H5, FRY_RELAY_H7, FRY_RELAY_HALFCLOSE,
+  Serial.printf("socks5: relay listening %s:%u peers=%s slots=%d h5=%d h7=%d hc=%d fg=%u\n", devStr, port,
+                peers, FRY_RELAY_SLOTS, FRY_RELAY_H5, FRY_RELAY_H7, FRY_RELAY_HALFCLOSE,
                 static_cast<unsigned>(FRY_RELAY_HALFCLOSE ? 0u : Timing().finGraceMs));
 #if FRY_RELAY_H7
   if (esp_bt_controller_get_status() != ESP_BT_CONTROLLER_STATUS_ENABLED) {
@@ -739,7 +750,7 @@ void relayTaskFn(void*) {
     }
     if (wl.listenBad) {
       closeFd(listenFd);
-      while ((listenFd = openListener(tun.ip, port)) < 0) vTaskDelay(pdMS_TO_TICKS(1000));
+      while ((listenFd = openListener(guard.deviceIp, port)) < 0) vTaskDelay(pdMS_TO_TICKS(1000));
       dropped = true;
     }
     if (dropped) continue;
@@ -786,7 +797,7 @@ void relayTaskFn(void*) {
       }
       if (!fdAlive(listenFd)) {
         closeFd(listenFd);
-        while ((listenFd = openListener(tun.ip, port)) < 0) vTaskDelay(pdMS_TO_TICKS(1000));
+        while ((listenFd = openListener(guard.deviceIp, port)) < 0) vTaskDelay(pdMS_TO_TICKS(1000));
       }
       vTaskDelay(pdMS_TO_TICKS(selectFailBackoffMs(selFails)));
       continue;
@@ -828,7 +839,7 @@ void relayTaskFn(void*) {
     // already queued must not be evicted as "stalled" because the loop was busy.
     if (watchListen && isSet(listenFd, &rd)) {
       now = millis();
-      progress |= acceptClients(listenFd, tun, slots, now, st);
+      progress |= acceptClients(listenFd, guard, slots, now, st);
     }
     if (!progress) vTaskDelay(1);  // readable/writable but nothing moved (e.g. ENOMEM): do not spin
   }
