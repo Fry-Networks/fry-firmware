@@ -183,7 +183,109 @@ void test_the_pool_survives_many_sessions() {
   }
 }
 
-// ---- the glue must do it in that order ---------------------------------------------------------
+// ---- the loop must service a DNS wait on a timeout pass (REV-C blocker) ------------------------
+//
+// A slot in Phase::NeedConnect watches no descriptor, so on an idle relay select() only ever
+// returns on timeout - and serviceSlot() is reachable only from a Ready pass. If nothing services
+// the NeedConnect slots on a timeout, the resolved answer sits in the cache while the slot waits
+// for unrelated traffic, or times out: on a quiet relay every hostname CONNECT fails.
+//
+// The struct below is the loop's DNS-relevant behaviour with lwIP removed: slots waiting in
+// NeedConnect and one pass type - a timeout, with NO ready descriptor and NO other traffic.
+
+struct LoopModel {
+  static const int kSlots = 4;
+  fry_relay::DnsCache cache;
+  DnsJobs jobs;
+  DnsJob* slot[kSlots] = {};
+  char host[kSlots][32] = {};
+  int phase[kSlots] = {};  // 0 free, 1 NeedConnect, 2 Connecting (SOCKS reply queued), 3 failed
+  uint32_t connectedIp[kSlots] = {};
+  bool serviceDnsOnTimeout = true;  // false models the pre-fix loop
+
+  void wait(int i, const char* name) {  // the client's CONNECT was parsed: enter NeedConnect
+    for (int k = 0; k < 31 && name[k] != 0; k++) host[i][k] = name[k];
+    phase[i] = 1;
+  }
+
+  // needConnect(), minus lwIP: settle the slot's finished job, then cache hit / negative / begin.
+  void service(int i, uint32_t now) {
+    if (phase[i] != 1) return;
+    jobs.finishSlot(slot[i], cache, now, kTtl, kFailTtl);
+    uint32_t ip = 0;
+    if (cache.lookup(host[i], now, &ip)) {
+      phase[i] = 2;
+      connectedIp[i] = ip;
+      return;
+    }
+    if (cache.blocked(host[i], now)) {
+      phase[i] = 3;
+      return;
+    }
+    if (slot[i] == nullptr) {
+      bool created = false;
+      slot[i] = jobs.begin(host[i], &created);
+    }
+  }
+
+  // A pass where select() returned zero fds: the sweep runs at the top (as in the relay loop, so
+  // an abandoned job's answer is cached) and then only the NeedConnect slots are serviced.
+  void timeoutPass(uint32_t now) {
+    jobs.sweep(cache, now, kTtl, kFailTtl);
+    if (!serviceDnsOnTimeout) return;
+    for (int i = 0; i < kSlots; i++) service(i, now);
+  }
+};
+
+void test_an_idle_relay_completes_resolved_connects_without_any_ready_event() {
+  LoopModel m;
+  m.wait(0, "a.test");
+  m.wait(1, "b.test");
+  m.wait(2, "c.test");
+
+  // Pass 1: two jobs exist, the third name has to wait for capacity - exactly the blocker's shape.
+  m.timeoutPass(1000);
+  TEST_ASSERT_EQUAL_INT(2, m.jobs.liveCount());
+  TEST_ASSERT_EQUAL_INT(1, m.phase[2]);
+
+  // Both resolvers finish while the loop is idle (no ready fd ever fires).
+  resolve(m.slot[0], kIp1);
+  resolve(m.slot[1], kIp2);
+
+  // Pass 2: the timeout pass itself must complete A and B and free their jobs...
+  m.timeoutPass(1100);
+  TEST_ASSERT_EQUAL_INT(2, m.phase[0]);
+  TEST_ASSERT_EQUAL_INT(2, m.phase[1]);
+  TEST_ASSERT_EQUAL_UINT32(kIp1, m.connectedIp[0]);
+  TEST_ASSERT_EQUAL_UINT32(kIp2, m.connectedIp[1]);
+  // ...and the third name picks up a freed job in that same pass.
+  TEST_ASSERT_EQUAL_INT(1, m.phase[2]);
+  TEST_ASSERT_NOT_NULL(m.slot[2]);
+
+  resolve(m.slot[2], kIp1);
+  m.timeoutPass(1200);
+  TEST_ASSERT_EQUAL_INT_MESSAGE(2, m.phase[2], "an idle relay must complete the third hostname too");
+  TEST_ASSERT_EQUAL_UINT32(kIp1, m.connectedIp[2]);
+  TEST_ASSERT_EQUAL_INT(kDnsJobs, m.jobs.freeCount());
+
+  // The two names are cached, so repeating them needs no lookup at all.
+  uint32_t ip = 0;
+  TEST_ASSERT_TRUE(m.cache.lookup("a.test", 1200, &ip));
+  TEST_ASSERT_TRUE(m.cache.lookup("b.test", 1200, &ip));
+}
+
+void test_a_timeout_only_loop_that_skips_dns_waits_stalls_them() {
+  // Control: the pre-fix loop (a Ready pass is the only thing that services a slot) never advances
+  // any of them, which is the failure the fix removes.
+  LoopModel m;
+  m.serviceDnsOnTimeout = false;
+  m.wait(0, "a.test");
+  m.timeoutPass(1000);
+  TEST_ASSERT_EQUAL_INT(0, m.jobs.liveCount());
+  TEST_ASSERT_EQUAL_INT(1, m.phase[0]);
+}
+
+
 
 bool readFile(const std::string& path, std::string& out) {
   std::ifstream f(path.c_str(), std::ios::in | std::ios::binary);
@@ -241,6 +343,75 @@ void test_the_glue_gives_a_finished_job_back_before_the_cache_hit() {
   TEST_ASSERT_TRUE_MESSAGE(needConnectBody(src, body), "cannot find needConnect() in the relay glue");
   const std::string why = checkReleaseBeforeCacheHit(body);
   TEST_ASSERT_TRUE_MESSAGE(why.empty(), why.c_str());
+}
+
+// The relay loop: the DNS wait must be serviced on a TIMEOUT pass, before the Ready-only continue.
+std::string checkTimeoutServicesDns(const std::string& loop) {
+  const size_t sel = loop.find("classifySelect(sr, se)");
+  if (sel == std::string::npos) return "the relay loop no longer classifies select()'s result";
+  const size_t ready = loop.find("SelectAction::Ready) continue", sel);
+  if (ready == std::string::npos) return "the relay loop no longer continues on a non-Ready pass";
+  const size_t branch = loop.find("SelectAction::Timeout", sel);
+  if (branch == std::string::npos || branch > ready)
+    return "no SelectAction::Timeout branch before the Ready-only continue: a timeout pass services nothing";
+  const size_t need = loop.find("Phase::NeedConnect", branch);
+  if (need == std::string::npos || need > ready)
+    return "the timeout branch does not restrict itself to the slots in Phase::NeedConnect";
+  const size_t call = loop.find("needConnect(", need);
+  if (call == std::string::npos || call > ready)
+    return "the timeout branch never runs the resolution step for a waiting slot";
+  return "";
+}
+
+void test_the_loop_services_dns_waits_on_a_timeout_pass() {
+  std::string src;
+  TEST_ASSERT_TRUE_MESSAGE(loadRelaySource(src), "cannot read src/esp32/vpn_wireguard.cpp");
+  const size_t a = src.find("void relayTaskFn(void*)");
+  TEST_ASSERT_TRUE_MESSAGE(a != std::string::npos, "cannot find relayTaskFn() in the relay glue");
+  const size_t b = src.find("\n}\n", a);
+  TEST_ASSERT_TRUE(b != std::string::npos);
+  const std::string why = checkTimeoutServicesDns(src.substr(a, b - a));
+  TEST_ASSERT_TRUE_MESSAGE(why.empty(), why.c_str());
+}
+
+void test_the_timeout_check_rejects_the_ready_only_loop() {
+  // The pre-fix loop: a Ready pass is the only thing that services a slot. It must be rejected, so
+  // a pass cannot come from a check that sees nothing.
+  const std::string broken =
+      "void relayTaskFn(void*) {\n"
+      "  for (;;) {\n"
+      "    const SelectAction act = classifySelect(sr, se);\n"
+      "    if (act != SelectAction::Ready) continue;  // timeout / EINTR\n"
+      "    for (int i = 0; i < FRY_RELAY_SLOTS; i++) progress |= serviceSlot(*s, i, rdC, rdU, wrU, now, st);\n"
+      "  }\n"
+      "}\n";
+  TEST_ASSERT_FALSE(checkTimeoutServicesDns(broken).empty());
+
+  const std::string no_guard =
+      "void relayTaskFn(void*) {\n"
+      "  for (;;) {\n"
+      "    const SelectAction act = classifySelect(sr, se);\n"
+      "    if (act == SelectAction::Timeout) { needConnect(*s, i, now, st); continue; }\n"
+      "    if (act != SelectAction::Ready) continue;\n"
+      "  }\n"
+      "}\n";
+  TEST_ASSERT_FALSE(checkTimeoutServicesDns(no_guard).empty());  // whole pool on every tick
+
+  const std::string good =
+      "void relayTaskFn(void*) {\n"
+      "  for (;;) {\n"
+      "    const SelectAction act = classifySelect(sr, se);\n"
+      "    if (act == SelectAction::Timeout) {\n"
+      "      for (int i = 0; i < FRY_RELAY_SLOTS; i++) {\n"
+      "        if (slots[i] == nullptr || slots[i]->phase != Phase::NeedConnect) continue;\n"
+      "        needConnect(*slots[i], i, now, st);\n"
+      "      }\n"
+      "      continue;\n"
+      "    }\n"
+      "    if (act != SelectAction::Ready) continue;\n"
+      "  }\n"
+      "}\n";
+  TEST_ASSERT_EQUAL_STRING("", checkTimeoutServicesDns(good).c_str());
 }
 
 void test_the_order_check_rejects_the_broken_glue() {
@@ -301,7 +472,11 @@ int main(int, char**) {
   RUN_TEST(test_an_abandoned_job_is_still_cached_for_the_next_request);
   RUN_TEST(test_pending_counts_only_jobs_still_resolving);
   RUN_TEST(test_the_pool_survives_many_sessions);
+  RUN_TEST(test_an_idle_relay_completes_resolved_connects_without_any_ready_event);
+  RUN_TEST(test_a_timeout_only_loop_that_skips_dns_waits_stalls_them);
   RUN_TEST(test_the_glue_gives_a_finished_job_back_before_the_cache_hit);
+  RUN_TEST(test_the_loop_services_dns_waits_on_a_timeout_pass);
+  RUN_TEST(test_the_timeout_check_rejects_the_ready_only_loop);
   RUN_TEST(test_the_order_check_rejects_the_broken_glue);
   return UNITY_END();
 }

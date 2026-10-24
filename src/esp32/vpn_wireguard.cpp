@@ -792,7 +792,25 @@ void relayTaskFn(void*) {
       continue;
     }
     selFails = 0;
-    if (act != SelectAction::Ready) continue;  // timeout / EINTR: the timers run at the top
+    if (act == SelectAction::Timeout) {
+      // A slot in NeedConnect watches no descriptor (slotWants() gives it only a pending method
+      // reply, and it has no upstream fd yet), so a timeout is the ONLY pass that can bring it
+      // back. Servicing it exclusively here - and only the NeedConnect slots, never a whole
+      // serviceSlot() pass - is what completes a resolved CONNECT on an idle relay: without it the
+      // answer lands in the cache and the slot waits for unrelated traffic, or times out.
+      now = millis();
+      for (int i = 0; i < FRY_RELAY_SLOTS; i++) {
+        Slot* s = slots[i];
+        if (s == nullptr || s->phase != Phase::NeedConnect) continue;
+        needConnect(*s, i, now, st);
+        if (slotClosed(*s)) {
+          dnsDropSlot(i);
+          releaseSlot(slots[i], st);
+        }
+      }
+      continue;
+    }
+    if (act != SelectAction::Ready) continue;  // EINTR: the timers run at the top
 
     bool progress = false;
     for (int i = 0; i < FRY_RELAY_SLOTS; i++) {

@@ -195,9 +195,13 @@ class DnsJobs {
     return nullptr;
   }
 
-  // Drops one slot's reference. The job itself is freed by sweep() once it is also finished.
+  // Drops one slot's reference. A job that is already settled and now unreferenced gives its pool
+  // slot back immediately, so the next name in this very pass can use it; a job whose resolver is
+  // still running stays live (the sweep frees it once it finishes, so its answer is not lost).
   void release(DnsJob* j) {
-    if (j != nullptr && j->live && j->refs > 0) j->refs--;
+    if (j == nullptr || !j->live || j->refs <= 0) return;
+    j->refs--;
+    if (j->refs == 0 && j->cached) freeSlot(*j);
   }
 
   // Puts a finished job's result (address or failure) into `cache`, once. True when it is done.
