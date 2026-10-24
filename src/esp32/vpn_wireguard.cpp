@@ -753,9 +753,15 @@ void relayTaskFn(void*) {
     }
     uint32_t tmo = poolSelectTimeoutMs(slots, FRY_RELAY_SLOTS, timing, now,
                                        poolFull ? kRelayFullSelectMs : kRelayMaxSelectMs);
-    // A slot waiting on a resolver has no descriptor in the select() set, so nothing would wake the
-    // loop when its answer lands: poll at this cadence until every job has settled.
-    if (s_dns.jobs.pending() && tmo > kRelayDnsPollMs) tmo = kRelayDnsPollMs;
+    // A slot in NeedConnect has no descriptor in the select() set: it is waiting on a resolver job,
+    // on a job slot to come free, or on an answer that landed between two passes. Nothing would wake
+    // the loop for it, so poll at this cadence while one exists (the job pool's own pending() is not
+    // enough: the answer can already be in while the slot has not been serviced yet).
+    bool dnsWaiting = false;
+    for (int i = 0; i < FRY_RELAY_SLOTS && !dnsWaiting; i++) {
+      dnsWaiting = slots[i] != nullptr && slots[i]->phase == Phase::NeedConnect;
+    }
+    if (dnsWaiting && tmo > kRelayDnsPollMs) tmo = kRelayDnsPollMs;
     int sr = 0;
     int se = 0;
     if (wl.n == 0) {
