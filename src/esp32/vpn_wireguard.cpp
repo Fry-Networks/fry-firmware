@@ -55,10 +55,10 @@ bool s_wasUp = false;
 volatile uint32_t s_relayedBytes = 0;
 
 // Relay connect-latency summary for the installation heartbeat. The ring belongs to the relay task
-// (the only writer); the three published values are plain 32-bit words so the loop task can read
-// them without a lock. A heartbeat that races one connect sees the previous triple: these are
-// trend numbers, and relay_samples says how many connects they were computed from.
+// (the only writer); the three published values are copied as one group under s_latMux so the loop
+// task never reads a p50 from one connect next to a samples count from another.
 fry_relay::LatencyRing s_latency;
+portMUX_TYPE s_latMux = portMUX_INITIALIZER_UNLOCKED;
 volatile uint32_t s_latP50 = 0;
 volatile uint32_t s_latP95 = 0;
 volatile uint32_t s_latSamples = 0;
@@ -167,6 +167,7 @@ struct RelayStats {
   uint32_t finHalf = 0, finClose = 0;
   uint32_t srcDrop = 0;  // accepted peers dropped for a source address outside the tunnel subnet
   uint32_t dnsFail = 0;  // requests failed because the name did not resolve inside the budget
+  uint32_t noDelayFail = 0;  // setsockopt(TCP_NODELAY) failed (it still relays, just with Nagle on)
 };
 
 bool setNonBlocking(int fd) {
@@ -217,110 +218,60 @@ int openListener(uint32_t bindIp, uint16_t port) {
 //     finishes in time still gets the full connectMs for the connect itself.
 //   * the result (address or failure) is cached, so a repeated CONNECT to the same name needs no
 //     lookup and a failed name is not retried until its negative entry expires.
-//   * at most kDnsJobs tasks exist; a request for a third distinct name waits for a free job and
-//     fails on the NeedConnect budget, so a busy or broken resolver never grows the heap.
+//   * at most fry_relay::kDnsJobs jobs exist; a request for a third distinct name waits for a free
+//     job and fails on the NeedConnect budget, so a busy or broken resolver never grows the heap.
+//     A job occupies its slot from begin() until it is finished AND unreferenced, so a slot that
+//     takes the cache-hit path must hand its finished job back (finishSlot) or two long-lived
+//     hostname sessions would pin both jobs and starve every later lookup.
+//   * WiFi.hostByName() uses the Arduino core's GLOBAL DNS status bits (WIFI_DNS_IDLE_BIT /
+//     WIFI_DNS_DONE_BIT in WiFiGeneric.cpp) and one global callback, so two callers must never be
+//     inside it at once: kDnsLock serializes the resolver tasks against each other. The relay is
+//     this firmware's only hostByName() caller, so the lock covers it.
 //
 // All of this is in the relay task, which is created once, so the state is file-scope.
-constexpr uint32_t kDnsTtlMs = 300000;     // a resolved address stays usable for 5 min
-constexpr uint32_t kDnsFailTtlMs = 15000;  // a name that just failed is not retried for 15 s
-constexpr int kDnsJobs = 2;                 // concurrent resolver tasks
+constexpr uint32_t kDnsTtlMs = 300000;      // a resolved address stays usable for 5 min
+constexpr uint32_t kDnsFailTtlMs = 15000;   // a name that just failed is not retried for 15 s
 constexpr uint32_t kDnsStackBytes = 3072;   // the task only waits on lwIP's own DNS callback
-
-struct DnsJob {
-  char host[256];
-  IPAddress ip;
-  volatile bool done;  // written by the resolver task, published with a memory barrier
-  bool ok;
-  int refs;     // client slots currently waiting on this job
-  bool cached;  // the result has been put into s_dns.cache
-};
-
-DnsJob* s_dnsJobs[kDnsJobs] = {};  // every live resolve, whether or not a slot still waits on it
 
 struct DnsState {
   fry_relay::DnsCache cache;
-  DnsJob* job[FRY_RELAY_SLOTS] = {};  // per slot: the job it is waiting on (borrowed reference)
+  fry_relay::DnsJobs jobs;
+  fry_relay::DnsJob* job[FRY_RELAY_SLOTS] = {};  // per slot: the job it waits on (borrowed reference)
 };
 DnsState s_dns;
+SemaphoreHandle_t s_dnsLock = nullptr;  // serializes WiFi.hostByName() across resolver tasks
 
 void dnsTaskFn(void* arg) {
-  DnsJob* j = static_cast<DnsJob*>(arg);
+  fry_relay::DnsJob* j = static_cast<fry_relay::DnsJob*>(arg);
   IPAddress ip;
-  if (WiFi.hostByName(j->host, ip)) {
-    j->ip = ip;
+  bool ok = false;
+  if (s_dnsLock != nullptr) xSemaphoreTake(s_dnsLock, portMAX_DELAY);
+  ok = WiFi.hostByName(j->host, ip);
+  if (s_dnsLock != nullptr) xSemaphoreGive(s_dnsLock);
+  const uint32_t addr = ntohl(static_cast<uint32_t>(ip));  // host order, as parseIpv4Cidr returns it
+  if (ok && addr != 0) {
+    j->ip = addr;
     j->ok = true;
   }
-  __sync_synchronize();  // the address above must be visible before `done`
+  __sync_synchronize();  // the result above must be visible before `done`
   j->done = true;
   vTaskDelete(nullptr);
 }
 
-DnsJob* dnsFind(const char* host) {
-  for (int i = 0; i < kDnsJobs; i++) {
-    if (s_dnsJobs[i] != nullptr && strcmp(s_dnsJobs[i]->host, host) == 0) return s_dnsJobs[i];
-  }
-  return nullptr;
+// Starts a resolver task for a freshly created job. On failure the job is marked finished as a
+// failure, so the request fails on its normal budget instead of waiting for a task that never ran.
+void dnsStart(fry_relay::DnsJob* j) {
+  if (xTaskCreate(dnsTaskFn, "fry_dns", kDnsStackBytes, j, 1, nullptr) == pdPASS) return;
+  j->ok = false;
+  __sync_synchronize();
+  j->done = true;
 }
 
-// The job already resolving `host`, or a new one; nullptr when every job slot is busy.
-DnsJob* dnsBegin(const char* host) {
-  DnsJob* j = dnsFind(host);
-  if (j != nullptr) return j;
-  if (strlen(host) >= sizeof(DnsJob::host)) return nullptr;  // cannot be represented: fail the request
-  for (int i = 0; i < kDnsJobs; i++) {
-    if (s_dnsJobs[i] != nullptr) continue;
-    DnsJob* n = new (std::nothrow) DnsJob();
-    if (n == nullptr) return nullptr;
-    strncpy(n->host, host, sizeof(n->host) - 1);
-    n->host[sizeof(n->host) - 1] = 0;
-    n->done = false;
-    n->ok = false;
-    n->refs = 0;
-    n->cached = false;
-    if (xTaskCreate(dnsTaskFn, "fry_dns", kDnsStackBytes, n, 1, nullptr) != pdPASS) {
-      delete n;
-      return nullptr;
-    }
-    s_dnsJobs[i] = n;
-    return n;
-  }
-  return nullptr;
-}
-
-// Drops one slot's reference; the sweep frees the job once it is done and unreferenced.
-void dnsRelease(DnsJob*& j) {
-  if (j == nullptr) return;
-  if (j->refs > 0) j->refs--;
-  j = nullptr;
-}
-
-// Settles finished jobs into the cache and frees the ones nothing waits on any more, so a job whose
-// slot was evicted or closed still caches its answer for the next request.
-void dnsSweep(uint32_t now) {
-  for (int i = 0; i < kDnsJobs; i++) {
-    DnsJob* j = s_dnsJobs[i];
-    if (j == nullptr) continue;
-    if (!j->cached && j->done) {
-      __sync_synchronize();
-      if (j->ok) {
-        s_dns.cache.store(j->host, ntohl(static_cast<uint32_t>(j->ip)), now, kDnsTtlMs);
-      } else {
-        s_dns.cache.storeFailure(j->host, now, kDnsFailTtlMs);
-      }
-      j->cached = true;
-    }
-    if (j->cached && j->refs == 0) {
-      s_dnsJobs[i] = nullptr;
-      delete j;
-    }
-  }
-}
-
-bool dnsBusy() {
-  for (int i = 0; i < kDnsJobs; i++) {
-    if (s_dnsJobs[i] != nullptr) return true;
-  }
-  return false;
+// The slot is going away: drop its reference and forget the job. The sweep still caches the answer
+// of a job that was mid-flight, so the next request for that name does not resolve it again.
+void dnsDropSlot(int idx) {
+  s_dns.jobs.release(s_dns.job[idx]);
+  s_dns.job[idx] = nullptr;
 }
 
 bool isSet(int fd, fd_set* set) { return fry_relay::fdInRange(fd, FD_SETSIZE) && FD_ISSET(fd, set); }
@@ -400,9 +351,14 @@ bool doSend(fry_relay::Slot& s, fry_relay::Side to, uint32_t now, RelayStats& st
 // shows up as connect latency.
 void recordLatency(uint32_t ms) {
   s_latency.add(ms);
-  s_latP50 = s_latency.p50Ms();
-  s_latP95 = s_latency.p95Ms();
-  s_latSamples = s_latency.count();
+  const uint32_t p50 = s_latency.p50Ms();
+  const uint32_t p95 = s_latency.p95Ms();
+  const uint32_t n = s_latency.count();
+  portENTER_CRITICAL(&s_latMux);  // publish the three as one group
+  s_latP50 = p50;
+  s_latP95 = p95;
+  s_latSamples = n;
+  portEXIT_CRITICAL(&s_latMux);
 }
 
 void connectResult(fry_relay::Slot& s, bool ok, uint32_t now) {
@@ -425,7 +381,7 @@ void connectTo(fry_relay::Slot& s, uint32_t ip, uint32_t now, RelayStats& st) {
     connectResult(s, false, now);
     return;
   }
-  setNoDelay(fd);
+  if (!setNoDelay(fd)) st.noDelayFail++;
   struct sockaddr_in sa;
   memset(&sa, 0, sizeof(sa));
   sa.sin_family = AF_INET;
@@ -463,6 +419,12 @@ void connectTo(fry_relay::Slot& s, uint32_t ip, uint32_t now, RelayStats& st) {
 // (Phase::NeedConnect) bounds the wait.
 bool needConnect(fry_relay::Slot& s, int idx, uint32_t now, RelayStats& st) {
   using namespace fry_relay;
+  // First thing, on every pass: if this slot's job has finished, settle it into the cache and give
+  // its resolver slot back. A finished job must never stay pinned to the slot - it would hold one
+  // of the kDnsJobs slots for the whole session, and two long-lived hostname sessions would leave
+  // every later hostname with no job at all (SOCKS ConnectTimeout until one of them ends).
+  s_dns.jobs.finishSlot(s_dns.job[idx], s_dns.cache, now, kDnsTtlMs, kDnsFailTtlMs);
+
   uint32_t ip = 0;
   if (s_dns.cache.lookup(s.req.host, now, &ip)) {
     connectTo(s, ip, now, st);
@@ -475,21 +437,16 @@ bool needConnect(fry_relay::Slot& s, int idx, uint32_t now, RelayStats& st) {
   }
   DnsJob*& job = s_dns.job[idx];
   if (job == nullptr) {
-    job = dnsBegin(s.req.host);
-    if (job == nullptr) return false;  // no job slot or no heap: the connect budget fails the slot
-    job->refs++;
+    bool created = false;
+    job = s_dns.jobs.begin(s.req.host, &created);  // takes the reference
+    if (job == nullptr) return false;  // every job slot busy: the connect budget fails the slot
+    if (created) dnsStart(job);
   }
   if (!job->done) return false;  // the resolver task is still running
   __sync_synchronize();
   const bool ok = job->ok;
-  const uint32_t addr = ok ? ntohl(static_cast<uint32_t>(job->ip)) : 0;
-  if (ok) {
-    s_dns.cache.store(job->host, addr, now, kDnsTtlMs);
-  } else {
-    s_dns.cache.storeFailure(job->host, now, kDnsFailTtlMs);
-  }
-  job->cached = true;
-  dnsRelease(s_dns.job[idx]);
+  const uint32_t addr = job->ip;
+  s_dns.jobs.finishSlot(s_dns.job[idx], s_dns.cache, now, kDnsTtlMs, kDnsFailTtlMs);
   if (!ok) {
     st.dnsFail++;
     onConnectResult(s, false, now);
@@ -535,7 +492,7 @@ void logStats(const RelayStats& st) {
                 static_cast<unsigned>(st.hsBad), static_cast<unsigned>(st.connFail),
                 static_cast<unsigned>(st.connTimeout), static_cast<unsigned>(st.idle));
   Serial.printf("ioerr=%u evict=%u fdg=%u selfail=%u einprog=%u nomem=%u stack_free_min=%u/%u heap=%u minheap=%u "
-                "fin_half=%u fin_close=%u srcdrop=%u dnsfail=%u\n",
+                "fin_half=%u fin_close=%u srcdrop=%u dnsfail=%u ndfail=%u\n",
                 static_cast<unsigned>(st.ioErr), static_cast<unsigned>(st.evicted),
                 static_cast<unsigned>(st.fdGuard), static_cast<unsigned>(st.selFail),
                 static_cast<unsigned>(st.einprog), static_cast<unsigned>(st.noMem),
@@ -543,7 +500,8 @@ void logStats(const RelayStats& st) {
                 static_cast<unsigned>(FRY_RELAY_STACK_BYTES),
                 static_cast<unsigned>(ESP.getFreeHeap()), static_cast<unsigned>(ESP.getMinFreeHeap()),
                 static_cast<unsigned>(st.finHalf), static_cast<unsigned>(st.finClose),
-                static_cast<unsigned>(st.srcDrop), static_cast<unsigned>(st.dnsFail));
+                static_cast<unsigned>(st.srcDrop), static_cast<unsigned>(st.dnsFail),
+                static_cast<unsigned>(st.noDelayFail));
 }
 
 #if !FRY_RELAY_HALFCLOSE
@@ -660,7 +618,7 @@ bool acceptClients(int listenFd, const TunnelAddr& tun, fry_relay::Slot** slots,
     if (idx < 0) {
       idx = poolEvictIndex(slots, FRY_RELAY_SLOTS, now, kRelayEvictMinAgeMs);
       slotForceClose(*slots[idx], CloseReason::Evicted);
-      dnsRelease(s_dns.job[idx]);
+      dnsDropSlot(idx);
       releaseSlot(slots[idx], st);
     }
     if (!fdInRange(fd, FD_SETSIZE) || !setNonBlocking(fd)) {
@@ -676,8 +634,8 @@ bool acceptClients(int listenFd, const TunnelAddr& tun, fry_relay::Slot** slots,
     }
     int one = 1;
     setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &one, sizeof(one));  // as WiFiServer::available did
-    setNoDelay(fd);
-    dnsRelease(s_dns.job[idx]);  // a stale reference from the previous occupant of this slot
+    if (!setNoDelay(fd)) st.noDelayFail++;
+    dnsDropSlot(idx);  // a stale reference from the previous occupant of this slot
     slotInit(*s, fd, now);
 #if FRY_RELAY_HALFCLOSE
     s->finGraceMs = 0;  // the bench switch restores the old behaviour as a whole
@@ -695,14 +653,22 @@ void relayTaskFn(void*) {
   const uint16_t port = static_cast<uint16_t>(fry_config::getSocksPort());
 
   // The listener binds to the device's own tunnel address, never INADDR_ANY (see openListener).
-  // With no tunnel address there is nothing to bind to and no subnet to guard, so the relay simply
-  // does not run: one state-change line, no fallback to an open proxy.
+  // With no usable tunnel address there is nothing to bind to and no subnet to guard, so the relay
+  // simply does not run: one state-change line, no fallback to an open proxy. "Usable" excludes a
+  // prefix wider than /8 (every uplink address would be "in the tunnel", the guard would be a
+  // no-op) and a /32 (the subnet holds only this device, so every real tunnel peer is outside it
+  // and would be dropped - a bound port that can never serve anyone). Both fail closed instead.
   TunnelAddr tun;
   const String wgAddr = fry_config::getWgAddr();
-  if (!fry::parseIpv4Cidr(wgAddr.c_str(), &tun.ip, &tun.prefix) || tun.prefix < kMinTunnelPrefix) {
-    Serial.println("socks5: relay disabled - no usable tunnel address (fry/wgAddr), not listening");
+  if (!fry::parseIpv4Cidr(wgAddr.c_str(), &tun.ip, &tun.prefix) ||
+      !fry_relay::tunnelPrefixUsable(tun.prefix)) {
+    Serial.printf("socks5: relay disabled - no usable tunnel address (fry/wgAddr, prefix must be /%d../%d), not listening\n",
+                  fry_relay::kMinTunnelPrefix, fry_relay::kMaxTunnelPrefix);
+    vTaskDelete(nullptr);  // this task is the relay: there is nothing left for it to do
     return;
   }
+  s_dnsLock = xSemaphoreCreateMutex();  // serializes WiFi.hostByName(); see the DNS section
+  if (s_dnsLock == nullptr) Serial.println("socks5: no memory for the DNS lock - resolver tasks are unsequenced");
   char tunStr[16];
   fry::formatIpv4(tun.ip, tunStr, sizeof(tunStr));
 
@@ -738,7 +704,7 @@ void relayTaskFn(void*) {
     uint32_t now = millis();
     // Finished resolver jobs are settled here first, so a slot waiting on one sees its answer in
     // this same pass.
-    dnsSweep(now);
+    s_dns.jobs.sweep(s_dns.cache, now, kDnsTtlMs, kDnsFailTtlMs);
     for (int i = 0; i < FRY_RELAY_SLOTS; i++) {
       if (!slots[i]) continue;
       onTimer(*slots[i], timing, now);
@@ -749,7 +715,7 @@ void relayTaskFn(void*) {
     }
     for (int i = 0; i < FRY_RELAY_SLOTS; i++) {
       if (slots[i] && slotClosed(*slots[i])) {
-        dnsRelease(s_dns.job[i]);  // the job finishes on its own and still caches its answer
+        dnsDropSlot(i);  // the job finishes on its own and still caches its answer
         releaseSlot(slots[i], st);
       }
     }
@@ -766,7 +732,7 @@ void relayTaskFn(void*) {
     for (int i = 0; i < FRY_RELAY_SLOTS; i++) {
       if (slots[i] && wl.slotBad[i]) {
         slotForceClose(*slots[i], CloseReason::FdGuard);
-        dnsRelease(s_dns.job[i]);
+        dnsDropSlot(i);
         releaseSlot(slots[i], st);
         dropped = true;
       }
@@ -789,7 +755,7 @@ void relayTaskFn(void*) {
                                        poolFull ? kRelayFullSelectMs : kRelayMaxSelectMs);
     // A slot waiting on a resolver has no descriptor in the select() set, so nothing would wake the
     // loop when its answer lands: poll at this cadence until every job has settled.
-    if (dnsBusy() && tmo > kRelayDnsPollMs) tmo = kRelayDnsPollMs;
+    if (s_dns.jobs.pending() && tmo > kRelayDnsPollMs) tmo = kRelayDnsPollMs;
     int sr = 0;
     int se = 0;
     if (wl.n == 0) {
@@ -808,7 +774,7 @@ void relayTaskFn(void*) {
       for (int i = 0; i < FRY_RELAY_SLOTS; i++) {
         if (slots[i] && (!fdAlive(slots[i]->clientFd) || !fdAlive(slots[i]->upFd))) {
           slotForceClose(*slots[i], CloseReason::IoError);
-          dnsRelease(s_dns.job[i]);
+          dnsDropSlot(i);
           releaseSlot(slots[i], st);
         }
       }
@@ -830,7 +796,7 @@ void relayTaskFn(void*) {
       progress |= serviceSlot(*s, i, isSet(s->clientFd, &rd), isSet(s->upFd, &rd), isSet(s->upFd, &wr),
                               now, st);
       if (slotClosed(*s)) {
-        dnsRelease(s_dns.job[i]);
+        dnsDropSlot(i);
         releaseSlot(slots[i], st);
       }
     }
@@ -1037,9 +1003,11 @@ uint32_t relayedBytes() { return s_relayedBytes; }
 
 RelayLatency relayLatency() {
   RelayLatency l;
-  l.samples = s_latSamples;  // read first: it says what the other two describe
+  portENTER_CRITICAL(&s_latMux);  // the triple is always from one connect, never mixed
+  l.samples = s_latSamples;       // read first: it says what the other two describe
   l.p50Ms = s_latP50;
   l.p95Ms = s_latP95;
+  portEXIT_CRITICAL(&s_latMux);
   return l;
 }
 

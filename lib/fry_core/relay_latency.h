@@ -3,9 +3,11 @@
 // the installation heartbeat as relay_p50_ms / relay_p95_ms / relay_samples).
 //
 // The relay task records how long each upstream connect took; the heartbeat reads three numbers.
-// The buffer is bounded (kLatencySamples) so its cost is fixed whatever the traffic, and the
-// percentiles are computed on a sorted copy of at most kLatencySamples values, which the caller
-// does at a heartbeat's cadence, not per connection.
+// The buffer is bounded (kLatencySamples) so its cost is fixed whatever the traffic. The shim
+// recomputes both percentiles after every recorded connect (an insertion sort of at most 60 values,
+// ~1.8k comparisons, on the relay task, once per connect - not in the packet path) and publishes
+// p50/p95/count as one group, so a heartbeat never pays for the sort and never mixes fields from
+// different connects (src/esp32/vpn_wireguard.cpp recordLatency).
 //
 // Definitions (pinned by test/test_relay_latency):
 //   p50 = the median of the samples: the middle value, or for an even count the mean of the two

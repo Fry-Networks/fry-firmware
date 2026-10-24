@@ -1,12 +1,19 @@
 #pragma once
-// Host-keyed IPv4 cache in front of the relay's name resolution (src/esp32/vpn_wireguard.cpp).
+// Host-keyed IPv4 cache and resolver-job pool in front of the relay's name resolution
+// (src/esp32/vpn_wireguard.cpp).
 //
 // The 0.4.11 relay called WiFi.hostByName() from inside its select loop, so one slow lookup stalled
 // every other slot. Resolution is now a bounded asynchronous job polled once per service tick (see
-// the DNS section of vpn_wireguard.cpp); this is the cache in front of it, so a repeated CONNECT to
-// the same name costs no lookup at all and a name that just failed is not retried on every request.
+// the DNS section of vpn_wireguard.cpp): the cache in front of it means a repeated CONNECT to the
+// same name costs no lookup and a name that just failed is not retried on every request, and the
+// job pool bounds how many lookups can exist at once.
 //
-// Sizes are fixed (kDnsCacheEntries) and the eviction is LRU, so the cache costs the same whatever
+// The pool is where the accounting lives, because getting it wrong starves the relay: a job holds
+// one of kDnsJobs slots from begin() until it is BOTH finished and unreferenced (finishSlot /
+// sweep). A slot that takes the cache-hit path must give its finished job back, or two long-lived
+// hostname sessions pin both jobs and every later hostname gets no lookup at all.
+//
+// Sizes are fixed (kDnsCacheEntries, kDnsJobs) and eviction is LRU, so both cost the same whatever
 // the client sends. `now` is a free-running 32-bit millisecond counter (wrap-safe comparisons), as
 // everywhere in fry_relay.
 #include <cstddef>
@@ -17,6 +24,7 @@ namespace fry_relay {
 
 constexpr int kDnsCacheEntries = 4;
 constexpr size_t kDnsHostCap = 256;  // fry::Socks5ConnectRequest::host is char[256]
+constexpr int kDnsJobs = 2;          // concurrent resolve jobs (the shim keeps one task each)
 
 // DNS names are case-insensitive; the cache compares and stores them folded to lower case.
 inline char dnsFoldChar(char c) { return (c >= 'A' && c <= 'Z') ? static_cast<char>(c - 'A' + 'a') : c; }
@@ -130,6 +138,133 @@ class DnsCache {
   }
 
   DnsCacheEntry entries_[kDnsCacheEntries];
+};
+
+// One asynchronous lookup. `done`, `ok` and `ip` are written by the resolver task; `refs` and
+// `cached` by the relay task only.
+struct DnsJob {
+  char host[kDnsHostCap] = {0};
+  uint32_t ip = 0;    // host order; meaningful only when ok
+  bool ok = false;    // the name resolved to a non-zero address
+  bool done = false;  // the resolver task finished (success or failure)
+  bool cached = false;
+  int refs = 0;       // client slots currently waiting on this job
+  bool live = false;  // occupies one of the kDnsJobs slots
+};
+
+// Fixed pool of resolve jobs with the reference accounting the relay's NeedConnect path needs.
+class DnsJobs {
+ public:
+  // The live job already resolving `host`, or nullptr.
+  DnsJob* find(const char* host) {
+    if (host == nullptr || host[0] == 0) return nullptr;
+    for (int i = 0; i < kDnsJobs; i++) {
+      if (jobs_[i].live && dnsHostEq(jobs_[i].host, host)) return &jobs_[i];
+    }
+    return nullptr;
+  }
+
+  // Attaches the caller to `host`'s job, creating one if a slot is free, and takes a reference.
+  // nullptr means every job slot is busy with other names (or the name cannot be represented):
+  // the caller must fail the request on its own budget rather than block or grow.
+  // *created tells the caller to start a resolver task for the returned job.
+  DnsJob* begin(const char* host, bool* created) {
+    if (created != nullptr) *created = false;
+    DnsJob* j = find(host);
+    if (j != nullptr) {
+      j->refs++;
+      return j;
+    }
+    if (host == nullptr || host[0] == 0) return nullptr;
+    const size_t len = strlen(host);
+    if (len >= kDnsHostCap) return nullptr;
+    for (int i = 0; i < kDnsJobs; i++) {
+      DnsJob& n = jobs_[i];
+      if (n.live) continue;
+      for (size_t k = 0; k < len; k++) n.host[k] = host[k];
+      n.host[len] = 0;
+      n.ip = 0;
+      n.ok = false;
+      n.done = false;
+      n.cached = false;
+      n.refs = 1;
+      n.live = true;
+      if (created != nullptr) *created = true;
+      return &n;
+    }
+    return nullptr;
+  }
+
+  // Drops one slot's reference. The job itself is freed by sweep() once it is also finished.
+  void release(DnsJob* j) {
+    if (j != nullptr && j->live && j->refs > 0) j->refs--;
+  }
+
+  // Puts a finished job's result (address or failure) into `cache`, once. True when it is done.
+  bool finish(DnsJob* j, DnsCache& cache, uint32_t now, uint32_t okTtlMs, uint32_t failTtlMs) {
+    if (j == nullptr || !j->live || !j->done) return false;
+    if (!j->cached) {
+      if (j->ok) {
+        cache.store(j->host, j->ip, now, okTtlMs);
+      } else {
+        cache.storeFailure(j->host, now, failTtlMs);
+      }
+      j->cached = true;
+    }
+    return true;
+  }
+
+  // The slot's own job, when it is finished: settle it, then drop the slot's reference and clear
+  // the pointer. This is what keeps a session that already has its answer from holding a resolver
+  // slot for the rest of its life. Returns true when the job was finished.
+  bool finishSlot(DnsJob*& slotJob, DnsCache& cache, uint32_t now, uint32_t okTtlMs,
+                  uint32_t failTtlMs) {
+    if (!finish(slotJob, cache, now, okTtlMs, failTtlMs)) return false;
+    release(slotJob);
+    slotJob = nullptr;
+    return true;
+  }
+
+  // Settles every finished job and frees the ones nothing waits on any more, so the answer of a job
+  // whose slot was evicted or closed is still cached for the next request.
+  void sweep(DnsCache& cache, uint32_t now, uint32_t okTtlMs, uint32_t failTtlMs) {
+    for (int i = 0; i < kDnsJobs; i++) {
+      DnsJob& j = jobs_[i];
+      if (!j.live) continue;
+      finish(&j, cache, now, okTtlMs, failTtlMs);
+      if (j.cached && j.refs == 0) freeSlot(j);
+    }
+  }
+
+  // True while at least one job is still resolving: the shim must then poll it, not sleep.
+  bool pending() const {
+    for (int i = 0; i < kDnsJobs; i++) {
+      if (jobs_[i].live && !jobs_[i].done) return true;
+    }
+    return false;
+  }
+
+  int liveCount() const {
+    int n = 0;
+    for (int i = 0; i < kDnsJobs; i++) {
+      if (jobs_[i].live) n++;
+    }
+    return n;
+  }
+  int freeCount() const { return kDnsJobs - liveCount(); }
+
+ private:
+  static void freeSlot(DnsJob& j) {
+    j.host[0] = 0;
+    j.ip = 0;
+    j.ok = false;
+    j.done = false;
+    j.cached = false;
+    j.refs = 0;
+    j.live = false;
+  }
+
+  DnsJob jobs_[kDnsJobs];
 };
 
 }  // namespace fry_relay

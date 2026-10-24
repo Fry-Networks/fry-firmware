@@ -60,6 +60,20 @@ void test_a_slash_8_is_the_floor_and_matches_only_its_first_octet() {
   TEST_ASSERT_FALSE(ipInSubnet(ip(11, 13, 13, 2), kDev, 8));
 }
 
+void test_only_a_prefix_that_leaves_room_for_a_peer_can_serve_anyone() {
+  // The relay does not listen at all outside this range (vpn_wireguard.cpp relayTaskFn).
+  TEST_ASSERT_EQUAL_INT(31, fry_relay::kMaxTunnelPrefix);
+  TEST_ASSERT_FALSE(fry_relay::tunnelPrefixUsable(0));
+  TEST_ASSERT_FALSE(fry_relay::tunnelPrefixUsable(7));   // wider than /8: the guard would pass everything
+  TEST_ASSERT_TRUE(fry_relay::tunnelPrefixUsable(8));
+  TEST_ASSERT_TRUE(fry_relay::tunnelPrefixUsable(24));
+  TEST_ASSERT_TRUE(fry_relay::tunnelPrefixUsable(30));
+  TEST_ASSERT_TRUE(fry_relay::tunnelPrefixUsable(31));   // the device plus exactly one peer
+  TEST_ASSERT_FALSE(fry_relay::tunnelPrefixUsable(32));  // the device alone: every peer would be dropped
+  // ...which is exactly what ipInSubnet() would do with a /32, so the two agree.
+  TEST_ASSERT_FALSE(ipInSubnet(ip(10, 13, 13, 1), kDev, 32));
+}
+
 void test_the_device_address_need_not_be_the_network_address() {
   // .2/24 is inside 10.13.13.0/24 even though it is not the network address itself.
   TEST_ASSERT_TRUE(ipInSubnet(kDev, ip(10, 13, 13, 200), 24));
@@ -92,6 +106,7 @@ int main(int, char**) {
   RUN_TEST(test_a_slash_32_admits_only_the_device_address);
   RUN_TEST(test_a_prefix_off_an_octet_boundary_uses_the_real_mask);
   RUN_TEST(test_a_slash_8_is_the_floor_and_matches_only_its_first_octet);
+  RUN_TEST(test_only_a_prefix_that_leaves_room_for_a_peer_can_serve_anyone);
   RUN_TEST(test_the_device_address_need_not_be_the_network_address);
   RUN_TEST(test_the_counter_saturates_instead_of_wrapping);
   return UNITY_END();

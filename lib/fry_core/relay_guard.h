@@ -20,6 +20,18 @@ namespace fry_relay {
 // wider than /8 (wg_provision.cpp), so the same floor applies here.
 constexpr int kMinTunnelPrefix = 8;
 
+// A /32 tunnel address is this device alone: no peer can be inside its subnet, so the relay would
+// bind a port and then drop every tunnel peer that reached it. That is worse than not running (an
+// open port that can never serve), so a /32 disables the relay with one log line instead. A /31 is
+// the smallest prefix that can hold a peer next to the device.
+constexpr int kMaxTunnelPrefix = 31;
+
+// Whether a provisioned tunnel prefix leaves room for at least one peer, i.e. whether the relay can
+// admit anyone at all. Both ends fail closed: no listener rather than an unguarded one.
+inline bool tunnelPrefixUsable(int prefix) {
+  return prefix >= kMinTunnelPrefix && prefix <= kMaxTunnelPrefix;
+}
+
 // True when `ip` shares the subnet of `deviceIp`/`prefix`, i.e. the address a tunnel peer must have
 // to reach this device's relay. The device's own address counts as inside.
 inline bool ipInSubnet(uint32_t ip, uint32_t deviceIp, int prefix) {
