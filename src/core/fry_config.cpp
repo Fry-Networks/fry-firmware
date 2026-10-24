@@ -224,20 +224,6 @@ void clearInstallation() {
 
 // ── fry_vpn ───────────────────────────────────────────────────────────────
 
-namespace {
-// hasVpnConfig() is polled from every loop pass (fry_vpn::tick -> fry_wg_provision::tick ->
-// wg_provision_client.cpp's guard), and on ESP32 each call is Preferences.begin("fry_vpn", true).
-// While that namespace does not exist yet - any board that has not provisioned WireGuard, which is
-// every board on a first boot - ESP-IDF logs
-//   [E][Preferences.cpp:50] begin(): nvs_open failed: NOT_FOUND
-// on EVERY call. Measured: 4326 such lines in 54 s (capture e32-a3b-224212, t=233..54012 ms,
-// ~12 ms apart = one per loop pass), on a board whose NVS held only cal_data/nimble_bond/
-// fry_wifi/fry. The answer cannot change behind our back: every writer of the fry_vpn namespace
-// is in this file, so each one invalidates the cache below through vpnConfigChanged().
-int8_t s_vpnConfigured = -1;  // -1 unknown, 0 no, 1 yes
-void vpnConfigChanged() { s_vpnConfigured = -1; }
-}  // namespace
-
 String getWgPriv() {
   KvStore p;
   p.begin("fry_vpn", true);
@@ -246,7 +232,6 @@ String getWgPriv() {
   return v;
 }
 void setWgPriv(const char* v) {
-  vpnConfigChanged();
   KvStore p;
   p.begin("fry_vpn", false);
   p.putString("wgPriv", v);
@@ -261,7 +246,6 @@ String getWgPub() {
   return v;
 }
 void setWgPub(const char* v) {
-  vpnConfigChanged();
   KvStore p;
   p.begin("fry_vpn", false);
   p.putString("wgPub", v);
@@ -276,7 +260,6 @@ String getWgPeerPub() {
   return v;
 }
 void setWgPeerPub(const char* v) {
-  vpnConfigChanged();
   KvStore p;
   p.begin("fry_vpn", false);
   p.putString("wgPeerPub", v);
@@ -291,7 +274,6 @@ String getWgPsk() {
   return v;
 }
 void setWgPsk(const char* v) {
-  vpnConfigChanged();
   KvStore p;
   p.begin("fry_vpn", false);
   p.putString("wgPsk", v);
@@ -306,7 +288,6 @@ String getWgEndpoint() {
   return v;
 }
 void setWgEndpoint(const char* v) {
-  vpnConfigChanged();
   KvStore p;
   p.begin("fry_vpn", false);
   p.putString("wgEndpoint", v);
@@ -321,7 +302,6 @@ uint32_t getWgPort() {
   return v;
 }
 void setWgPort(uint32_t v) {
-  vpnConfigChanged();
   KvStore p;
   p.begin("fry_vpn", false);
   p.putUInt("wgPort", v);
@@ -336,7 +316,6 @@ String getWgAddr() {
   return v;
 }
 void setWgAddr(const char* v) {
-  vpnConfigChanged();
   KvStore p;
   p.begin("fry_vpn", false);
   p.putString("wgAddr", v);
@@ -365,7 +344,6 @@ String getWgAllowed() {
   return v;
 }
 void setWgAllowed(const char* csv) {
-  vpnConfigChanged();
   KvStore p;
   p.begin("fry_vpn", false);
   p.putString("wgAllowed", csv);
@@ -380,7 +358,6 @@ uint32_t getWgKeepalive() {
   return v;
 }
 void setWgKeepalive(uint32_t v) {
-  vpnConfigChanged();
   KvStore p;
   p.begin("fry_vpn", false);
   p.putUInt("wgKeepalive", v);
@@ -395,7 +372,6 @@ uint32_t getWgProvAt() {
   return v;
 }
 void setWgProvAt(uint32_t epochS) {
-  vpnConfigChanged();
   KvStore p;
   p.begin("fry_vpn", false);
   p.putUInt("wgProvAt", epochS);
@@ -403,7 +379,6 @@ void setWgProvAt(uint32_t epochS) {
 }
 
 void setWgKeypair(const char* priv, const char* pub) {
-  vpnConfigChanged();
   KvStore p;
   p.begin("fry_vpn", false);
   p.putString("wgPriv", priv);
@@ -414,7 +389,6 @@ void setWgKeypair(const char* priv, const char* pub) {
 void setWgProvisioned(const char* peerPub, const char* psk, const char* endpointHost,
                       uint16_t endpointPort, const char* addrCidr, const char* allowedCsv,
                       uint32_t keepaliveS) {
-  vpnConfigChanged();
   setWgPsk(psk);
   setWgEndpoint(endpointHost);
   setWgPort(endpointPort);
@@ -426,17 +400,14 @@ void setWgProvisioned(const char* peerPub, const char* psk, const char* endpoint
 }
 
 bool hasVpnConfig() {
-  if (s_vpnConfigured >= 0) return s_vpnConfigured == 1;  // see the cache's comment above
   KvStore p;
   p.begin("fry_vpn", true);
   bool has = p.isKey("wgPeerPub") && p.isKey("wgEndpoint");
   p.end();
-  s_vpnConfigured = has ? 1 : 0;
   return has;
 }
 
 void clearVpn() {
-  vpnConfigChanged();
   KvStore p;
   p.begin("fry_vpn", false);
   p.clear();
