@@ -20,9 +20,13 @@ struct LogThrottle {
   uint32_t lastMs = 0;
 };
 
-// True when `state` has never been logged, differs from the last logged state (change is logged
-// immediately, whatever the interval), or at least minIntervalMs have elapsed since the last
-// logged line. Records the line when it returns true, so the caller logs unconditionally on true.
+// True when `state` has never been logged, differs from the last logged state (a change is logged
+// immediately, whatever the interval), or at least minIntervalMs have elapsed since the last line.
+// Records the line when it returns true, so the caller logs unconditionally on true.
+//
+// minIntervalMs == 0 means CHANGE-ONLY: it never restates an unchanged state, so the caller can
+// feed this the state that is NOT worth a periodic line (e.g. "the config is present") purely so
+// that the next real change back is reported immediately.
 bool shouldLogState(LogThrottle& throttle, int32_t state, uint32_t nowMs, uint32_t minIntervalMs);
 
 }  // namespace fry

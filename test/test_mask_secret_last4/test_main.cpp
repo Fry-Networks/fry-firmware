@@ -39,18 +39,42 @@ void test_a_setup_code_shows_only_its_last_four() {
   TEST_ASSERT_EQUAL_STRING(ELL "2345", out);
 }
 
-void test_a_four_character_value_is_shown_in_full_after_the_ellipsis() {
+// REV-A F4: "the last 4 characters" of a 4-character secret IS the secret, so 4 or fewer prints
+// the ellipsis and nothing else. No length may ever come out whole.
+void test_a_value_of_four_characters_or_fewer_never_shows_any_of_itself() {
   char out[kCap];
-  TEST_ASSERT_EQUAL_UINT32(7, fry::maskSecretLast4("wxyz", out, sizeof(out)));
-  TEST_ASSERT_EQUAL_STRING(ELL "wxyz", out);
+  TEST_ASSERT_EQUAL_UINT32(3, fry::maskSecretLast4("wxyz", out, sizeof(out)));
+  TEST_ASSERT_EQUAL_STRING(ELL, out);
+  TEST_ASSERT_EQUAL_UINT32(3, fry::maskSecretLast4("ab", out, sizeof(out)));
+  TEST_ASSERT_EQUAL_STRING(ELL, out);
+  TEST_ASSERT_EQUAL_UINT32(3, fry::maskSecretLast4("z", out, sizeof(out)));
+  TEST_ASSERT_EQUAL_STRING(ELL, out);
 }
 
-void test_a_short_value_shows_all_of_itself_after_the_ellipsis() {
+void test_the_whole_value_is_never_printed_for_any_length() {
+  const char* values[] = {"a", "ab", "abc", "abcd", "abcde", "abcdef", "ThePromisedNeverLAN",
+                          "ABCD2345", "a-very-long-ssid-42"};
+  for (const char* v : values) {
+    char out[kCap];
+    const size_t n = strlen(v);
+    const size_t written = fry::maskSecretLast4(v, out, sizeof(out));
+    TEST_ASSERT_TRUE(written > 0);
+    // The rendered text must never contain the entire value.
+    TEST_ASSERT_NULL(strstr(out, v));
+    if (n > 4) {
+      TEST_ASSERT_EQUAL_UINT32(7, written);          // ellipsis + 4
+      TEST_ASSERT_EQUAL_STRING(v + n - 4, out + 3);  // and those 4 are the tail
+    } else {
+      TEST_ASSERT_EQUAL_UINT32(3, written);          // ellipsis only
+      TEST_ASSERT_EQUAL_STRING(ELL, out);
+    }
+  }
+}
+
+void test_five_characters_is_the_first_length_that_can_show_a_tail() {
   char out[kCap];
-  TEST_ASSERT_EQUAL_UINT32(5, fry::maskSecretLast4("ab", out, sizeof(out)));
-  TEST_ASSERT_EQUAL_STRING(ELL "ab", out);
-  TEST_ASSERT_EQUAL_UINT32(4, fry::maskSecretLast4("z", out, sizeof(out)));
-  TEST_ASSERT_EQUAL_STRING(ELL "z", out);
+  TEST_ASSERT_EQUAL_UINT32(7, fry::maskSecretLast4("abcde", out, sizeof(out)));
+  TEST_ASSERT_EQUAL_STRING(ELL "bcde", out);
 }
 
 void test_unprintable_and_non_ascii_bytes_in_the_tail_become_question_marks() {
@@ -82,7 +106,7 @@ void test_a_too_small_capacity_writes_nothing_and_never_truncates() {
   memset(out, 'X', sizeof(out));
   TEST_ASSERT_EQUAL_UINT32(0, fry::maskSecretLast4("HomeNetwork", out, 7));  // needs 8
   TEST_ASSERT_EQUAL_STRING("", out);
-  TEST_ASSERT_EQUAL_UINT32(0, fry::maskSecretLast4("ab", out, 5));  // needs 6
+  TEST_ASSERT_EQUAL_UINT32(0, fry::maskSecretLast4("ab", out, 3));  // ellipsis-only form needs 4
   TEST_ASSERT_EQUAL_STRING("", out);
   TEST_ASSERT_EQUAL_UINT32(0, fry::maskSecretLast4("HomeNetwork", out, 0));
   TEST_ASSERT_EQUAL_STRING("", out);
@@ -92,9 +116,9 @@ void test_the_exact_capacity_fits() {
   char out[kCap];
   TEST_ASSERT_EQUAL_UINT32(7, fry::maskSecretLast4("HomeNetwork", out, kCap));
   TEST_ASSERT_EQUAL_STRING(ELL "work", out);
-  char shortOut[6];
-  TEST_ASSERT_EQUAL_UINT32(5, fry::maskSecretLast4("ab", shortOut, sizeof(shortOut)));
-  TEST_ASSERT_EQUAL_STRING(ELL "ab", shortOut);
+  char shortOut[4];  // the ellipsis-only form needs exactly 4
+  TEST_ASSERT_EQUAL_UINT32(3, fry::maskSecretLast4("ab", shortOut, sizeof(shortOut)));
+  TEST_ASSERT_EQUAL_STRING(ELL, shortOut);
 }
 
 void test_no_five_character_run_of_the_value_survives_the_mask() {
@@ -117,8 +141,9 @@ int main(int, char**) {
   UNITY_BEGIN();
   RUN_TEST(test_the_form_is_ellipsis_then_the_last_four);
   RUN_TEST(test_a_setup_code_shows_only_its_last_four);
-  RUN_TEST(test_a_four_character_value_is_shown_in_full_after_the_ellipsis);
-  RUN_TEST(test_a_short_value_shows_all_of_itself_after_the_ellipsis);
+  RUN_TEST(test_a_value_of_four_characters_or_fewer_never_shows_any_of_itself);
+  RUN_TEST(test_the_whole_value_is_never_printed_for_any_length);
+  RUN_TEST(test_five_characters_is_the_first_length_that_can_show_a_tail);
   RUN_TEST(test_unprintable_and_non_ascii_bytes_in_the_tail_become_question_marks);
   RUN_TEST(test_null_or_empty_value_writes_an_empty_string_and_returns_zero);
   RUN_TEST(test_a_null_output_buffer_is_harmless);

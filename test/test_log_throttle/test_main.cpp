@@ -53,6 +53,30 @@ void test_the_interval_is_wrap_safe_on_a_32_bit_millisecond_counter() {
                                        fry::kLogStateMinIntervalMs));
 }
 
+void test_a_zero_interval_never_restates_an_unchanged_state() {
+  // REV-A F7: the caller feeds the state that is NOT worth a periodic line ("config present")
+  // purely so the next real change back is reported immediately. With 0 it must be change-only.
+  fry::LogThrottle t;
+  TEST_ASSERT_TRUE(fry::shouldLogState(t, 0, 1000, 0));    // first observation
+  TEST_ASSERT_FALSE(fry::shouldLogState(t, 0, 2000, 0));
+  TEST_ASSERT_FALSE(fry::shouldLogState(t, 0, 1000000000u, 0));  // however long it has been
+  TEST_ASSERT_TRUE(fry::shouldLogState(t, 1, 3000, 0));    // a real change is immediate
+  TEST_ASSERT_FALSE(fry::shouldLogState(t, 1, 4000, 0));
+}
+
+void test_a_real_state_change_logs_immediately_in_both_directions() {
+  // The shape src/esp32/vpn_wireguard.cpp uses: absent is restated every 10 min, present is
+  // change-only, and both share one throttle so either transition is reported at once.
+  fry::LogThrottle t;
+  const uint32_t tenMin = fry::kLogStateMinIntervalMs;
+  TEST_ASSERT_TRUE(fry::shouldLogState(t, 1, 1000, tenMin));          // absent, first sighting
+  TEST_ASSERT_FALSE(fry::shouldLogState(t, 1, 2000, tenMin));
+  TEST_ASSERT_TRUE(fry::shouldLogState(t, 1, 1000 + tenMin, tenMin)); // absent, 10-min restate
+  TEST_ASSERT_TRUE(fry::shouldLogState(t, 0, 11000, 0));              // config appears -> at once
+  TEST_ASSERT_FALSE(fry::shouldLogState(t, 0, 12000, 0));
+  TEST_ASSERT_TRUE(fry::shouldLogState(t, 1, 13000, tenMin));         // it disappears again -> at once
+}
+
 void test_the_ten_minute_default_is_ten_minutes() {
   TEST_ASSERT_EQUAL_UINT32(600000u, fry::kLogStateMinIntervalMs);
 }
@@ -69,6 +93,8 @@ int main(int, char**) {
   RUN_TEST(test_the_interval_itself_logs);
   RUN_TEST(test_a_state_change_logs_immediately_even_inside_the_interval);
   RUN_TEST(test_the_interval_is_wrap_safe_on_a_32_bit_millisecond_counter);
+  RUN_TEST(test_a_zero_interval_never_restates_an_unchanged_state);
+  RUN_TEST(test_a_real_state_change_logs_immediately_in_both_directions);
   RUN_TEST(test_the_ten_minute_default_is_ten_minutes);
   return UNITY_END();
 }

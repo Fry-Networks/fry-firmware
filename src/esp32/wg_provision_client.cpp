@@ -13,6 +13,7 @@
 #include "../core/http_tls.h"
 #include "../core/miner_key.h"
 #include "log_throttle.h"
+#include "ntp_kick.h"
 #include "config.h"
 #include "heap_gate.h"
 #include "wg_provision.h"
@@ -108,9 +109,26 @@ void tick() {
   bool heapOk = fry::heapGatePass(
       ESP.getFreeHeap(), fry::queryMaxFreeBlock(), HEAP_GATE_OTA,
       fry::otaMinContiguousBlock(/*isHttps=*/true, /*bearsslSingleBuffer=*/false, HEAP_GATE_OTA_BLOCK));
-  // A short, non-blocking check: if NTP already synced this returns true immediately; otherwise
-  // it kicks off (or re-kicks) the sync and returns false without materially delaying tick().
-  bool clockOk = fry_hwapi::ensureNtpSynced(/*timeoutMs=*/1);
+  // A short, non-blocking check: if NTP already synced this returns true immediately; otherwise it
+  // starts the sync and returns false without materially delaying tick().
+  //
+  // F6 (rev-A): ensureNtpSynced() issues configTime(), which RESTARTS the SNTP request - and this
+  // line runs on every retry, 5-60 s apart while NTP is out (fry::wgRetryDelayMs NoClock). Re-issuing
+  // it there kept resetting the very sync the board was waiting for. So it is issued once, and again
+  // only after lib/fry_core/ntp_kick.h's interval; every other pass just READS the clock.
+  // The bounded retry schedule itself is unchanged.
+  static bool s_ntpStarted = false;
+  static unsigned long s_ntpStartedMs = 0;
+  const unsigned long ntpNowMs = millis();
+  bool clockOk;
+  if (fry::ntpRestartDue(s_ntpStarted, static_cast<uint32_t>(ntpNowMs),
+                         static_cast<uint32_t>(s_ntpStartedMs))) {
+    s_ntpStarted = true;
+    s_ntpStartedMs = ntpNowMs;
+    clockOk = fry_hwapi::ensureNtpSynced(/*timeoutMs=*/1);
+  } else {
+    clockOk = static_cast<time_t>(time(nullptr)) > 946684800;  // read only: no restart
+  }
 
   int32_t httpStatus = -1;
   uint32_t retryAfterS = 0;
