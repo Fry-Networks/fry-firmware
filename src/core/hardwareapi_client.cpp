@@ -133,6 +133,15 @@ int computeSlot() {
 
 }  // namespace
 
+void kickNtp() {
+  static bool kicked = false;
+  if (kicked) return;
+  kicked = true;
+  // Fire and forget: SNTP keeps retrying on its own, and ensureNtpSynced() re-issues configTime()
+  // anyway if it is called with a timeout. Nothing here waits.
+  configTime(0, 0, "pool.ntp.org", "time.nist.gov");
+}
+
 bool ensureNtpSynced(uint32_t timeoutMs) {
   if (s_ntpSynced) return true;
   configTime(0, 0, "pool.ntp.org", "time.nist.gov");

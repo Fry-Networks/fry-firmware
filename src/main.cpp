@@ -11,6 +11,7 @@
 #include "config.h"
 #include "core/fry_config.h"
 #include "core/flash_print.h"
+#include "core/hardwareapi_client.h"
 #include "core/improv_serial_glue.h"
 #include "core/miner_key.h"
 #include "core/ota_client.h"
@@ -110,6 +111,10 @@ void attemptWifiConnect() {
   fry::ProvErr err = fry::ProvErr::None;
   if (fry_wifi::connect(ssid, pass, WIFI_CONNECT_TIMEOUT_MS, &err)) {
     fry_provisioning::notifyWifiUp();
+    // Start NTP now, without waiting: every HTTPS call verifies certificates against the clock
+    // (src/esp8266/http_tls.cpp) and refuses to open a session while it is unusable, so the sync
+    // has to be running before the first registration attempt rather than only before the first PoC.
+    fry_hwapi::kickNtp();
     // registerInstallation() (T5's strong override) reports its own real outcome via
     // notifyApiOk()/notifyApiFail() — it must NOT be assumed to succeed here. Registration is
     // one optional subsystem, not a boot gate: VPN and the Ready-phase report loop start

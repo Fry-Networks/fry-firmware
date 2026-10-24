@@ -26,6 +26,13 @@ bool getVersions(String& outJson);
 // Blocks (bounded) until NTP time looks plausible. Call once before the first PoC.
 bool ensureNtpSynced(uint32_t timeoutMs = 15000);
 
+// Starts (or re-starts) the SNTP sync and returns IMMEDIATELY - no loop, no delay. Call it as soon
+// as Wi-Fi connects: the first HTTPS call (the boot registration) now refuses to open a session
+// while the clock is unusable (src/esp8266/http_tls.cpp), so the sync must already be running by
+// then or that registration is deferred to its next retry. Idempotent: at most one configTime()
+// per boot.
+void kickNtp();
+
 // Drives the INSTALL_HEARTBEAT_MS / POC_INTERVAL_MS cadence. Call every loop() once WiFi is
 // connected. This is also installed as the strong override of fry_trigger_register_now(),
 // fry_trigger_poc_now() and fry_trigger_report_loop_tick() (see trigger_hooks.h).
