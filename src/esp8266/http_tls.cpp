@@ -24,10 +24,185 @@ bool probeMfln512(const char* host, void*) {
   return WiFiClientSecure::probeMaxFragmentLength(host, 443, 512);
 }
 
+#if defined(FRY_TLS_BENCH)
+// =============================================================================================
+// BENCH ONLY (oneshot esp7, C1). Compiled only with -DFRY_TLS_BENCH=1, which only
+// [env:esp8266_tlsbench] sets; no production env defines it, so none of this is in a shipped
+// image. It answers one question the source cannot: does a BearSSL X.509 trust-anchor set fit
+// in this chip's heap at the moment beginHttpsUrl() sets TLS up, and does validation then
+// actually REFUSE a connection it cannot vouch for while ACCEPTING the real hosts?
+//
+// Ordering matters and mirrors the production design: the anchor set is built BEFORE the heap
+// sample, so fr::planTls() decides against the heap as it will really be (anchors resident).
+// If the plan still passes and the probe handshakes succeed, C1 fits; if the plan now refuses,
+// it does not and C1 ships as a BLOCKER with these numbers.
+//
+// Prints, one line each, prefix "bench:":
+//   anchors built n=.. cost_free=.. cost_blk=..   heap the anchor set costs, measured
+//   sizes client_ctx=.. minimal_ctx=.. ...        the structures a handshake allocates
+//   anchor i=.. cert=.. dn=.. key=..              per-anchor bytes (cert DER + DN + public key)
+//   ta host=.. n=.. now=.. ntp=.. rx=.. tx=..     the installed anchor set at THIS call
+//   plan host=.. refused                          planTls refused with anchors resident
+//   negctl host=.. ok=0 ssl_err=.. msg=".."       NO anchors installed: must be refused
+//   probe host=.. ok=1 ssl_err=0 used_free=..     anchors installed: real host, real handshake
+//   bigprobe host=.. rx=16384 tx=512 ok=..        the OTA image-download sizing, once per boot
+// At most 3 handshakes on the first host, 1 on each later one, 4 hosts, then it stops.
+#include <time.h>
+
+#include "tls_bench_anchors.h"
+
+BearSSL::X509List* gBenchAnchors = nullptr;
+uint32_t gBenchAnchorFree = 0;
+uint32_t gBenchAnchorBlk = 0;
+char gBenchProbedHosts[4][48];
+uint8_t gBenchProbedCount = 0;
+bool gBenchNegDone = false;
+bool gBenchBigDone = false;
+
+bool benchClockOk() { return static_cast<time_t>(time(nullptr)) > static_cast<time_t>(1600000000); }
+
+uint32_t benchUsed(uint32_t before, uint32_t after) { return after <= before ? before - after : 0; }
+
+void benchPrepare() {
+  if (gBenchAnchors) {
+    Serial.printf_P(PSTR("bench: anchors resident n=%u cost_free=%u cost_blk=%u free=%u blk=%u\n"),
+                    static_cast<unsigned>(gBenchAnchors->getCount()),
+                    static_cast<unsigned>(gBenchAnchorFree), static_cast<unsigned>(gBenchAnchorBlk),
+                    static_cast<unsigned>(ESP.getFreeHeap()),
+                    static_cast<unsigned>(fry::queryMaxFreeBlock()));
+    return;
+  }
+  const uint32_t f0 = ESP.getFreeHeap();
+  const uint32_t b0 = fry::queryMaxFreeBlock();
+  gBenchAnchors = new BearSSL::X509List(kBenchAnchorsPem);
+  const uint32_t f1 = ESP.getFreeHeap();
+  const uint32_t b1 = fry::queryMaxFreeBlock();
+  if (!gBenchAnchors || gBenchAnchors->getCount() == 0) {
+    Serial.printf_P(PSTR("bench: anchors FAILED free=%u blk=%u (no anchors parsed - numbers below are meaningless)\n"),
+                    static_cast<unsigned>(f1), static_cast<unsigned>(b1));
+    return;
+  }
+  gBenchAnchorFree = benchUsed(f0, f1);
+  gBenchAnchorBlk = benchUsed(b0, b1);
+  Serial.printf_P(PSTR("bench: anchors built n=%u cost_free=%u cost_blk=%u free=%u blk=%u\n"),
+                  static_cast<unsigned>(gBenchAnchors->getCount()),
+                  static_cast<unsigned>(gBenchAnchorFree), static_cast<unsigned>(gBenchAnchorBlk),
+                  static_cast<unsigned>(f1), static_cast<unsigned>(b1));
+  Serial.printf_P(PSTR("bench: sizes client_ctx=%u minimal_ctx=%u ta_struct=%u cert_struct=%u\n"),
+                  static_cast<unsigned>(sizeof(br_ssl_client_context)),
+                  static_cast<unsigned>(sizeof(br_x509_minimal_context)),
+                  static_cast<unsigned>(sizeof(br_x509_trust_anchor)),
+                  static_cast<unsigned>(sizeof(br_x509_certificate)));
+  const br_x509_certificate* certs = gBenchAnchors->getX509Certs();
+  const br_x509_trust_anchor* tas = gBenchAnchors->getTrustAnchors();
+  for (size_t i = 0; i < gBenchAnchors->getCount(); i++) {
+    uint32_t key = 0;
+    if (tas[i].pkey.key_type == BR_KEYTYPE_RSA) {
+      key = tas[i].pkey.key.rsa.nlen + tas[i].pkey.key.rsa.elen;
+    } else if (tas[i].pkey.key_type == BR_KEYTYPE_EC) {
+      key = tas[i].pkey.key.ec.qlen;
+    }
+    Serial.printf_P(PSTR("bench: anchor i=%u cert=%u dn=%u key=%u type=%u\n"),
+                    static_cast<unsigned>(i), static_cast<unsigned>(certs[i].data_len),
+                    static_cast<unsigned>(tas[i].dn.len), static_cast<unsigned>(key),
+                    static_cast<unsigned>(tas[i].pkey.key_type));
+  }
+}
+
+// One real handshake on the caller's client, using whatever buffers/auth it carries right now.
+void benchProbe(WiFiClientSecure& sec, const char* tag, const String& host) {
+  const uint32_t f0 = ESP.getFreeHeap();
+  const uint32_t b0 = fry::queryMaxFreeBlock();
+  const bool ok = sec.connect(host.c_str(), 443);
+  const uint32_t f1 = ESP.getFreeHeap();
+  const uint32_t b1 = fry::queryMaxFreeBlock();
+  char msg[64] = {0};
+  const int err = ok ? 0 : sec.getLastSSLError(msg, sizeof(msg));
+  Serial.printf_P(PSTR("bench: %s host=%s ok=%d ssl_err=%d msg=\"%s\" free=%u used_free=%u blk=%u used_blk=%u\n"),
+                  tag, host.c_str(), ok ? 1 : 0, err, msg, static_cast<unsigned>(f0),
+                  static_cast<unsigned>(benchUsed(f0, f1)), static_cast<unsigned>(b0),
+                  static_cast<unsigned>(benchUsed(b0, b1)));
+  if (ok) Serial.printf_P(PSTR("bench: %s mfln=%d\n"), tag, sec.getMFLNStatus());
+  sec.stop();
+  yield();
+  Serial.printf_P(PSTR("bench: %s after_stop free=%u blk=%u\n"), tag,
+                  static_cast<unsigned>(ESP.getFreeHeap()),
+                  static_cast<unsigned>(fry::queryMaxFreeBlock()));
+}
+
+void benchAfterPlan(WiFiClientSecure& sec, const String& host, fry::TlsSizing sizing, int rx, int tx) {
+  if (!gBenchAnchors || gBenchAnchors->getCount() == 0) return;
+  const time_t now = time(nullptr);
+  sec.setTrustAnchors(gBenchAnchors);
+  sec.setX509Time(now);
+  Serial.printf_P(PSTR("bench: ta host=%s n=%u now=%ld ntp=%d rx=%d tx=%d free=%u blk=%u\n"),
+                  host.c_str(), static_cast<unsigned>(gBenchAnchors->getCount()),
+                  static_cast<long>(now), benchClockOk() ? 1 : 0, rx, tx,
+                  static_cast<unsigned>(ESP.getFreeHeap()),
+                  static_cast<unsigned>(fry::queryMaxFreeBlock()));
+  (void)sizing;
+
+  bool seen = false;
+  for (uint8_t i = 0; i < gBenchProbedCount; i++) {
+    if (strcmp(gBenchProbedHosts[i], host.c_str()) == 0) seen = true;
+  }
+  if (seen || gBenchProbedCount >= 4) {
+    Serial.printf_P(PSTR("bench: probe host=%s skipped (already probed this boot)\n"), host.c_str());
+    return;
+  }
+  strncpy(gBenchProbedHosts[gBenchProbedCount], host.c_str(), sizeof(gBenchProbedHosts[0]) - 1);
+  gBenchProbedHosts[gBenchProbedCount][sizeof(gBenchProbedHosts[0]) - 1] = 0;
+  gBenchProbedCount++;
+
+  // Negative control FIRST: with no trust anchors at all this handshake must FAIL. If it
+  // succeeds, validation is not on and every "probe ok=1" line below proves nothing.
+  if (!gBenchNegDone) {
+    gBenchNegDone = true;
+    sec.setTrustAnchors(nullptr);
+    benchProbe(sec, "negctl", host);
+    sec.setTrustAnchors(gBenchAnchors);
+    sec.setX509Time(time(nullptr));
+  }
+
+  benchProbe(sec, "probe", host);
+
+  // The OTA image-download sizing (16384/512), measured once on a real handshake. Skipped when
+  // this call already uses it, and the caller's own buffers are restored afterwards so the
+  // request this function is setting up runs exactly as it would without the probe.
+  if (!gBenchBigDone && rx != static_cast<int>(fry::kTlsBigRxBytes)) {
+    gBenchBigDone = true;
+    sec.setBufferSizes(fry::kTlsBigRxBytes, fry::kTlsTxBytes);
+    benchProbe(sec, "bigprobe", host);
+    if (rx > 0 && tx > 0) sec.setBufferSizes(rx, tx);
+    sec.setTrustAnchors(gBenchAnchors);
+    sec.setX509Time(time(nullptr));
+  }
+}
+
+void benchRefused(const String& host, const fry::HeapSample& heap, const fry::TlsFloors& floors) {
+  Serial.printf_P(PSTR("bench: plan host=%s refused_with_anchors_resident free=%u blk=%u floor_free=%u floor_blk=%u ta_n=%u\n"),
+                  host.c_str(), static_cast<unsigned>(heap.freeTotal),
+                  static_cast<unsigned>(heap.maxBlock), static_cast<unsigned>(floors.freeTotal),
+                  static_cast<unsigned>(floors.block),
+                  static_cast<unsigned>(gBenchAnchors ? gBenchAnchors->getCount() : 0));
+}
+
+#endif  // FRY_TLS_BENCH
+
 }  // namespace
 
 bool beginHttpsUrl(HTTPClient& http, WiFiClientSecure& sec, const String& url, bool mflnProbeWorthwhile,
                    bool smallReply) {
+#if defined(FRY_TLS_BENCH)
+  // BENCH ONLY: build the trust-anchor set BEFORE the sample below, so planTls() judges the heap
+  // exactly as production will, with the anchors already resident.
+  benchPrepare();
+  int benchRx = 0;
+  int benchTx = 0;
+#define FRY_BENCH_SIZES(r, t) do { benchRx = (r); benchTx = (t); } while (0)
+#else
+#define FRY_BENCH_SIZES(r, t) do {} while (0)
+#endif
   // DOCUMENTED LIMITATION (v0.2.0), not a bug for this run: unlike the ESP32 fix in this same
   // release (src/esp32/http_tls.cpp, sec.setCACertBundle()), this chip stays on setInsecure().
   // BearSSL trust-anchor verification (setTrustAnchors()/setX509Time()) needs its own
@@ -98,10 +273,14 @@ bool beginHttpsUrl(HTTPClient& http, WiFiClientSecure& sec, const String& url, b
                       host.c_str(), static_cast<unsigned>(floors.block),
                       static_cast<unsigned>(floors.freeTotal), static_cast<unsigned>(heap.maxBlock),
                       static_cast<unsigned>(heap.freeTotal));
+#if defined(FRY_TLS_BENCH)
+      benchRefused(host, heap, floors);
+#endif
       return false;
     case fry::TlsSizing::Small:
       FRY_PRINTLN("tls: low contiguous heap - MFLN probe skipped, 512/512");
       sec.setBufferSizes(512, 512);
+      FRY_BENCH_SIZES(512, 512);
       break;
     case fry::TlsSizing::Big:
       // blk is logged because the 30 s [health] line samples far too coarsely to catch this peak,
@@ -110,6 +289,7 @@ bool beginHttpsUrl(HTTPClient& http, WiFiClientSecure& sec, const String& url, b
       FRY_PRINTF("tls: peer does not honour MFLN - probe skipped, 16384/512 (blk=%u)\n",
                     static_cast<unsigned>(heap.maxBlock));
       sec.setBufferSizes(16384, 512);
+      FRY_BENCH_SIZES(16384, 512);
       break;
     case fry::TlsSizing::Medium:
       // The OTA manifest: github.com honours MFLN 512, the last hop (release-assets) does not and sends one 4146 B
@@ -118,6 +298,7 @@ bool beginHttpsUrl(HTTPClient& http, WiFiClientSecure& sec, const String& url, b
                       static_cast<unsigned>(fry::kTlsMediumRxBytes), static_cast<unsigned>(fry::kTlsTxBytes),
                       static_cast<unsigned>(heap.maxBlock));
       sec.setBufferSizes(fry::kTlsMediumRxBytes, fry::kTlsTxBytes);
+      FRY_BENCH_SIZES(fry::kTlsMediumRxBytes, fry::kTlsTxBytes);
       break;
     case fry::TlsSizing::ProbeFirst: {
       // The probe is a throwaway ~32 KB session plus a TIME_WAIT pcb: ask once per host per boot, not on
@@ -125,12 +306,19 @@ bool beginHttpsUrl(HTTPClient& http, WiFiClientSecure& sec, const String& url, b
       static fry::MflnCache mflnCache;
       if (!fry::mflnHonours(mflnCache, host.c_str(), probeMfln512, nullptr)) {
         sec.setBufferSizes(16384, 512);
+        FRY_BENCH_SIZES(16384, 512);
       } else {
         sec.setBufferSizes(512, 512);
+        FRY_BENCH_SIZES(512, 512);
       }
       break;
     }
   }
+
+#if defined(FRY_TLS_BENCH)
+  benchAfterPlan(sec, host, plan.sizing, benchRx, benchTx);
+#endif
+#undef FRY_BENCH_SIZES
 
   if (!http.begin(sec, url)) return false;
   http.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);
