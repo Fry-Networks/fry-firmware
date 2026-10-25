@@ -14,10 +14,12 @@
 #include "fry_config.h"
 #include "heartbeat_fields.h"
 #include "http_tls.h"
+#include "kv_store.h"
 #include "miner_key.h"
 #include "ota_client.h"
 #include "provisioning_transport.h"
 #include "reg_result.h"
+#include "stale_token_heal.h"
 #include "telemetry.h"
 #include "trigger_hooks.h"
 #include "wifi_station.h"
@@ -109,6 +111,9 @@ bool s_loggedNoKey = false;
 unsigned long s_lastPocMs = 0;
 bool s_registered = false;
 bool s_ntpSynced = false;
+// Stale-token self-heal (lib/fry_core/stale_token_heal.h): at most one per boot. The 6 h bound
+// across reboots is the persisted fry/healAt epoch.
+bool s_staleTokenHealed = false;
 
 const uint32_t kQuickRetryMs = 2000;
 
@@ -179,6 +184,100 @@ struct RegClients {
 }  // namespace
 #endif
 
+namespace {
+
+// NVS state of the stale-token self-heal (lib/fry_core/stale_token_heal.h), in the fry namespace
+// next to installId/deviceToken. The shadow pair is written BEFORE the live pair is cleared, so no
+// path leaves the board with neither pair, and it is dropped only once the new pair is proven.
+bool stashTokenPair() {
+  String id = fry_config::getInstallId(), tok = fry_config::getDeviceToken();
+  if (id.length() == 0 && tok.length() == 0) return false;
+  KvStore p;
+  if (!p.begin("fry", false)) return false;
+  bool ok = p.putString("shadowInstallId", id) > 0 && p.putString("shadowDeviceToken", tok) > 0;
+  p.end();
+  return ok;
+}
+
+void dropTokenPairShadow() {
+  KvStore p;
+  p.begin("fry", false);
+  p.remove("shadowInstallId");
+  p.remove("shadowDeviceToken");
+  p.end();
+}
+
+// Puts the shadow pair back and drops the shadows only when the live pair is the shadow pair byte
+// for byte; otherwise the shadows stay, so the board never holds neither pair.
+bool restoreTokenPair() {
+  KvStore r;
+  r.begin("fry", true);
+  String id = r.getString("shadowInstallId", ""), tok = r.getString("shadowDeviceToken", "");
+  r.end();
+  fry_config::setInstallId(id.c_str());
+  fry_config::setDeviceToken(tok.c_str());
+  if (!fry::pairsMatchByteForByte(id.c_str(), fry_config::getInstallId().c_str()) ||
+      !fry::pairsMatchByteForByte(tok.c_str(), fry_config::getDeviceToken().c_str())) {
+    return false;
+  }
+  dropTokenPairShadow();
+  return true;
+}
+
+// The bounded heal. Only the stale-token signature can reach it, and only while this boot and the
+// persisted 6 h window allow it, so it can never loop or storm. It shadows the identity pair,
+// clears the live pair, registers ONCE with NO Authorization header at all (clearing the token
+// would otherwise fall back to the build-time FRY_API_TOKEN), and restores the pair byte for byte
+// when that attempt fails for ANY reason. A success keeps the shadows until putPoc() sees an
+// accepted heartbeat. Returns true only for a fresh 2xx registration.
+bool healStaleTokenIfDue(HTTPClient& http, WiFiClientSecure& sec, const String& url,
+                         const char* installId, const String& body, int code, bool tokenSent) {
+  if (s_staleTokenHealed || !fry::isStaleTokenSignature(code, tokenSent)) return false;
+  KvStore h;
+  h.begin("fry", true);
+  const uint32_t epochNow = static_cast<uint32_t>(time(nullptr));
+  const uint32_t lastHeal = h.getUInt("healAt", 0);
+  h.end();
+  if (!fry::healWindowOpen(s_staleTokenHealed, lastHeal, epochNow)) return false;
+  s_staleTokenHealed = true;  // one per boot, whatever the outcome below
+  KvStore w;
+  w.begin("fry", false);
+  w.putUInt("healAt", epochNow);  // one per 6 h, across reboots
+  w.end();
+  if (!stashTokenPair()) return false;
+  fry_config::clearInstallation();
+  char newId[40];
+  fry_identity::ensureInstallId(newId, sizeof(newId));  // a fresh installation, registered token-less
+  String healBody = body;
+  healBody.replace(installId, newId);
+  const String healUrl = url.substring(0, url.length() - strlen(installId)) + newId;
+  int healCode = -1;
+  String token;
+  if (fry_http::beginHttpsUrl(http, sec, healUrl)) {
+    const FryText contentType = FRY_TEXT("Content-Type");  // test_flash_text pins the 3 literal uses
+    http.addHeader(contentType, FRY_TEXT("application/json"));
+    healCode = http.POST(healBody);
+    if (healCode >= 200 && healCode < 300) {
+      JsonDocument rdoc;
+      deserializeJson(rdoc, http.getString());
+      token = String(rdoc["device_token"] | "");
+    }
+  }
+  http.end();
+  if (healCode < 200 || healCode >= 300) {
+    restoreTokenPair();
+    return false;
+  }
+  if (token.length() > 0) fry_config::setDeviceToken(token.c_str());
+  if (!fry_config::getKeyOk()) fry_config::setKeyOk(true);  // the fresh registration confirmed it
+  s_lastRegHttp = healCode;  // the last registration attempt this boot is now the healed one
+  FRY_PRINTF("api: stale device token healed http=404 install=%s token=%s\n", newId,
+             token.length() > 0 ? "present" : "none");
+  return true;
+}
+
+}  // namespace
+
 bool registerInstallation() {
 #if defined(ARDUINO_ARCH_ESP8266)
   std::unique_ptr<RegText> text(new (std::nothrow) RegText());
@@ -235,6 +334,9 @@ bool registerInstallation() {
   serializeJson(doc, body);
 
   String url = fry_config::getApiBase() + FRY_TEXT("/installations/") + minerKey + FRY_TEXT("/installations/") + installId;
+  // Whether our stored device token (not the build-time bootstrap token) rides on this attempt:
+  // the stale-token signature needs both halves.
+  const bool deviceTokenSent = fry_config::getDeviceToken().length() > 0;
 
   // One attempt plus one quick retry for an outage only. Anything longer is tick()'s schedule, so
   // the loop (Improv, the reset button, the relay) is never held for more than one retry.
@@ -284,10 +386,17 @@ bool registerInstallation() {
     }
     if (!fry::regClassRetryQuickly(cls)) {
       // A 4xx is the server's answer; asking again seconds later gets the same one. This does NOT
-      // touch fry_config's device token: a 4xx here is a policy rejection, not an expired
-      // credential, and there is nothing to recover by clearing anything.
+      // touch fry_config's device token - except for the one stale-token signature below: a 404
+      // while OUR device token was sent means the token is stale (a WG1 apiBase then skips its
+      // token-less first-registration route), and the hourly retry would never clear it.
       readServerDetail(http, minerKey, detail, sizeof(detail));
       http.end();
+      if (healStaleTokenIfDue(http, sec, url, installId, body, code, deviceTokenSent)) {
+        s_regFailures = 0;
+        s_nextRegisterDelayMs = INSTALL_HEARTBEAT_MS;
+        fry_provisioning::notifyApiOk();
+        return true;
+      }
       break;
     }
     http.end();
@@ -363,6 +472,9 @@ int putPoc() {
   http.addHeader(FRY_TEXT("Content-Type"), FRY_TEXT("application/json"));
   int code = http.PUT(body);
   http.end();
+  // An accepted heartbeat proves the pair a healed registration installed; only now may the
+  // stale-token shadow pair go.
+  if (code >= 200 && code < 300) dropTokenPairShadow();
   fry_ota::noteHeartbeat(code, "poc");
   return code;
 }
