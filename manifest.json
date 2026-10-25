@@ -1,0 +1,19 @@
+{
+  "builds": {
+    "esp32": {
+      "sha256": "13e379cdc6566b3f1ef357040e6f6e0318a9bcfeba5742f7fea5ec91642232a2",
+      "url": "https://raw.githubusercontent.com/Fry-Networks/fry-firmware/esp10/bench-manifest/firmware-esp32.bin"
+    },
+    "esp32c3": {
+      "sha256": "993e33e43fcc3a0aeecad7a73d9e82a0350d9620f208c7564bcf9ebc491da4ad",
+      "url": "https://raw.githubusercontent.com/Fry-Networks/fry-firmware/esp10/bench-manifest/firmware-esp32c3.bin"
+    },
+    "esp8266": {
+      "sha256": "07e343656bf31b86e09d40d2605b6968f955d30414ea554cd7a39c6a224fa152",
+      "url": "https://raw.githubusercontent.com/Fry-Networks/fry-firmware/esp10/bench-manifest/firmware-esp8266.bin"
+    }
+  },
+  "channel": "prod",
+  "firmware_version": "0.4.15",
+  "olostep_kill": false
+}
