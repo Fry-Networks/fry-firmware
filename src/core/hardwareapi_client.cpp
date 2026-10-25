@@ -187,33 +187,60 @@ struct RegClients {
 namespace {
 
 // NVS state of the stale-token self-heal (lib/fry_core/stale_token_heal.h), in the fry namespace
-// next to installId/deviceToken. The shadow pair is written BEFORE the live pair is cleared, so no
-// path leaves the board with neither pair, and it is dropped only once the new pair is proven.
-bool stashTokenPair() {
-  String id = fry_config::getInstallId(), tok = fry_config::getDeviceToken();
-  if (id.length() == 0 && tok.length() == 0) return false;
-  KvStore p;
-  if (!p.begin("fry", false)) return false;
-  bool ok = p.putString("shadowInstallId", id) > 0 && p.putString("shadowDeviceToken", tok) > 0;
-  p.end();
-  return ok;
-}
+// next to installId/deviceToken. Every key name here is 15 characters or fewer: NVS_KEY_NAME_MAX_SIZE
+// is 16 including the NUL and nvs_set_str rejects anything longer, so a longer name would make the
+// whole heal a silent no-op. The shadow pair is written BEFORE the live pair is cleared, so no path
+// leaves the board with neither pair.
+const char* const kShadowId = "shdwInstallId";
+const char* const kShadowToken = "shdwDevToken";
 
-void dropTokenPairShadow() {
-  KvStore p;
-  p.begin("fry", false);
-  p.remove("shadowInstallId");
-  p.remove("shadowDeviceToken");
-  p.end();
-}
-
-// Puts the shadow pair back and drops the shadows only when the live pair is the shadow pair byte
-// for byte; otherwise the shadows stay, so the board never holds neither pair.
-bool restoreTokenPair() {
+// The shadow pair through one read-only handle ("" for a key that is absent).
+void readTokenPairShadow(String& id, String& tok) {
   KvStore r;
   r.begin("fry", true);
-  String id = r.getString("shadowInstallId", ""), tok = r.getString("shadowDeviceToken", "");
+  id = r.getString(kShadowId, "");
+  tok = r.getString(kShadowToken, "");
   r.end();
+}
+
+// Proven by READ-BACK of both values: ESP32's putString returns 0 for a rejected key and the
+// ESP8266 store ignores save() failure, so a write return alone proves nothing. An empty or
+// unreadable shadow is a failed stash, and the caller must then clear nothing.
+bool stashTokenPair() {
+  String id = fry_config::getInstallId(), tok = fry_config::getDeviceToken();
+  if (id.length() == 0 || tok.length() == 0) return false;
+  KvStore w;
+  if (!w.begin("fry", false)) return false;
+  bool wrote = w.putString(kShadowId, id) > 0 && w.putString(kShadowToken, tok) > 0;
+  w.end();
+  String rid, rtok;
+  readTokenPairShadow(rid, rtok);
+  return wrote && rid.length() > 0 && rtok.length() > 0 &&
+         fry::pairsMatchByteForByte(rid.c_str(), id.c_str()) &&
+         fry::pairsMatchByteForByte(rtok.c_str(), tok.c_str());
+}
+
+// Only an erase when a shadow key actually exists: no hourly nvs_erase_key error spam.
+void dropTokenPairShadow() {
+  KvStore r;
+  r.begin("fry", true);
+  bool any = r.isKey(kShadowId) || r.isKey(kShadowToken);
+  r.end();
+  if (!any) return;
+  KvStore w;
+  w.begin("fry", false);
+  w.remove(kShadowId);
+  w.remove(kShadowToken);
+  w.end();
+}
+
+// Puts the shadow pair back and drops the shadows only when BOTH live values are non-empty and
+// byte-identical to the shadows; otherwise nothing is written and the shadows stay, so the board
+// never holds neither pair.
+bool restoreTokenPair() {
+  String id, tok;
+  readTokenPairShadow(id, tok);
+  if (id.length() == 0 || tok.length() == 0) return false;  // an empty shadow is not a pair
   fry_config::setInstallId(id.c_str());
   fry_config::setDeviceToken(tok.c_str());
   if (!fry::pairsMatchByteForByte(id.c_str(), fry_config::getInstallId().c_str()) ||
@@ -224,27 +251,42 @@ bool restoreTokenPair() {
   return true;
 }
 
-// The bounded heal. Only the stale-token signature can reach it, and only while this boot and the
-// persisted 6 h window allow it, so it can never loop or storm. It shadows the identity pair,
-// clears the live pair, registers ONCE with NO Authorization header at all (clearing the token
-// would otherwise fall back to the build-time FRY_API_TOKEN), and restores the pair byte for byte
-// when that attempt fails for ANY reason. A success keeps the shadows until putPoc() sees an
-// accepted heartbeat. Returns true only for a fresh 2xx registration.
+// A crash between the heal's clear and its retry leaves the live pair empty with the shadows in
+// NVS: put the pair back BEFORE ensureInstallId() mints a new installation. With a live value still
+// present the shadows are leftovers (a pre-heal pair whose heartbeat never came), so they go.
+void recoverOrphanedTokenPair() {
+  if (fry_config::getInstallId().length() > 0 || fry_config::getDeviceToken().length() > 0) {
+    dropTokenPairShadow();
+    return;
+  }
+  restoreTokenPair();
+}
+
+// The bounded heal. Only the stale-token signature can reach it, only on a NON-default apiBase (the
+// compiled default's registration route is open, where a transient 404 must never reset a healthy
+// installation), and only while this boot and the persisted 6 h window allow it, so it can never
+// loop or storm. It shadows the identity pair, clears the live pair, registers ONCE with NO
+// Authorization header at all (clearing the token would otherwise fall back to the build-time
+// FRY_API_TOKEN), and restores the pair byte for byte when that attempt fails for ANY reason. A
+// success keeps the shadows until putPoc() sees an accepted heartbeat.
 bool healStaleTokenIfDue(HTTPClient& http, WiFiClientSecure& sec, const String& url,
                          const char* installId, const String& body, int code, bool tokenSent) {
   if (s_staleTokenHealed || !fry::isStaleTokenSignature(code, tokenSent)) return false;
+  if (strcmp(fry_config::getApiBase().c_str(), HARDWAREAPI_BASE) == 0) return false;
+  const time_t nowT = time(nullptr);
+  const uint32_t epochNow = nowT == static_cast<time_t>(-1) ? 0 : static_cast<uint32_t>(nowT);
   KvStore h;
   h.begin("fry", true);
-  const uint32_t epochNow = static_cast<uint32_t>(time(nullptr));
   const uint32_t lastHeal = h.getUInt("healAt", 0);
   h.end();
   if (!fry::healWindowOpen(s_staleTokenHealed, lastHeal, epochNow)) return false;
+  // Stash (and prove it) BEFORE the window is burnt, so a failed stash costs no 6 h.
+  if (!stashTokenPair()) return false;
   s_staleTokenHealed = true;  // one per boot, whatever the outcome below
   KvStore w;
   w.begin("fry", false);
   w.putUInt("healAt", epochNow);  // one per 6 h, across reboots
   w.end();
-  if (!stashTokenPair()) return false;
   fry_config::clearInstallation();
   char newId[40];
   fry_identity::ensureInstallId(newId, sizeof(newId));  // a fresh installation, registered token-less
@@ -265,7 +307,9 @@ bool healStaleTokenIfDue(HTTPClient& http, WiFiClientSecure& sec, const String& 
   }
   http.end();
   if (healCode < 200 || healCode >= 300) {
-    restoreTokenPair();
+    if (!restoreTokenPair()) {  // the shadows stay: never a board with neither pair
+      FRY_PRINTLN("api: stale-token retry failed and the pair could not be restored; shadows kept");
+    }
     return false;
   }
   if (token.length() > 0) fry_config::setDeviceToken(token.c_str());
@@ -304,6 +348,9 @@ bool registerInstallation() {
 #else
   char installId[40];
 #endif
+  // A crash inside a self-heal can leave the live pair empty with the shadows in NVS: put the pair
+  // back before ensureInstallId() would mint a new installation.
+  recoverOrphanedTokenPair();
   fry_identity::ensureInstallId(installId, sizeof(installId));
 #if defined(ARDUINO_ARCH_ESP8266)
   char (&deviceName)[32] = text->deviceName;
@@ -472,9 +519,9 @@ int putPoc() {
   http.addHeader(FRY_TEXT("Content-Type"), FRY_TEXT("application/json"));
   int code = http.PUT(body);
   http.end();
-  // An accepted heartbeat proves the pair a healed registration installed; only now may the
-  // stale-token shadow pair go.
-  if (code >= 200 && code < 300) dropTokenPairShadow();
+  // An accepted heartbeat after a heal this boot proves the pair the heal installed; only then may
+  // the stale-token shadow pair go (boot recovery drops leftovers from a reboot-before-heartbeat).
+  if (code >= 200 && code < 300 && s_staleTokenHealed) dropTokenPairShadow();
   fry_ota::noteHeartbeat(code, "poc");
   return code;
 }
