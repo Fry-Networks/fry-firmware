@@ -1,0 +1,19 @@
+{
+  "builds": {
+    "esp32": {
+      "sha256": "db95ffeab4cfc021455b5194a37edc7cf9f5eefb4afb330d4d35d122a0d2df7d",
+      "url": "https://raw.githubusercontent.com/Fry-Networks/fry-firmware/esp10/revert-manifest/firmware-esp32.bin"
+    },
+    "esp32c3": {
+      "sha256": "3e9d9a2036cf551eb2156a8b6b8d07f0887bcac7841b03afe36e52c3230fed25",
+      "url": "https://raw.githubusercontent.com/Fry-Networks/fry-firmware/esp10/revert-manifest/firmware-esp32c3.bin"
+    },
+    "esp8266": {
+      "sha256": "92537616e66836472fab98e1dc1970a08f619def114e06b2593c89ad2884d03b",
+      "url": "https://raw.githubusercontent.com/Fry-Networks/fry-firmware/esp10/revert-manifest/firmware-esp8266.bin"
+    }
+  },
+  "channel": "prod",
+  "firmware_version": "0.4.16",
+  "olostep_kill": false
+}
