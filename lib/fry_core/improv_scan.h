@@ -73,3 +73,5 @@ ScanPoll classifyScanPoll(int n, bool runningBoard = false);
 
 }  // namespace improv
 }  // namespace fry
+
+#include "improv_scan_slot.h"  // ESP8266 and host only (guarded inside): the heap home of the Improv scan list
