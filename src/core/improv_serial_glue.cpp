@@ -212,9 +212,16 @@ void pollScan() {
   }
 #if defined(ARDUINO_ARCH_ESP8266)
   // Reduced to one row per SSID, hidden dropped, bounded, strongest first (lib/fry_core/improv_scan).
-  // static: ~1 KB would sit on the 4 KB ESP8266 cont stack. Reset, so a rescan starts empty.
-  static fry::improv::ScanList list;
-  list.clear();
+  // ~1 KB would sit on the 4 KB ESP8266 cont stack and, as a static, in .bss for the whole uptime: it lives on the heap for this call only.
+  fry::improv::ScanListSlot slot;
+  fry::improv::ScanList* const listp = slot.acquire();
+  if (!listp) {
+    WiFi.scanDelete();
+    restoreScanMode();
+    sendError(Error::Unknown);
+    return;
+  }
+  fry::improv::ScanList& list = *listp;
   for (int i = 0; i < n; i++) {
     list.add(WiFi.SSID(i).c_str(), static_cast<int>(WiFi.RSSI(i)),
              WiFi.encryptionType(i) != ENC_TYPE_NONE);
@@ -229,6 +236,8 @@ void pollScan() {
   WiFi.scanDelete();
   restoreScanMode();
 #else
+// keeps the ESP32/C3 line table (and so the app-descriptor ELF hash) identical to 0.4.15; drop on the next intentional ESP32/C3 change
+#line 232
   if (n > 0) {
     for (int i = 0; i < n; i++) {
       char ssid[33] = {0};
