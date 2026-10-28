@@ -10,7 +10,11 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <fstream>
 #include <new>
+#include <sstream>
+#include <string>
+#include <vector>
 
 #include "improv_scan.h"
 
@@ -63,6 +67,80 @@ void setUp() {
   g_failNext = false;
 }
 void tearDown() {}
+
+// Source pins on the glue (it needs the Arduino core, so it is not host-compiled; same technique as test_stale_token_heal_wiring).
+namespace {
+bool readFile(const std::string& path, std::string& out) {
+  std::ifstream f(path.c_str(), std::ios::in | std::ios::binary);
+  if (!f) return false;
+  std::ostringstream ss;
+  ss << f.rdbuf();
+  out = ss.str();
+  return !out.empty();
+}
+
+bool loadSource(const std::string& rel, std::string& out) {
+  const std::string self = __FILE__;
+  const std::string tail = "test/test_improv_scan_heap/test_main.cpp";
+  std::vector<std::string> prefixes;
+  if (self.size() >= tail.size() && self.compare(self.size() - tail.size(), tail.size(), tail) == 0) {
+    prefixes.push_back(self.substr(0, self.size() - tail.size()));
+  }
+  const char* ups[] = {"", "../", "../../", "../../../", "../../../../"};
+  for (size_t i = 0; i < sizeof(ups) / sizeof(ups[0]); i++) prefixes.push_back(ups[i]);
+  for (size_t i = 0; i < prefixes.size(); i++) {
+    if (readFile(prefixes[i] + rel, out)) return true;
+  }
+  return false;
+}
+
+bool pollScanBody(std::string& body) {
+  std::string src;
+  if (!loadSource("src/core/improv_serial_glue.cpp", src)) return false;
+  const size_t a = src.find("void pollScan() {");
+  if (a == std::string::npos) return false;
+  const size_t b = src.find("\n}\n", a);
+  if (b == std::string::npos) return false;
+  body = src.substr(a, b - a);
+  return true;
+}
+}  // namespace
+
+void test_glue_keeps_no_static_scan_list() {
+  std::string src;
+  TEST_ASSERT_TRUE_MESSAGE(loadSource("src/core/improv_serial_glue.cpp", src), "improv_serial_glue.cpp");
+  size_t pos = 0;
+  while ((pos = src.find("ScanList", pos)) != std::string::npos) {
+    const size_t ls = src.rfind('\n', pos);
+    const std::string line = src.substr(ls == std::string::npos ? 0 : ls + 1, pos - (ls == std::string::npos ? 0 : ls + 1));
+    TEST_ASSERT_TRUE_MESSAGE(line.find("static ") == std::string::npos, "no static ScanList object in the glue");
+    pos += 8;
+  }
+}
+
+void test_the_esp8266_branch_of_pollscan_uses_the_slot() {
+  std::string body;
+  TEST_ASSERT_TRUE(pollScanBody(body));
+  const size_t slot = body.find("fry::improv::ScanListSlot slot;");
+  TEST_ASSERT_TRUE_MESSAGE(slot != std::string::npos, "pollScan() declares a ScanListSlot");
+  const size_t guard = body.rfind("#if defined(ARDUINO_ARCH_ESP8266)", slot);
+  TEST_ASSERT_TRUE_MESSAGE(guard != std::string::npos, "inside the ESP8266 guard");
+  TEST_ASSERT_TRUE_MESSAGE(body.find("#else", guard) > slot, "in the ESP8266 branch, not the #else one");
+  TEST_ASSERT_TRUE(body.find("slot.acquire()", slot) != std::string::npos);
+}
+
+void test_a_failed_acquire_ends_the_scan_cleanly() {
+  std::string body;
+  TEST_ASSERT_TRUE(pollScanBody(body));
+  const size_t a = body.find("if (!listp) {");
+  TEST_ASSERT_TRUE_MESSAGE(a != std::string::npos, "the null-acquire path exists");
+  const size_t r = body.find("return;", a);
+  TEST_ASSERT_TRUE(r != std::string::npos);
+  const std::string path = body.substr(a, r - a);
+  TEST_ASSERT_TRUE_MESSAGE(path.find("sendError(") != std::string::npos, "the client gets an error");
+  TEST_ASSERT_TRUE_MESSAGE(path.find("restoreScanMode();") != std::string::npos, "the radio mode is restored");
+  TEST_ASSERT_TRUE_MESSAGE(path.find("WiFi.scanDelete();") != std::string::npos, "the scan results are freed");
+}
 
 #ifdef FRY_HAVE_SCAN_SLOT
 
@@ -131,6 +209,9 @@ void test_repeated_scans_do_not_leak_and_the_destructor_releases() {
 
 int main(int, char**) {
   UNITY_BEGIN();
+  RUN_TEST(test_glue_keeps_no_static_scan_list);
+  RUN_TEST(test_the_esp8266_branch_of_pollscan_uses_the_slot);
+  RUN_TEST(test_a_failed_acquire_ends_the_scan_cleanly);
   RUN_TEST(test_an_idle_slot_holds_no_heap_and_is_pointer_sized);
   RUN_TEST(test_a_held_list_is_one_block_and_release_gives_it_all_back);
   RUN_TEST(test_a_rescan_starts_with_an_empty_list);
@@ -150,6 +231,9 @@ void test_pollscan_keeps_no_static_scan_list() {
 
 int main(int, char**) {
   UNITY_BEGIN();
+  RUN_TEST(test_glue_keeps_no_static_scan_list);
+  RUN_TEST(test_the_esp8266_branch_of_pollscan_uses_the_slot);
+  RUN_TEST(test_a_failed_acquire_ends_the_scan_cleanly);
   RUN_TEST(test_pollscan_keeps_no_static_scan_list);
   return UNITY_END();
 }

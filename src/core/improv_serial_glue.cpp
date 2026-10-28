@@ -236,6 +236,7 @@ void pollScan() {
   WiFi.scanDelete();
   restoreScanMode();
 #else
+// keeps the ESP32/C3 line table (and so the app-descriptor ELF hash) identical to 0.4.15; drop on the next intentional ESP32/C3 change
 #line 232
   if (n > 0) {
     for (int i = 0; i < n; i++) {

@@ -62,12 +62,15 @@ bool nowIso8601(char* out, size_t outLen) {
 #if defined(ARDUINO_ARCH_ESP8266)
   // Same text as the strftime below. strftime is the only caller that links newlib's time-locale tables and name strings (~480 B of DRAM)
   // into the ESP8266 image; the heap is whatever static RAM leaves.
-  return snprintf_P(out, outLen, PSTR("%04d-%02d-%02dT%02d:%02d:%02dZ"), t.tm_year + 1900, t.tm_mon + 1, t.tm_mday, t.tm_hour,
-                    t.tm_min, t.tm_sec) > 0;
+  const int r = snprintf_P(out, outLen, PSTR("%04d-%02d-%02dT%02d:%02d:%02dZ"), t.tm_year + 1900, t.tm_mon + 1, t.tm_mday, t.tm_hour,
+                           t.tm_min, t.tm_sec);
+  return r > 0 && static_cast<size_t>(r) < outLen;  // strftime's contract: false when the text did not fit
 #else
+// keeps the ESP32/C3 line table (and so the app-descriptor ELF hash) identical to 0.4.15; drop on the next intentional ESP32/C3 change
 #line 62
   return strftime(out, outLen, "%Y-%m-%dT%H:%M:%SZ", &t) > 0;
 #endif
+// keeps the ESP32/C3 line table (and so the app-descriptor ELF hash) identical to 0.4.15; drop on the next intentional ESP32/C3 change
 #line 63
 }
 
