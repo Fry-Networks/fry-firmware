@@ -1,0 +1,15 @@
+{
+  "builds": {
+    "esp32": {
+      "sha256": "d151d9da1a699b482da343fcc15afb4aeaa2c397d8a27f912bf6b8b4939f2869",
+      "url": "https://raw.githubusercontent.com/Fry-Networks/fry-firmware/esp14/bench-manifest-w3-e/firmware-esp32.bin"
+    },
+    "esp32c3": {
+      "sha256": "454fce8e5d7525247313b81a1540b5d061c94fcde7685bb18c2b854c6ab21102",
+      "url": "https://raw.githubusercontent.com/Fry-Networks/fry-firmware/esp14/bench-manifest-w3-e/firmware-esp32c3.bin"
+    }
+  },
+  "channel": "prod",
+  "firmware_version": "0.4.24",
+  "olostep_kill": false
+}
