@@ -1,0 +1,11 @@
+{
+  "builds": {
+    "esp8266": {
+      "sha256": "a7fd15f8ed0b1dbbeaa8ccc092e133c1b3f8871c264057216309c94c187e74ef",
+      "url": "https://raw.githubusercontent.com/Fry-Networks/fry-firmware/esp13/bench-manifest-c/firmware-esp8266.bin"
+    }
+  },
+  "channel": "prod",
+  "firmware_version": "0.4.22",
+  "olostep_kill": false
+}
