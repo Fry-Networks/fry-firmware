@@ -15,11 +15,8 @@ using WiFiClientSecure = BearSSL::WiFiClientSecure;
 
 namespace fry_http {
 
-// Configures TLS + the default redirect policy (follow up to 5, HTTPC_FORCE_FOLLOW_REDIRECTS: the OTA manifest and
-// image come through GitHub, a two-hop chain) and calls http.begin(sec, url). A caller that sends credentials can turn
-// following off right after this returns: src/core/hardwareapi_client.cpp does that for its routes (noRedirects).
-// src/core/telemetry.cpp and the ESP32 src/esp32/wg_provision_client.cpp still follow redirects for now. Returns false
-// if TLS setup or begin() fails (e.g. ESP8266 heap gate).
+// Configures TLS + redirect policy (HTTPC_FORCE_FOLLOW_REDIRECTS, limit 5) and calls
+// http.begin(sec, url). Returns false if TLS setup or begin() fails (e.g. ESP8266 heap gate).
 //
 // mflnProbeWorthwhile lets a caller say it already knows the peer will refuse Maximum Fragment
 // Length Negotiation. On ESP8266 the probe is not free: probeMaxFragmentLength() opens its own
