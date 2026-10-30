@@ -43,9 +43,6 @@ String getApCode();
 void setApCode(const char* code);
 // Removes fry/installId and fry/deviceToken: a new key is a new installation.
 void clearInstallation();
-// Removes the stale-token heal's shadow copy of that pair (fry/shdwInstallId, fry/shdwDevToken). Called with every
-// deliberate wipe of the pair (a new owner key; factoryReset does it inline); never by the heal itself.
-void clearIdentityShadows();
 
 // ── fry_vpn ───────────────────────────────────────────────────────────────
 String getWgPriv();

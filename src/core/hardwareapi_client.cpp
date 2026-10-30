@@ -12,7 +12,6 @@
 #include "config.h"
 #include "flash_print.h"
 #include "fry_config.h"
-#include "heal_fix_rules.h"
 #include "heartbeat_fields.h"
 #include "http_tls.h"
 #include "kv_store.h"
@@ -126,9 +125,6 @@ bool s_ntpSynced = false;
 // Stale-token self-heal (lib/fry_core/stale_token_heal.h): at most one per boot. The 6 h bound
 // across reboots is the persisted fry/healAt epoch.
 bool s_staleTokenHealed = false;
-// millis() when that latch was set. The latch is released after one full window of uptime, so a transient
-// retry failure no longer disables the heal until the next reboot.
-unsigned long s_staleTokenHealedAtMs = 0;
 
 const uint32_t kQuickRetryMs = 2000;
 
@@ -154,12 +150,6 @@ void addAuthHeader(HTTPClient& http) {
   if (token.length() == 0) token = String(FRY_API_TOKEN);
   if (token.length() > 0) http.addHeader(FRY_TEXT("Authorization"), "Bearer " + token);
 }
-
-// Every request in this client carries credentials: the Bearer token, or the miner key in the URL and body. A
-// redirect would re-send them (headers and body) to wherever the answer points, so none is followed: the 3xx is
-// the result (classified as unreachable, retried on the usual schedule). The shared beginHttpsUrl() keeps its
-// follow-redirects policy because the OTA download needs it (a GitHub release asset is two hops).
-void noRedirects(HTTPClient& http) { http.setFollowRedirects(HTTPC_DISABLE_FOLLOW_REDIRECTS); }
 
 int computeSlot() {
   time_t now = time(nullptr);
@@ -233,10 +223,8 @@ const char* const kShadowToken = "shdwDevToken";
 void readTokenPairShadow(String& id, String& tok) {
   KvStore r;
   r.begin("fry", true);
-  // isKey first: ESP32/C3 NVS logs an error line for every read of an absent key, and the shadows are absent
-  // except around a heal.
-  id = r.isKey(kShadowId) ? r.getString(kShadowId, "") : String();
-  tok = r.isKey(kShadowToken) ? r.getString(kShadowToken, "") : String();
+  id = r.getString(kShadowId, "");
+  tok = r.getString(kShadowToken, "");
   r.end();
 }
 
@@ -257,15 +245,8 @@ bool stashTokenPair() {
          fry::pairsMatchByteForByte(rtok.c_str(), tok.c_str());
 }
 
-// Only an erase when a shadow key actually exists: no hourly nvs_erase_key error spam. And only while the live pair
-// is COMPLETE: the guard below checks that both live values are present (fry::recoveryFor) before anything is erased,
-// whichever caller asks (an accepted heartbeat after a heal, a verified restore, boot recovery). A half pair leaves the
-// shadows as the only complete copy, for boot recovery to restore from.
+// Only an erase when a shadow key actually exists: no hourly nvs_erase_key error spam.
 void dropTokenPairShadow() {
-  if (fry::recoveryFor(fry_config::getInstallId().length() > 0, fry_config::getDeviceToken().length() > 0) !=
-      fry::PairRecovery::DropShadows) {
-    return;
-  }
   KvStore r;
   r.begin("fry", true);
   bool any = r.isKey(kShadowId) || r.isKey(kShadowToken);
@@ -296,40 +277,14 @@ bool restoreTokenPair() {
 }
 
 // A crash between the heal's clear and its retry leaves the live pair empty with the shadows in
-// NVS: put the pair back BEFORE ensureInstallId() mints a new installation. Only a COMPLETE live pair
-// makes the shadows leftovers (a pre-heal pair whose heartbeat never came), so then they go. A half
-// pair (a restore that wrote the id and not the token, or a crash after the new id was persisted) is
-// restored like an empty one: dropping the shadows on "either value present" deleted the only copy of
-// the previous token (fry::recoveryFor, lib/fry_core/heal_fix_rules.h).
+// NVS: put the pair back BEFORE ensureInstallId() mints a new installation. With a live value still
+// present the shadows are leftovers (a pre-heal pair whose heartbeat never came), so they go.
 void recoverOrphanedTokenPair() {
   if (fry_config::getInstallId().length() > 0 || fry_config::getDeviceToken().length() > 0) {
-    if (fry::recoveryFor(fry_config::getInstallId().length() > 0, fry_config::getDeviceToken().length() > 0) ==
-        fry::PairRecovery::DropShadows) {
-      dropTokenPairShadow();
-      return;
-    }
+    dropTokenPairShadow();
+    return;
   }
   restoreTokenPair();
-}
-
-// The 6 h stamp as NVS holds it, read through a fresh handle (0 when absent).
-uint32_t readHealStamp() {
-  KvStore r;
-  r.begin("fry", true);
-  const uint32_t stamp = r.getUInt("healAt", 0);
-  r.end();
-  return stamp;
-}
-
-// The retry's 2xx body, buffered only when the server announced a small length (fry::healReplyReadable):
-// an unknown, empty or oversized body is never read and yields "" (a failed heal, the pair is restored). The
-// live pair is already cleared when this runs, so an unbounded getString() here could run the board out of
-// heap with neither pair live. Own frame (noinline) so healStaleTokenIfDue() stays small on the ESP8266.
-__attribute__((noinline)) String readHealToken(HTTPClient& http) {
-  if (!fry::healReplyReadable(http.getSize())) return String();
-  JsonDocument rdoc;
-  deserializeJson(rdoc, http.getString());
-  return String(rdoc["device_token"] | "");
 }
 
 // The bounded heal. Only the stale-token signature can reach it, only on a NON-default apiBase (the
@@ -341,17 +296,9 @@ __attribute__((noinline)) String readHealToken(HTTPClient& http) {
 // success keeps the shadows until putPoc() sees an accepted heartbeat.
 bool healStaleTokenIfDue(HTTPClient& http, WiFiClientSecure& sec, const String& url,
                          const char* installId, const String& body, int code, bool tokenSent) {
-  // The per-boot latch is released after one full window of uptime; every attempt is still gated by
-  // the persisted 6 h stamp below, so the rate stays at most one per 6 h.
-  if (s_staleTokenHealed && fry::healLatchExpired(static_cast<uint32_t>(millis() - s_staleTokenHealedAtMs))) {
-    s_staleTokenHealed = false;
-  }
   if (s_staleTokenHealed || !fry::isStaleTokenSignature(code, tokenSent)) return false;
   if (strcmp(fry_config::getApiBase().c_str(), HARDWAREAPI_BASE) == 0) return false;
-  time_t nowT = time(nullptr);
-  // A negative reading other than -1, or one past the 32-bit ceiling, would cast to a "plausible" epoch.
-  // Anything outside the plausible range takes the same path as the -1 error value: epoch 0, window closed.
-  if (!fry::healTimeUsable(static_cast<int64_t>(nowT))) nowT = static_cast<time_t>(-1);
+  const time_t nowT = time(nullptr);
   const uint32_t epochNow = nowT == static_cast<time_t>(-1) ? 0 : static_cast<uint32_t>(nowT);
   KvStore h;
   h.begin("fry", true);
@@ -361,15 +308,10 @@ bool healStaleTokenIfDue(HTTPClient& http, WiFiClientSecure& sec, const String& 
   // Stash (and prove it) BEFORE the window is burnt, so a failed stash costs no 6 h.
   if (!stashTokenPair()) return false;
   s_staleTokenHealed = true;  // one per boot, whatever the outcome below
-  s_staleTokenHealedAtMs = millis();
   KvStore w;
   w.begin("fry", false);
   w.putUInt("healAt", epochNow);  // one per 6 h, across reboots
   w.end();
-  // The stamp is the cross-reboot bound and a write can fail without telling (the ESP8266 store ignores a
-  // failed save, ESP32 returns 0). Proven by read-back, like the stash; unproven, nothing is cleared, the live
-  // pair stays complete and the next registration drops the leftover shadows.
-  if (readHealStamp() != epochNow) return false;
   fry_config::clearInstallation();
   char newId[40];
   fry_identity::ensureInstallId(newId, sizeof(newId));  // a fresh installation, registered token-less
@@ -378,18 +320,14 @@ bool healStaleTokenIfDue(HTTPClient& http, WiFiClientSecure& sec, const String& 
   const String healUrl = url.substring(0, url.length() - strlen(installId)) + newId;
   int healCode = -1;
   String token;
-  // The 404 above may have left its keep-alive TLS connection open, and HTTPClient reuses an open one. Close it,
-  // so the retry is a fresh connection and cannot parse the unread tail of the 404 as its own answer.
-  sec.stop();
   if (fry_http::beginHttpsUrl(http, sec, healUrl)) {
-    noRedirects(http);
     const FryText contentType = FRY_TEXT("Content-Type");  // test_flash_text pins the 3 literal uses
     http.addHeader(contentType, FRY_TEXT("application/json"));
     healCode = http.POST(healBody);
     if (healCode >= 200 && healCode < 300) {
-      token = readHealToken(http);
-      // A 2xx without a device_token is no installation to keep. Fail it, so the previous pair is restored.
-      if (!fry::healTokenUsable(token.length())) healCode = -1;
+      JsonDocument rdoc;
+      deserializeJson(rdoc, http.getString());
+      token = String(rdoc["device_token"] | "");
     }
   }
   http.end();
@@ -497,7 +435,6 @@ bool registerInstallation() {
 #endif
     code = -1;
     if (fry_http::beginHttpsUrl(http, sec, url)) {
-      noRedirects(http);
       addAuthHeader(http);
       http.addHeader(FRY_TEXT("Content-Type"), FRY_TEXT("application/json"));
       code = http.POST(body);
@@ -573,7 +510,6 @@ bool renewLease() {
   WiFiClientSecure sec;
   HTTPClient http;
   if (!fry_http::beginHttpsUrl(http, sec, url)) return false;
-  noRedirects(http);
   addAuthHeader(http);
   http.addHeader(FRY_TEXT("Content-Type"), FRY_TEXT("application/json"));
   int code = http.sendRequest("PATCH", body);  // String overload — avoids a const/non-const
@@ -605,7 +541,6 @@ int putPoc() {
   WiFiClientSecure sec;
   HTTPClient http;
   if (!fry_http::beginHttpsUrl(http, sec, url)) return -1;
-  noRedirects(http);
   addAuthHeader(http);
   http.addHeader(FRY_TEXT("Content-Type"), FRY_TEXT("application/json"));
   int code = http.PUT(body);
@@ -622,7 +557,6 @@ bool getVersions(String& outJson) {
   WiFiClientSecure sec;
   HTTPClient http;
   if (!fry_http::beginHttpsUrl(http, sec, url)) return false;
-  noRedirects(http);
   addAuthHeader(http);
   int code = http.GET();
   bool ok = code > 0 && code < 300;
