@@ -11,6 +11,7 @@
 #include "config.h"
 #include "core/fry_config.h"
 #include "core/flash_print.h"
+#include "core/hardwareapi_client.h"
 #include "core/improv_serial_glue.h"
 #include "core/miner_key.h"
 #include "core/ota_client.h"
@@ -188,6 +189,7 @@ void setup() {
   }
   FRY_PRINTF("FRY boot v%s chip=%s mac=%s minerkey=%s\n", FRY_FIRMWARE_VERSION, FRY_CHIP, mac,
                 keyForLog);
+  FRY_PRINTF("[boot] reset_reason=%u\n", static_cast<unsigned>(fry_hwapi::resetReason()));
 
 #if defined(FRY_TEST_FAULT) && FRY_TEST_FAULT == 1
   // Test channel only (src/core/ota_client.h #errors otherwise): an image that dies before it can
