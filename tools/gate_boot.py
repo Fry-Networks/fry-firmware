@@ -28,19 +28,6 @@ CRASH_MARKERS = ("Exception (", "Fatal exception", "wdt reset", "Soft WDT", "abo
                   "rst cause:2", "rst cause:3", "Guru Meditation Error", "Panic", "CORRUPT HEAP")
 
 
-# Exact firmware print (src/core/ota_client.cpp: "ota: applied %s sha=ok"); a substring echo must not arm.
-OTA_APPLIED_RE = re.compile(r"(?:^|\s)ota: applied \S+ sha=ok\s*$")
-RST2_RE = re.compile(r"rst cause:2\b")
-
-
-def is_expected_ota_reset(text, ota_pending):
-    """True only for the software restart after a flash: rst cause:2 while an earlier 'ota: applied'
-    in this window has not yet been matched by a reset, and no other crash marker is on the line.
-    Any other crash marker already exits the gate, so none can sit between the OTA line and here."""
-    return bool(ota_pending and RST2_RE.search(text)
-                and not any(m in text for m in CRASH_MARKERS if m != "rst cause:2"))
-
-
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", default=None)
@@ -68,7 +55,6 @@ def main():
     buf = b""
     banner_ok = False
     miner_key = None
-    ota_pending = False
     try:
         while time.time() - start < a.seconds:
             chunk = ser.read(256)
@@ -86,17 +72,9 @@ def main():
                     out_fh.write("[%7dms] %s\n" % (ms, safe)); out_fh.flush()
                 if raw_fh:
                     raw_fh.write("[%7dms] %s\n" % (ms, text)); raw_fh.flush()
-                if is_expected_ota_reset(text, ota_pending):
-                    ota_pending = False  # one expected reset per "ota: applied"
-                    banner_ok = False    # a NEW banner must follow the reset
-                    miner_key = None
-                    print("[gate_boot] expected post-OTA reset (rst cause:2 after ota: applied)", flush=True)
-                    continue
                 if any(m in text for m in CRASH_MARKERS):
                     print("[gate_boot] FAIL crash marker: %s" % safe, flush=True)
                     sys.exit(1)
-                if OTA_APPLIED_RE.search(text):
-                    ota_pending = True
                 m = BANNER_RE.search(text)
                 if m:
                     banner_ok = True
