@@ -194,6 +194,7 @@ fry::KeyWriteVerdict setOwnerKey(const char* key, fry::KeyTransport transport, b
   // A different key is a different installation: the old install id, device token and WireGuard
   // peer all belong to the previous key on the server.
   fry_config::clearInstallation();
+  fry_config::clearIdentityShadows();  // else boot recovery restores the old key's pair into the emptied one
   fry_config::clearVpn();
   yield();
   fry_config::setKeySrc("user");
