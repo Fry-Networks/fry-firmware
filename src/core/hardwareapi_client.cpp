@@ -32,6 +32,7 @@
 
 #if !defined(ARDUINO_ARCH_ESP8266)
 #include <esp_flash.h>
+#include <esp_system.h>  // the ESP32 family reset reason
 #endif
 
 #ifndef FRY_FIRMWARE_VERSION
@@ -97,6 +98,16 @@ __attribute__((noinline)) void addHeartbeatRelayLatency(JsonDocument& doc) {
 }
 #endif
 
+// Why the chip last reset, as the heartbeat's `reset_reason` (PROTOCOL.md 11.10). The SDK latches the value at boot and never
+// changes it, and it is read once here and cached, so it costs two bytes of state and no SDK call after the first.
+//   ESP8266: rst_info.reason via the core's reset-info pointer (0 power-on ... 6 external reset).
+//   ESP32 family: esp_reset_reason_t (1 power-on, 3 software reset ...).
+// The fry_hwapi::resetReason() definition below the anonymous namespace shares it with the boot banner in main.cpp.
+__attribute__((noinline)) void addHeartbeatResetReason(JsonDocument& doc) {
+  // Own frame (noinline), like the two helpers above: registerInstallation() sits on the deepest loop-stack path.
+  fry::addResetReasonField(doc, resetReason());
+}
+
 // Updated unconditionally BEFORE every registration attempt (success or failure) so a rejected
 // or failed call backs off to INSTALL_HEARTBEAT_MS just like a successful heartbeat does — the
 // old design only updated this on success, which meant a persistent failure (e.g. the server
@@ -159,6 +170,20 @@ int computeSlot() {
 }
 
 }  // namespace
+
+uint8_t resetReason() {
+  static uint8_t cached = 0;
+  static bool have = false;
+  if (have) return cached;
+#if defined(ARDUINO_ARCH_ESP8266)
+  const uint32_t raw = ESP.getResetInfoPtr()->reason;
+#else
+  const uint32_t raw = static_cast<uint32_t>(esp_reset_reason());
+#endif
+  cached = raw > 255 ? 255 : static_cast<uint8_t>(raw);
+  have = true;
+  return cached;
+}
 
 bool ensureNtpSynced(uint32_t timeoutMs) {
   if (s_ntpSynced) return true;
@@ -439,6 +464,7 @@ bool registerInstallation() {
 #if defined(FRY_HAS_WIREGUARD) && FRY_HAS_WIREGUARD
   addHeartbeatRelayLatency(doc);
 #endif
+  addHeartbeatResetReason(doc);
   String body;
   serializeJson(doc, body);
 

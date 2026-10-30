@@ -538,3 +538,42 @@ of 0.4.0 refused every write, and Android then waited on a MITM pairing the boar
 ```
 [prov] key write ignored: link not encrypted - pair first (LE Secure Connections)
 ```
+
+### 11.10 Round-4 amendment: `reset_reason` on the installation heartbeat
+
+The installation heartbeat of section 5 (`POST /installations/{miner_key}/installations/{install_id}`)
+gains one more key. It extends the list of exceptions to "send no extra keys" in section 5, and nothing
+else in section 5 changes.
+
+- **`reset_reason`**: one unsigned integer, 0 to 255, naming why the chip last reset. Every build sends
+  it, on every heartbeat of a boot (the hourly one and the one after an OTA), with the value the chip
+  reported at boot; `0` is a real value and is sent. It is appended after every other key, after the 13
+  of section 5, the ESP8266 heap keys and the ESP32 relay keys, so those keep their order. A value above
+  255 would be sent as `255`; none of the values below is.
+- **The number is chip-specific.** It is the SDK's own code, not a Fry enumeration, and the `os` key in
+  the same body says which table applies:
+
+| Code | ESP32 / ESP32-S3 / ESP32-C3 (`esp_reset_reason_t`) | ESP8266 (`rst_info.reason`) |
+|---|---|---|
+| 0 | unknown | power-on (normal start) |
+| 1 | power-on | hardware watchdog reset |
+| 2 | external pin | exception reset |
+| 3 | software reset (`esp_restart`, an OTA restart) | software watchdog reset |
+| 4 | panic (exception) | software restart (`ESP.restart()`, an OTA restart) |
+| 5 | interrupt watchdog | wake from deep sleep |
+| 6 | task watchdog | external system reset (reset pin) |
+| 7 | other watchdog | not used |
+| 8 | wake from deep sleep | not used |
+| 9 | brownout | not used |
+| 10 and up | other `esp_reset_reason_t` codes of the SDK | not used |
+
+  Note that `0` is "power-on" on an ESP8266 and "unknown" on the ESP32 family.
+- **Compatibility.** A server that does not know the key ignores it (the installation body already
+  carries the heap and relay keys the same way); a board on firmware before this amendment sends no
+  `reset_reason`, and a reader treats an absent key as "not reported", never as `0`.
+- **Serial line added**, printed once at boot, directly after the `FRY boot v` banner of section 9, with
+  the same value the heartbeat sends:
+
+```
+[boot] reset_reason=<n>
+```

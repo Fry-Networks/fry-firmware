@@ -83,4 +83,12 @@ inline void addRelayLatencyFields(JsonDocument& doc, const RelayLatencyInfo& r) 
   doc["relay_samples"] = r.samples;
 }
 
+// Why the chip last reset, one small unsigned integer (PROTOCOL.md 11.10). The platform shim in hardwareapi_client.cpp reads it once
+// per boot (ESP32 family: esp_reset_reason_t; ESP8266: rst_info.reason), so the value is chip-specific and `os` says which table
+// applies. Appended last, after the heap and relay fields, so the 13-member body and every earlier append are untouched. Always
+// present on every build, 0 included. Clamped to a byte: the server mirror keeps only 0..255.
+inline void addResetReasonField(JsonDocument& doc, uint32_t raw) {
+  doc["reset_reason"] = raw > 255 ? 255u : raw;
+}
+
 }  // namespace fry
