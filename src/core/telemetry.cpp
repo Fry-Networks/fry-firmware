@@ -189,6 +189,8 @@ void tick() {
   HTTPClient http;
   int code = -1;
   if (fry_http::beginHttpsUrl(http, sec, url)) {
+    // Credentialed POST: a redirect would re-send the Bearer token and body to the 3xx target.
+    http.setFollowRedirects(HTTPC_DISABLE_FOLLOW_REDIRECTS);
     http.addHeader(FRY_TEXT("Authorization"), "Bearer " + auth);
     http.addHeader(FRY_TEXT("Content-Type"), FRY_TEXT("application/json"));
     code = http.POST(body);

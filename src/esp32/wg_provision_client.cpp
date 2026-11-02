@@ -147,6 +147,8 @@ void tick() {
       WiFiClientSecure sec;
       HTTPClient http;
       if (fry_http::beginHttpsUrl(http, sec, url)) {
+        // Credentialed POST: a redirect would re-send the Bearer token and body to the 3xx target.
+        http.setFollowRedirects(HTTPC_DISABLE_FOLLOW_REDIRECTS);
         const char* retryAfterHeader[] = {"Retry-After"};
         http.collectHeaders(retryAfterHeader, 1);
         http.addHeader("Authorization", "Bearer " + token);
