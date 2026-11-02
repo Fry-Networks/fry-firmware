@@ -34,6 +34,7 @@
 #include "ota_rollout_json.h"
 #include "ota_session.h"
 #include "ota_settle.h"
+#include "ota_hold_release.h"
 #include "ota_timewait.h"
 #include "sha256.h"
 #include "tls_sizing.h"
@@ -964,6 +965,18 @@ static bool holdForTimeWait(unsigned long now) {
   const uint32_t closing = fry::countClosingPcbs();
   const uint32_t heldMs = holding ? static_cast<uint32_t>(now - since) : 0;
   if (fry::decideTimeWaitHold(tw + closing, heldMs, fry::kOtaTimeWaitMaxHoldMs) == fry::TwHold::Hold) {
+    // The hold only waits for a heap the next TLS begin accepts. Free and block both at the download gate (pre-constructor sample, ota_hold_release.h): stop waiting.
+    const uint32_t freeNow = ESP.getFreeHeap();
+    const uint32_t blkNow = fry::queryMaxFreeBlock();
+    if (fry::decideHoldRelease(tw + closing, heldMs, fry::kOtaTimeWaitMaxHoldMs, freeNow, blkNow) == fry::TwHold::Proceed) {
+      if (holding) {
+        holding = false;
+        Serial.printf_P(PSTR("ota: check released early after %lu ms (free=%u blk=%u, tw=%u cl=%u)\n"),
+                        static_cast<unsigned long>(heldMs), static_cast<unsigned>(freeNow), static_cast<unsigned>(blkNow),
+                        static_cast<unsigned>(tw), static_cast<unsigned>(closing));
+      }
+      return false;
+    }
     if (!holding) {
       holding = true;
       since = now;
