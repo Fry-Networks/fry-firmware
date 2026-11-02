@@ -129,6 +129,9 @@ bool s_staleTokenHealed = false;
 // millis() when that latch was set. The latch is released after one full window of uptime, so a transient
 // retry failure no longer disables the heal until the next reboot.
 unsigned long s_staleTokenHealedAtMs = 0;
+// A heal wrote the shadow pair and no accepted heartbeat has dropped it yet. Independent of the latch above, which
+// is released after the window: a later accepted heartbeat must still drop the old server-rejected shadows.
+bool s_shadowPending = false;
 
 const uint32_t kQuickRetryMs = 2000;
 
@@ -362,6 +365,7 @@ bool healStaleTokenIfDue(HTTPClient& http, WiFiClientSecure& sec, const String& 
   if (!stashTokenPair()) return false;
   s_staleTokenHealed = true;  // one per boot, whatever the outcome below
   s_staleTokenHealedAtMs = millis();
+  s_shadowPending = true;
   KvStore w;
   w.begin("fry", false);
   w.putUInt("healAt", epochNow);  // one per 6 h, across reboots
@@ -613,6 +617,11 @@ int putPoc() {
   // An accepted heartbeat after a heal this boot proves the pair the heal installed; only then may
   // the stale-token shadow pair go (boot recovery drops leftovers from a reboot-before-heartbeat).
   if (code >= 200 && code < 300 && s_staleTokenHealed) dropTokenPairShadow();
+  // The latch above is released after the window; the pending flag outlives it, so the shadows still go.
+  if (code >= 200 && code < 300 && s_shadowPending) {
+    dropTokenPairShadow();
+    s_shadowPending = false;
+  }
   fry_ota::noteHeartbeat(code, "poc");
   return code;
 }

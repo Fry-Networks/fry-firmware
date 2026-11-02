@@ -179,7 +179,7 @@ void test_an_accepted_heartbeat_drops_the_shadows_only_for_a_complete_live_pair(
   TEST_ASSERT_TRUE_MESSAGE(rule < bail && bail < open && open < erase, "the guard comes before any NVS access or erase");
   // CONTROL: every way to the erase goes through this one function (restore, boot recovery, the post-heal heartbeat), and
   // the existence check that keeps absent keys from being erased is still there, after the guard.
-  TEST_ASSERT_EQUAL_INT_MESSAGE(3, countOf(src, "dropTokenPairShadow();"), "three callers, no unguarded erase elsewhere");
+  TEST_ASSERT_EQUAL_INT_MESSAGE(4, countOf(src, "dropTokenPairShadow();"), "four callers, no unguarded erase elsewhere");
   TEST_ASSERT_EQUAL_INT(2, countOf(src, "w.remove(kShadow"));
   const size_t any = drop.find("bool any = r.isKey(kShadowId) || r.isKey(kShadowToken);");
   const size_t exists = drop.find("if (!any) return;");
