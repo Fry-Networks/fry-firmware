@@ -415,6 +415,15 @@ bool healStaleTokenIfDue(HTTPClient& http, WiFiClientSecure& sec, const String& 
 
 bool registerInstallation() {
 #if defined(ARDUINO_ARCH_ESP8266)
+  {
+    // Boot TLS gate (lib/fry_core/tls_boot_gate.h). A deferral, not a failure: no backoff growth, no failure count, no
+    // provisioning error; tick() asks again right after the gate opens.
+    const uint32_t gateMs = fry_http::tlsStartDelayMs();
+    if (gateMs != 0) {
+      s_nextRegisterDelayMs = gateMs + 250UL;
+      return false;
+    }
+  }
   std::unique_ptr<RegText> text(new (std::nothrow) RegText());
   if (!text) {
     FRY_PRINTLN("api: no memory for the registration");
@@ -562,6 +571,9 @@ bool registerInstallation() {
 int lastRegisterHttp() { return s_lastRegHttp; }
 
 bool renewLease() {
+#if defined(ARDUINO_ARCH_ESP8266)
+  if (fry_http::tlsStartDelayMs() != 0) return false;  // boot TLS gate: deferral, tick() asks again
+#endif
   char minerKey[40];
   fry_identity::ensureMinerKey(minerKey, sizeof(minerKey));
   if (minerKey[0] == 0) return false;  // no key, no installation to lease
@@ -588,6 +600,9 @@ bool renewLease() {
 }
 
 int putPoc() {
+#if defined(ARDUINO_ARCH_ESP8266)
+  if (fry_http::tlsStartDelayMs() != 0) return -1;  // boot TLS gate: deferral, tick() asks again
+#endif
   char minerKey[40];
   fry_identity::ensureMinerKey(minerKey, sizeof(minerKey));
   if (minerKey[0] == 0) return -1;  // nothing to report as - checked before the NTP wait
@@ -627,6 +642,9 @@ int putPoc() {
 }
 
 bool getVersions(String& outJson) {
+#if defined(ARDUINO_ARCH_ESP8266)
+  if (fry_http::tlsStartDelayMs() != 0) return false;  // boot TLS gate: deferral
+#endif
   String url = fry_config::getApiBase() + FRY_TEXT("/versions/" FRY_MINER_CODE "?platform=" FRY_BUILD_ENV);
   WiFiClientSecure sec;
   HTTPClient http;
@@ -676,6 +694,10 @@ void tick() {
   fry_telemetry::tick();
 
   if ((now - s_lastPocMs) >= POC_INTERVAL_MS) {
+#if defined(ARDUINO_ARCH_ESP8266)
+    // Boot TLS gate: the report stays due, the timer is not advanced, the next pass asks again.
+    if (fry_http::tlsStartDelayMs() != 0) return;
+#endif
     s_lastPocMs = now;
     int slot = computeSlot();
     int putCode = putPoc();

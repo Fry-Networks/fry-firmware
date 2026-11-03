@@ -66,6 +66,10 @@ bool nowIso8601(char* out, size_t outLen) {
 
 void tick() {
   if (!fry_wifi::isConnected()) return;
+#if defined(ARDUINO_ARCH_ESP8266)
+  // Boot TLS gate (lib/fry_core/tls_boot_gate.h): a deferral. Before s_lastMs is touched, so the sample stays due.
+  if (fry_http::tlsStartDelayMs() != 0) return;
+#endif
 
   unsigned long now = millis();
   if (s_lastMs != 0 && (now - s_lastMs) < TELEMETRY_INTERVAL_MS) return;

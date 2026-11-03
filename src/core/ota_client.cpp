@@ -1015,6 +1015,7 @@ void tick() {
     if (s_lastCheckMs == 0) s_lastCheckMs = now;
     // Not while the boot's asynchronous 504 B allocation (7.8 s after the connect) can still land inside the check.
     if (fry::otaFirstCheckWaitMs(static_cast<uint32_t>(now), static_cast<uint32_t>(s_lastCheckMs)) != 0) return;
+    if (fry_http::tlsStartDelayMs() != 0) return;  // boot TLS gate: only delays the start; the hold decision below is unchanged
     if (holdForTimeWait(now)) return;
 #endif
     s_firstCheckDone = true;
@@ -1038,4 +1039,14 @@ void tick() {
 
 }  // namespace fry_ota
 
-extern "C" void fry_trigger_ota_now() { fry_ota::checkNow(); }
+extern "C" void fry_trigger_ota_now() {
+#if defined(ARDUINO_ARCH_ESP8266)
+  // Boot TLS gate: a check asked for from outside the schedule (the serial command) waits for the boot window too. A deferral: no
+  // session, and no retry or strike state is touched. The scheduled checks go through tick(), which is gated itself.
+  if (fry_http::tlsStartDelayMs() != 0) {
+    FRY_PRINTLN("ota: manifest check deferred until the boot window ends");
+    return;
+  }
+#endif
+  fry_ota::checkNow();
+}

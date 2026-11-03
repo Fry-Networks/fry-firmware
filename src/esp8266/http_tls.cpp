@@ -4,6 +4,7 @@
 #include "heap_gate.h"
 #include "mfln_cache.h"
 #include "tls_sizing.h"
+#include "tls_boot_gate.h"
 #include "config.h"
 
 namespace fry_http {
@@ -324,6 +325,17 @@ bool beginHttpsUrl(HTTPClient& http, WiFiClientSecure& sec, const String& url, b
   http.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);
   http.setRedirectLimit(5);
   return true;
+}
+
+uint32_t tlsStartDelayMs() {
+  static bool started = false;
+  static uint32_t firstMs = 0;
+  const uint32_t nowMs = millis();
+  if (!started) {
+    started = true;
+    firstMs = nowMs;
+  }
+  return fry::tlsBootWaitMs(nowMs, firstMs);
 }
 
 bool beginHttpsUrl(HTTPClient& http, WiFiClientSecure& sec, const String& url, bool mflnProbeWorthwhile) {
