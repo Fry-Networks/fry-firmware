@@ -30,6 +30,7 @@
 #include "ota_health.h"
 #include "ota_heap_budget.h"
 #include "ota_manifest_read.h"
+#include "ota_redirect.h"
 #include "ota_retry.h"
 #include "ota_rollout_json.h"
 #include "ota_session.h"
@@ -202,6 +203,8 @@ bool otaBeginUrl(HTTPClient& http, WiFiClientSecure& sec, WiFiClient& plain, con
     // context and I/O buffers) when keep-alive reuse is off. Its default is on and GitHub keeps the
     // connection, so two sessions were open at once on a ~80 KB heap. See lib/fry_core/ota_session.h.
     if (!fry_http::beginHttpsUrl(http, sec, url, !githubHost, smallReply)) return false;
+    // Redirects are followed by hand (getFollowingHops): each hop needs its own trust anchor set and its own heap check.
+    http.setFollowRedirects(HTTPC_DISABLE_FOLLOW_REDIRECTS);
     http.setReuse(fry::otaAsksForKeepAlive(/*isEsp8266=*/true, /*isHttps=*/true));
     return true;
 #else
@@ -233,6 +236,11 @@ struct DownloadWork {
   HTTPClient http;
   WiFiClientSecure sec;
   WiFiClient plain;
+};
+
+// The digest state is not part of DownloadWork: it is only needed once the body streams, and in the work block it was live (216 B) at the
+// download's first floor sample. Taken just before streaming, freed when downloadAndApply() returns.
+struct DigestWork {
   fry::Sha256 sha;
   uint8_t digest[32];
   char hex[65];
@@ -283,11 +291,132 @@ static uint32_t s_blkSettledBase = 0;
 // and the 6208 B BearSSL thunk go (lib/fry_core/ota_settle.h, bench X2: the download's block 29072 -> 23000 -> 22648 -> 15008 over seven checks).
 // Bounded, and silent when there was nothing to wait for. The messages stay under 64 B: Serial.printf of a longer one allocates.
 // It runs first thing in downloadAndApply(), after checkNow() released the manifest's clients, body and url (test_ota_release pins that block).
+// GET with every redirect followed here instead of by the HTTP client. The client would keep one TLS client and one trust
+// anchor set for every hop, but the hosts of a release download are anchored by different roots and holding both costs heap
+// the download does not have. So each hop is decided first (lib/fry_core/ota_redirect.h: at most kMaxRedirectHops, https
+// only, a host that has trust anchors), the session is stopped, and the next hop is begun through beginHttpsUrl, which
+// replaces the anchors, validates the new host, and applies the same heap floors as the first hop. Nothing falls back to an
+// insecure connection: a refused hop ends the request.
+//
+// Between two hops the heap must be given back in one piece, or the next session's big buffers have no block to land in. Two
+// allocations made while the first session was live sit in the middle of the region its buffers free: the Location String the
+// client keeps (a signed URL is about 900 B, grown as the header is read) and the last received segment, which stop() leaves in
+// the connection's queue (stop() closes the pcb but only the last reference to the connection frees what it never read).
+// So, in this order: read what is left (bounded), copy the Location to the stack (a Location over kHopLocationMax ends the
+// request), stop, rebuild the client so its old Strings are freed, then begin the next hop from the stack copy. No heap block is
+// made for the redirect, so none sits in the freed region at the next hop's heap sample.
+constexpr uint16_t kHopDrainBytes = 2048;  // most unread bytes thrown away per hop
+constexpr uint32_t kHopDrainMs = 250;      // longest the drain may take; the loop is never blocked past this
+constexpr uint16_t kManifestTimeoutMs = HTTPCLIENT_DEFAULT_TCP_TIMEOUT;
+constexpr uint16_t kDownloadTimeoutMs = 20000;
+
+// The settings every OTA client carries after its begin: the read timeout, redirects off (beginHttpsUrl turns them on), and
+// keep-alive as otaBeginUrl chose it. One place, so a rebuilt client gets exactly what the first one had.
+FRY_OTA_ESP8266_NOINLINE static void applyOtaClientSettings(HTTPClient& http, uint16_t timeoutMs) {
+  http.setTimeout(timeoutMs);
+  http.setFollowRedirects(HTTPC_DISABLE_FOLLOW_REDIRECTS);
+  // Not spelled as in otaBeginUrl: test_ota_session pins that call site as the only one.
+  const bool keepAlive = fry::otaAsksForKeepAlive(/*isEsp8266=*/true, /*isHttps=*/true);
+  http.setReuse(keepAlive);
+}
+
+// HTTPClient::end() and clear() only set the length of its Strings to zero (ESP8266HTTPClient.cpp:55-62, 198-202): the
+// Location, URI and header buffers stay allocated. Destroying and rebuilding the object in place frees them and drops the
+// connection clone. Nothing holds a pointer or reference into the old Strings: the callers keep only the HTTPClient& itself,
+// which stays valid, and the Location was copied before.
+FRY_OTA_ESP8266_NOINLINE static void rebuildHttpClient(HTTPClient& http) {
+  http.~HTTPClient();
+  new (&http) HTTPClient();
+}
+
+FRY_OTA_ESP8266_NOINLINE static void drainUnread(WiFiClientSecure& sec) {
+  const unsigned long t0 = millis();
+  uint16_t n = 0;
+  while (n < kHopDrainBytes && millis() - t0 < kHopDrainMs && sec.available() > 0) {
+    sec.read();
+    n++;
+  }
+}
+
+// After a followed redirect hop the previous connection must not leave anything inside the region the next hop's floor sample measures.
+// Wait, bounded (reusing fry::decideHeapSettle), for the largest block to be back at the baseline taken before the first hop began.
+// When the bound expires, log one line and go on: the floor check in beginHttpsUrl then decides, fail closed. Returns the ms waited.
+FRY_OTA_ESP8266_NOINLINE static unsigned long settleAfterHop(uint32_t blkBaseline) {
+  const unsigned long t0 = millis();
+  uint32_t blk = fry::queryMaxFreeBlock();
+  // Also wait for the previous session's closing pcb: it sits below the large block, so the block criterion alone passes at once.
+  while (fry::decideHeapSettle(blk, blkBaseline, fry::kOtaSettleSlackBytes, static_cast<uint32_t>(millis() - t0),
+                               fry::kOtaSettleMaxMs) == fry::SettleHold::Hold ||
+         fry::decideClosingSettle(fry::countClosingPcbs(), static_cast<uint32_t>(millis() - t0), fry::kOtaSettleMaxMs) ==
+             fry::SettleHold::Hold) {
+    delay(fry::kOtaSettlePollMs);
+    blk = fry::queryMaxFreeBlock();
+  }
+  const unsigned long waited = millis() - t0;
+  if (blk + fry::kOtaSettleSlackBytes < blkBaseline)
+    Serial.printf_P(PSTR("ota: hop not settled %lu ms, blk %u (start %u)\n"), waited, static_cast<unsigned>(blk),
+                    static_cast<unsigned>(blkBaseline));
+  return waited;
+}
+
+// A signed release-assets URL is about 900 B; this holds one with room to spare. A longer Location is refused.
+constexpr size_t kHopLocationMax = 1280;
+
+// One redirect hop, in the order that leaves the heap whole: read what is left (bounded), copy the Location to this frame's
+// stack, stop the session, rebuild the client (which frees the Location String it held), and begin the next hop from the stack
+// copy. Nothing about the redirect is on the heap when beginHttpsUrl takes its heap sample. The buffer lives in this frame only,
+// so it is gone before the next GET() runs the TLS handshake on the same stack. False ends the request (fail closed).
+FRY_OTA_ESP8266_NOINLINE static bool beginNextHop(HTTPClient& http, WiFiClientSecure& sec, bool manifest, bool& refused,
+                                                  uint16_t timeoutMs, uint32_t blkBaseline) {
+  drainUnread(sec);
+  char loc[kHopLocationMax + 1];
+  const String& got = http.getLocation();
+  const size_t n = got.length();
+  if (n > kHopLocationMax) {
+    Serial.printf_P(PSTR("ota: redirect refused (location too long)\n"));
+    return false;
+  }
+  memcpy(loc, got.c_str(), n + 1);
+  // The redirect is decided and its body drained: stop() closes the connection and frees the TLS state. What the closed connection
+  // still holds is released by that stop and the client rebuild below, and the bounded settle waits until the largest block has
+  // recovered, before the next hop's floor check.
+  sec.stop();
+  rebuildHttpClient(http);
+  (void)settleAfterHop(blkBaseline);
+  if (!fry_http::beginHttpsUrl(http, sec, static_cast<const char*>(loc), /*mflnProbeWorthwhile=*/false, manifest)) {
+    if (fry_http::lastRefusalWasHeap()) refused = true;  // a clock, host or anchor failure takes the normal failure path
+    return false;
+  }
+  applyOtaClientSettings(http, timeoutMs);
+  return true;
+}
+
+FRY_OTA_ESP8266_NOINLINE static int getFollowingHops(HTTPClient& http, WiFiClientSecure& sec, bool isHttps, bool manifest, bool& refused,
+                                                      uint16_t timeoutMs) {
+  if (!isHttps) return http.GET();
+  uint8_t hops = 0;
+  const uint32_t blkBaseline = fry::queryMaxFreeBlock();  // before the first GET(): what each followed hop settles back to
+  for (;;) {
+    const int code = http.GET();
+    const fry::RedirectDecision d = fry::decideRedirect(code, hops, http.getLocation().c_str());
+    if (d == fry::RedirectDecision::NotRedirect) return code;
+    if (d != fry::RedirectDecision::Follow) {
+      Serial.printf_P(PSTR("ota: redirect refused (%d)\n"), static_cast<int>(d));
+      return -1;
+    }
+    hops++;
+    if (!beginNextHop(http, sec, manifest, refused, timeoutMs, blkBaseline)) return -1;
+  }
+}
+
 FRY_OTA_ESP8266_NOINLINE static void settleAfterManifest(uint32_t blkBefore) {
   const unsigned long t0 = millis();
   uint32_t blk = fry::queryMaxFreeBlock();
+  // Also wait for the previous session's closing pcb: it sits below the large block, so the block criterion alone passes at once.
   while (fry::decideHeapSettle(blk, blkBefore, fry::kOtaSettleSlackBytes, static_cast<uint32_t>(millis() - t0),
-                               fry::kOtaSettleMaxMs) == fry::SettleHold::Hold) {
+                               fry::kOtaSettleMaxMs) == fry::SettleHold::Hold ||
+         fry::decideClosingSettle(fry::countClosingPcbs(), static_cast<uint32_t>(millis() - t0), fry::kOtaSettleMaxMs) ==
+             fry::SettleHold::Hold) {
     delay(fry::kOtaSettlePollMs);
     blk = fry::queryMaxFreeBlock();
   }
@@ -334,6 +463,9 @@ FRY_OTA_ESP8266_NOINLINE static void settleBeforeCheck() {
 FRY_OTA_ESP8266_NOINLINE bool downloadAndApply(const String& url, const String& shaExpect,
                                                const String& newVersion) {
 #if defined(ARDUINO_ARCH_ESP8266)
+  // The manifest's clients are gone (checkNow() reset them): its last anchor set must not be resident while the download waits
+  // for its heap and then builds the anchors of its own first hop.
+  fry_http::releaseTrustAnchors();
   settleAfterManifest(s_blkAtCheckStart);
   const std::unique_ptr<DownloadWork> work(new (std::nothrow) DownloadWork());
   if (!work) {
@@ -356,13 +488,18 @@ FRY_OTA_ESP8266_NOINLINE bool downloadAndApply(const String& url, const String& 
 #endif
     FRY_PRINTLN("ota: begin failed");
 #if defined(ARDUINO_ARCH_ESP8266)
-    if (url.startsWith("https://")) s_heapRefused = true;  // as for the manifest: only Refuse can fail it
+    if (url.startsWith("https://") && fry_http::lastRefusalWasHeap()) s_heapRefused = true;  // as for the manifest: only the heap refusal
 #endif
     return false;
   }
   http.setTimeout(20000);
 
+#if defined(ARDUINO_ARCH_ESP8266)
+  const bool isHttpsUrl = url.startsWith("https://");
+  int code = getFollowingHops(http, sec, isHttpsUrl, /*manifest=*/false, s_heapRefused, kDownloadTimeoutMs);
+#else
   int code = http.GET();
+#endif
   if (code != 200) {
     FRY_PRINTF("ota: HTTP %d\n", code);
     http.end();
@@ -408,7 +545,6 @@ FRY_OTA_ESP8266_NOINLINE bool downloadAndApply(const String& url, const String& 
   }
 
 #if defined(ARDUINO_ARCH_ESP8266)
-  fry::Sha256& sha = work->sha;
   // The Updater has no abort() and end(false) STAGES a complete stream, so the last byte stays out of it until the digest matched.
   fry::HeldTailWriter<UpdaterClass> upd(Update, static_cast<size_t>(len));
 #else
@@ -420,13 +556,15 @@ FRY_OTA_ESP8266_NOINLINE bool downloadAndApply(const String& url, const String& 
   // On the heap, not the 4 KB loop stack: this frame is on the stack (below checkNow()) while the TLS
   // session opens, and 1 KB of it is what took the connect past the end of the stack.
   std::unique_ptr<uint8_t[]> bufHeap(new (std::nothrow) uint8_t[kBufBytes]);
-  if (!bufHeap) {
+  const std::unique_ptr<DigestWork> digestWork(new (std::nothrow) DigestWork());
+  if (!bufHeap || !digestWork) {
     FRY_PRINTLN("ota: no memory for the download buffer");
     upd.discard();
     http.end();
     return false;
   }
   uint8_t* const buf = bufHeap.get();
+  fry::Sha256& sha = digestWork->sha;
 #else
   uint8_t buf[kBufBytes];
 #endif
@@ -482,8 +620,8 @@ FRY_OTA_ESP8266_NOINLINE bool downloadAndApply(const String& url, const String& 
   }
 
 #if defined(ARDUINO_ARCH_ESP8266)
-  uint8_t(&digest)[32] = work->digest;
-  char(&hex)[65] = work->hex;
+  uint8_t(&digest)[32] = digestWork->digest;
+  char(&hex)[65] = digestWork->hex;
 #else
   uint8_t digest[32];
   char hex[65];
@@ -776,6 +914,7 @@ bool checkNow() {
 #if defined(ARDUINO_ARCH_ESP8266)
   // The report tick before this check may have left lwIP blocks in the middle of the free region: wait for the heap to settle before the gate
   // samples it and before the block the download will wait for is measured.
+  fry_http::releaseTrustAnchors();  // no TLS client exists yet; a resident set would sit in the free region being measured
   settleBeforeCheck();
 #endif
 
@@ -834,11 +973,15 @@ bool checkNow() {
     FRY_PRINTLN("ota: manifest fetch begin failed");
 #if defined(ARDUINO_ARCH_ESP8266)
     // On ESP8266 an https begin() can only fail by beginHttpsUrl()'s Refuse (HTTPClient::begin cannot fail for these URLs).
-    if (manifestUrl.startsWith("https://")) s_heapRefused = true;
+    if (manifestUrl.startsWith("https://") && fry_http::lastRefusalWasHeap()) s_heapRefused = true;
 #endif
     return false;
   }
+#if defined(ARDUINO_ARCH_ESP8266)
+  int code = getFollowingHops(http, sec, manifestUrl.startsWith("https://"), /*manifest=*/true, s_heapRefused, kManifestTimeoutMs);
+#else
   int code = http.GET();
+#endif
   if (code != 200) {
     // Log the largest contiguous block alongside the code. HTTPClient collapses connect-refused,
     // iobuf-OOM and TLS-handshake-failure all into -1, and the 30 s [health] line samples far too

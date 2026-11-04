@@ -704,6 +704,11 @@ void tick() {
     bool leaseOk = renewLease();
     FRY_PRINTF("poc: slot=%d put=%d lease=%s\n", slot, putCode, leaseOk ? "true" : "false");
   }
+#if defined(ARDUINO_ARCH_ESP8266)
+  // Every session of this tick (OTA, registration, telemetry, PoC, lease) has returned and its clients are destroyed:
+  // the X.509 trust set must not stay resident in the free region until the next one.
+  fry_http::releaseTrustAnchors();
+#endif
 }
 
 #if defined(ARDUINO_ARCH_ESP8266)

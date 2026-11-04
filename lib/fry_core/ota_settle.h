@@ -42,6 +42,11 @@ enum class SettleHold : uint8_t {
 // (or above it), or when the bound is reached whatever the heap looks like.
 SettleHold decideHeapSettle(uint32_t blkNow, uint32_t blkBefore, uint32_t slackBytes, uint32_t heldMs, uint32_t maxHoldMs);
 
+// The closing connection is a second reason to wait: a pcb of the session that just ended is still in FIN_WAIT_1/2, CLOSING or LAST_ACK, and
+// it holds a 188 B pcb and a 108 B pbuf BELOW the large block, so the block criterion above is already met while ~300 B are still to come back.
+// Hold while any is left, bounded by the same maxHoldMs (a pcb stuck in FIN_WAIT_2 is let through and the floor check still decides).
+SettleHold decideClosingSettle(uint32_t closingPcbs, uint32_t heldMs, uint32_t maxHoldMs);
+
 // ---- the wait BEFORE the check -------------------------------------------------------------------------------------------------
 // The report tick (registration, telemetry, PoC) runs right before a check, and its connection leaves the same kind of blocks in the middle of the
 // free region: a 24 B block, or a 192 B pcb with its 112 B pbuf, for a few milliseconds to a few seconds after the connection is closed.
