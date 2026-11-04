@@ -463,6 +463,11 @@ AP restarted FRY-SETUP-<MAC6> after the failed join - /provision accepts a new a
   retried at the next 6-hour check; at 3 it is skipped for good. A manifest naming a different
   version clears the strikes. A restart that is not a failure while the image is pending
   (restartToApply, a USB re-key) sets `fry_ota/planrst`, and the rollback it causes is not counted.
+  On ESP8266 (no bootloader rollback) a boot that runs a version other than the pending one, with
+  neither a rollback nor a planned-restart marker, means the image was not the version the manifest
+  declared; it counts one strike for the manifest's version the same way
+  (`ota: version mismatch manifest=<v> image=<v> - strike <n>/3`), so a mislabelled image stops
+  after 3 install cycles.
 - **Keyless boards do not update.** A USER_SUPPLIED board without a key skips the manifest check: it
   makes no hardwareapi call at all, so a new image could never verify.
 - **Kill switch.** A normal (non-prerelease) release whose manifest is exactly
