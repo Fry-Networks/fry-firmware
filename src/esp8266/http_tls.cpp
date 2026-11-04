@@ -6,20 +6,82 @@
 #include "mfln_cache.h"
 #include "tls_sizing.h"
 #include "tls_boot_gate.h"
+#include "tls_trust.h"
+#include "ntp_kick.h"
 #include "config.h"
+#include "tls_anchors.h"
+
+#include <new>
+#include <time.h>
 
 namespace fry_http {
 
 namespace {
 
-// Extracts "host" from "scheme://host[:port]/path...". No port/userinfo support needed —
-// every URL this firmware calls is a plain https://host/path.
-String extractHost(const String& url) {
-  int start = url.indexOf("://");
-  start = (start < 0) ? 0 : start + 3;
-  int end = url.indexOf('/', start);
-  if (end < 0) end = url.length();
-  return url.substring(start, end);
+// "host" (or "host:port") of "scheme://host[:port]/path...", held in a stack buffer, not a String: it is taken before the heap
+// sample in beginHttpsUrl and must leave the heap as it found it. No port/userinfo support needed: every URL this firmware
+// calls is a plain https://host/path. extractHost is false when it does not fit (no trust set has a name that long).
+struct HostName {
+  char buf[64];
+  const char* c_str() const { return buf; }
+  operator String() const { return String(buf); }  // for the helpers that take a String; never instantiated on the production path
+};
+bool extractHost(const char* url, char* out, size_t cap) {
+  const char* start = strstr(url, "://");
+  start = start ? start + 3 : url;
+  const char* end = strchr(start, '/');
+  const size_t n = end ? static_cast<size_t>(end - start) : strlen(start);
+  if (n + 1 > cap) return false;
+  memcpy(out, start, n);
+  out[n] = '\0';
+  return true;
+}
+
+// The active trust-anchor set. The anchors are const data in flash (src/esp8266/tls_anchors.h, generated from data/cert), so
+// choosing a set allocates nothing and frees nothing: it only points at the one for the host being called. A
+// WiFiClientSecure keeps a raw pointer to it, which is always valid (flash), so no client can be left holding a freed list.
+struct TrustState {
+  const BearSSL::X509List* list;
+  fry::TrustSet set;
+};
+TrustState gTrust = {nullptr, fry::TrustSet::None};
+bool gNtpKicked = false;
+uint32_t gNtpKickedMs = 0;
+
+// Starts SNTP when the clock is unset, at most once per ntpRestartDue interval. Never waits.
+void kickSntpIfNeeded() {
+  if (fry::tlsClockSane(static_cast<int64_t>(time(nullptr)))) return;
+  if (!fry::ntpRestartDue(gNtpKicked, millis(), gNtpKickedMs)) return;
+  configTime(0, 0, "pool.ntp.org", "time.nist.gov");
+  gNtpKicked = true;
+  gNtpKickedMs = millis();
+}
+
+// Whether the last beginHttpsUrl() refusal was the heap check (a retry soon may succeed) and not a clock, host or anchor failure.
+bool s_lastRefusalHeap = false;
+
+// Hides the pointer's origin from the optimiser: the layout check below must read the mirror through the framework's own
+// accessors at run time, not be folded against the data it was built from.
+inline const BearSSL::X509List* opaqueList(const BearSSL::X509List* p) {
+  __asm__ __volatile__("" : "+r"(p));
+  return p;
+}
+
+bool ensureTrustAnchors(fry::TrustSet want) {
+  if (gTrust.list && gTrust.set == want) return true;
+  gTrust.list = nullptr;
+  gTrust.set = fry::TrustSet::None;
+  const BearSSL::X509List* l = fry::anchorListFor(want);
+  if (!l) return false;
+  const BearSSL::X509List* o = opaqueList(l);
+  if (o->getCount() != fry::trustSetCount(want) || !o->getTrustAnchors() || o->getTrustAnchors()[0].dn.len == 0 ||
+      !(o->getTrustAnchors()[0].flags & BR_X509_TA_CA)) {
+    Serial.printf_P(PSTR("tls: anchor list layout unexpected - refusing\n"));
+    return false;
+  }
+  gTrust.list = l;
+  gTrust.set = want;
+  return true;
 }
 
 bool probeMfln512(const char* host, void*) {
@@ -193,8 +255,12 @@ void benchRefused(const String& host, const fry::HeapSample& heap, const fry::Tl
 
 }  // namespace
 
-bool beginHttpsUrl(HTTPClient& http, WiFiClientSecure& sec, const String& url, bool mflnProbeWorthwhile,
-                   bool smallReply) {
+// The URL arrives as a C string and is never copied to the heap before the heap sample below: a redirect hop passes the
+// Location from the caller's stack (src/core/ota_client.cpp getFollowingHops), and a heap copy of it sitting in the middle of
+// the region this call is about to measure is what split that region. http.begin() at the end builds its own Strings, after the
+// sample, which is where the session needs them.
+bool beginHttpsUrl(HTTPClient& http, WiFiClientSecure& sec, const char* url, bool mflnProbeWorthwhile, bool smallReply) {
+  s_lastRefusalHeap = false;
 #if defined(FRY_TLS_BENCH)
   // BENCH ONLY: build the trust-anchor set BEFORE the sample below, so planTls() judges the heap
   // exactly as production will, with the anchors already resident.
@@ -205,16 +271,34 @@ bool beginHttpsUrl(HTTPClient& http, WiFiClientSecure& sec, const String& url, b
 #else
 #define FRY_BENCH_SIZES(r, t) do {} while (0)
 #endif
-  // DOCUMENTED LIMITATION (v0.2.0), not a bug for this run: unlike the ESP32 fix in this same
-  // release (src/esp32/http_tls.cpp, sec.setCACertBundle()), this chip stays on setInsecure().
-  // BearSSL trust-anchor verification (setTrustAnchors()/setX509Time()) needs its own
-  // certificate-store buffer *in addition to* the 16384/512 (or 512/512 MFLN) I/O buffers this
-  // function already sizes right at this chip's heap ceiling (HEAP_GATE_OTA_BLOCK above is
-  // already ~46% of the ~80 KB total ESP8266 heap for the non-MFLN path alone) — there isn't
-  // room left for the extra trust-anchor working set without starving the rest of the firmware
-  // (WiFi/lwIP buffers, SOCKS5 relay, JSON parsing). Revisit only alongside a heap budget pass
-  // (e.g. dropping the SOCKS5 relay or shrinking OTA_MANIFEST parsing) — not in scope here.
-  sec.setInsecure();
+  // The served chain is validated against a root anchor (lib/fry_core/tls_trust.h). Fail closed: an unknown host, a clock
+  // that SNTP has not set, or an anchor set that will not build ends the call here, before any connection exists. A missing
+  // clock starts SNTP (rate-limited) and returns without waiting; the caller's usual retry finds it set.
+  HostName host;
+  if (!url || !extractHost(url, host.buf, sizeof(host.buf))) {
+    Serial.printf_P(PSTR("tls: refusing - host missing or too long\n"));
+    return false;
+  }
+  const fry::TrustSet trust = fry::trustSetForHost(host.c_str());
+  if (trust == fry::TrustSet::None) {
+    Serial.printf_P(PSTR("tls: refusing %s - no trust anchors for this host\n"), host.c_str());
+    return false;
+  }
+  const time_t now = time(nullptr);
+  if (!fry::tlsClockSane(static_cast<int64_t>(now))) {
+    kickSntpIfNeeded();
+    Serial.printf_P(PSTR("tls: refusing %s - clock not set yet, waiting for SNTP\n"), host.c_str());
+    return false;
+  }
+  // Anchors resident BEFORE the sample below, so planTls() judges the heap as it will really be. Building the set frees
+  // the previous one first, so a manifest-only or earlier-hop set never sits next to this one.
+  if (!ensureTrustAnchors(trust)) {
+    Serial.printf_P(PSTR("tls: refusing %s - trust anchors did not load\n"), host.c_str());
+    return false;
+  }
+  Serial.printf_P(PSTR("tls: trust set=%s n=%u free=%u blk=%u\n"), fry::trustSetName(trust),
+                  static_cast<unsigned>(fry::trustSetCount(trust)), static_cast<unsigned>(ESP.getFreeHeap()),
+                  static_cast<unsigned>(fry::queryMaxFreeBlock()));
 
   // hardwareapi may honour MFLN (letting us run a 512/512-byte TLS buffer instead of the
   // default 16 KB/16 KB); GitHub (used by T7's OTA client, which shares this same helper's
@@ -266,7 +350,6 @@ bool beginHttpsUrl(HTTPClient& http, WiFiClientSecure& sec, const String& url, b
   const fry::TlsFloors floors = fry::tlsFloorsAtBegin(gateFree, gateBlock, mflnProbeWorthwhile);
   const fry::TlsPlan plan =
       fry::planTls(heap, floors.freeTotal, floors.block, mflnProbeWorthwhile, smallReply);
-  String host = extractHost(url);
   switch (plan.sizing) {
     case fry::TlsSizing::Refuse:
       // printf_P/PSTR: the string stays in flash instead of costing ~130 B of the 80 KB heap budget.
@@ -278,6 +361,7 @@ bool beginHttpsUrl(HTTPClient& http, WiFiClientSecure& sec, const String& url, b
 #if defined(FRY_TLS_BENCH)
       benchRefused(host, heap, floors);
 #endif
+      s_lastRefusalHeap = true;
       return false;
     case fry::TlsSizing::Small:
       FRY_PRINTLN("tls: low contiguous heap - MFLN probe skipped, 512/512");
@@ -322,16 +406,36 @@ bool beginHttpsUrl(HTTPClient& http, WiFiClientSecure& sec, const String& url, b
 #endif
 #undef FRY_BENCH_SIZES
 
+  sec.setTrustAnchors(gTrust.list);
+  sec.setX509Time(now);
   if (!http.begin(sec, url)) return false;
   http.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);
   http.setRedirectLimit(5);
   return true;
 }
 
+bool lastRefusalWasHeap() { return s_lastRefusalHeap; }
+
 uint32_t tlsStartDelayMs() {
+  kickSntpIfNeeded();  // start the clock now, so it is set by the time the gate opens
   uint32_t anchorMs = 0;
   const bool haveConnect = fry_wifi::connectAnchorMs(&anchorMs);
   return fry::tlsConnectWaitMs(millis(), anchorMs, haveConnect);
+}
+
+// Drops the active trust-set selection. The anchors are const data in flash, so nothing is freed and no heap changes; the
+// next beginHttpsUrl() selects its set again. Called from the loop level at the same points as before (end of the report
+// tick, start of an OTA check, after the manifest session).
+void releaseTrustAnchors() {
+  if (!gTrust.list) return;
+  gTrust.list = nullptr;
+  gTrust.set = fry::TrustSet::None;
+  Serial.printf_P(PSTR("tls: trust released free=%u blk=%u\n"), static_cast<unsigned>(ESP.getFreeHeap()),
+                  static_cast<unsigned>(fry::queryMaxFreeBlock()));
+}
+
+bool beginHttpsUrl(HTTPClient& http, WiFiClientSecure& sec, const String& url, bool mflnProbeWorthwhile, bool smallReply) {
+  return beginHttpsUrl(http, sec, url.c_str(), mflnProbeWorthwhile, smallReply);
 }
 
 bool beginHttpsUrl(HTTPClient& http, WiFiClientSecure& sec, const String& url, bool mflnProbeWorthwhile) {

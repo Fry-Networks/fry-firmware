@@ -15,6 +15,11 @@ using WiFiClientSecure = BearSSL::WiFiClientSecure;
 
 namespace fry_http {
 
+#if defined(ARDUINO_ARCH_ESP8266)
+// Drops the ESP8266's active X.509 trust-set selection (src/esp8266/http_tls.cpp); the anchors are flash data, so no heap moves. Loop level only.
+void releaseTrustAnchors();
+#endif
+
 // Configures TLS + the default redirect policy (follow up to 5, HTTPC_FORCE_FOLLOW_REDIRECTS: the OTA manifest and
 // image come through GitHub, a two-hop chain) and calls http.begin(sec, url). A caller that sends credentials can turn
 // following off right after this returns: src/core/hardwareapi_client.cpp does that for its routes (noRedirects).
@@ -37,6 +42,14 @@ bool beginHttpsUrl(HTTPClient& http, WiFiClientSecure& sec, const String& url,
 // four-argument form is smallReply = false. ESP8266 only: the ESP32 declaration and image are unchanged.
 bool beginHttpsUrl(HTTPClient& http, WiFiClientSecure& sec, const String& url, bool mflnProbeWorthwhile,
                    bool smallReply);
+
+// The same, from a C string, and the form that never puts the URL on the heap before the heap sample. A redirect hop passes
+// its Location from the caller's stack through this one. The String forms above call it.
+bool beginHttpsUrl(HTTPClient& http, WiFiClientSecure& sec, const char* url, bool mflnProbeWorthwhile, bool smallReply);
+
+// True when the last beginHttpsUrl() call returned false because the heap check refused the session, as opposed to an
+// unset clock, a host without trust anchors or an anchor set that would not build. Only the first is worth a short retry.
+bool lastRefusalWasHeap();
 
 // Boot TLS gate (lib/fry_core/tls_boot_gate.h): milliseconds still to wait before a session may start, 0 = go. The first call
 // starts the window. Every session opener calls it before it allocates anything and treats non-zero as a deferral.
