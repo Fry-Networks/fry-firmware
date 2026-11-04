@@ -236,6 +236,11 @@ struct DownloadWork {
   HTTPClient http;
   WiFiClientSecure sec;
   WiFiClient plain;
+};
+
+// The digest state is not part of DownloadWork: it is only needed once the body streams, and in the work block it was live (216 B) at the
+// download's first floor sample. Taken just before streaming, freed when downloadAndApply() returns.
+struct DigestWork {
   fry::Sha256 sha;
   uint8_t digest[32];
   char hex[65];
@@ -339,8 +344,11 @@ FRY_OTA_ESP8266_NOINLINE static void drainUnread(WiFiClientSecure& sec) {
 FRY_OTA_ESP8266_NOINLINE static unsigned long settleAfterHop(uint32_t blkBaseline) {
   const unsigned long t0 = millis();
   uint32_t blk = fry::queryMaxFreeBlock();
+  // Also wait for the previous session's closing pcb: it sits below the large block, so the block criterion alone passes at once.
   while (fry::decideHeapSettle(blk, blkBaseline, fry::kOtaSettleSlackBytes, static_cast<uint32_t>(millis() - t0),
-                               fry::kOtaSettleMaxMs) == fry::SettleHold::Hold) {
+                               fry::kOtaSettleMaxMs) == fry::SettleHold::Hold ||
+         fry::decideClosingSettle(fry::countClosingPcbs(), static_cast<uint32_t>(millis() - t0), fry::kOtaSettleMaxMs) ==
+             fry::SettleHold::Hold) {
     delay(fry::kOtaSettlePollMs);
     blk = fry::queryMaxFreeBlock();
   }
@@ -404,8 +412,11 @@ FRY_OTA_ESP8266_NOINLINE static int getFollowingHops(HTTPClient& http, WiFiClien
 FRY_OTA_ESP8266_NOINLINE static void settleAfterManifest(uint32_t blkBefore) {
   const unsigned long t0 = millis();
   uint32_t blk = fry::queryMaxFreeBlock();
+  // Also wait for the previous session's closing pcb: it sits below the large block, so the block criterion alone passes at once.
   while (fry::decideHeapSettle(blk, blkBefore, fry::kOtaSettleSlackBytes, static_cast<uint32_t>(millis() - t0),
-                               fry::kOtaSettleMaxMs) == fry::SettleHold::Hold) {
+                               fry::kOtaSettleMaxMs) == fry::SettleHold::Hold ||
+         fry::decideClosingSettle(fry::countClosingPcbs(), static_cast<uint32_t>(millis() - t0), fry::kOtaSettleMaxMs) ==
+             fry::SettleHold::Hold) {
     delay(fry::kOtaSettlePollMs);
     blk = fry::queryMaxFreeBlock();
   }
@@ -534,7 +545,6 @@ FRY_OTA_ESP8266_NOINLINE bool downloadAndApply(const String& url, const String& 
   }
 
 #if defined(ARDUINO_ARCH_ESP8266)
-  fry::Sha256& sha = work->sha;
   // The Updater has no abort() and end(false) STAGES a complete stream, so the last byte stays out of it until the digest matched.
   fry::HeldTailWriter<UpdaterClass> upd(Update, static_cast<size_t>(len));
 #else
@@ -546,13 +556,15 @@ FRY_OTA_ESP8266_NOINLINE bool downloadAndApply(const String& url, const String& 
   // On the heap, not the 4 KB loop stack: this frame is on the stack (below checkNow()) while the TLS
   // session opens, and 1 KB of it is what took the connect past the end of the stack.
   std::unique_ptr<uint8_t[]> bufHeap(new (std::nothrow) uint8_t[kBufBytes]);
-  if (!bufHeap) {
+  const std::unique_ptr<DigestWork> digestWork(new (std::nothrow) DigestWork());
+  if (!bufHeap || !digestWork) {
     FRY_PRINTLN("ota: no memory for the download buffer");
     upd.discard();
     http.end();
     return false;
   }
   uint8_t* const buf = bufHeap.get();
+  fry::Sha256& sha = digestWork->sha;
 #else
   uint8_t buf[kBufBytes];
 #endif
@@ -608,8 +620,8 @@ FRY_OTA_ESP8266_NOINLINE bool downloadAndApply(const String& url, const String& 
   }
 
 #if defined(ARDUINO_ARCH_ESP8266)
-  uint8_t(&digest)[32] = work->digest;
-  char(&hex)[65] = work->hex;
+  uint8_t(&digest)[32] = digestWork->digest;
+  char(&hex)[65] = digestWork->hex;
 #else
   uint8_t digest[32];
   char hex[65];

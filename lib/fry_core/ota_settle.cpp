@@ -12,6 +12,11 @@ SettleHold decideHeapSettle(uint32_t blkNow, uint32_t blkBefore, uint32_t slackB
   return heldMs >= maxHoldMs ? SettleHold::Proceed : SettleHold::Hold;
 }
 
+SettleHold decideClosingSettle(uint32_t closingPcbs, uint32_t heldMs, uint32_t maxHoldMs) {
+  if (closingPcbs == 0) return SettleHold::Proceed;
+  return heldMs >= maxHoldMs ? SettleHold::Proceed : SettleHold::Hold;
+}
+
 // The wait before the check (see ota_settle.h): the baseline is what earlier checks started on, not what this one starts with.
 SettleHold decideCheckStartSettle(uint32_t blkNow, uint32_t baseline, uint32_t slackBytes, uint32_t heldMs, uint32_t stableMs, uint32_t maxHoldMs) {
   if (heldMs >= maxHoldMs) return SettleHold::Proceed;
