@@ -21,4 +21,9 @@ int8_t rssi();
 // Reconnect watchdog — call every loop() once connect() has succeeded at least once.
 void maintain();
 
+#if defined(ARDUINO_ARCH_ESP8266)
+// Anchor of the boot TLS gate window (see lib/fry_core/tls_boot_gate.h). False until a link-up has been seen.
+bool connectAnchorMs(uint32_t* anchorOut);
+#endif
+
 }  // namespace fry_wifi

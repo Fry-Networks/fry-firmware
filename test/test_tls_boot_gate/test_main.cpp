@@ -165,8 +165,8 @@ void test_manual_ota_check_is_deferred_by_the_gate_before_any_state_change() {
   TEST_ASSERT_TRUE_MESSAGE(has(tick, "fry_http::tlsStartDelayMs() != 0) return;"), "scheduled first check stays gated");
 }
 
-// ESP8266 only: the gate is declared and defined only there, and its definition latches the first call.
-void test_gate_is_esp8266_only_and_latches_the_first_call() {
+// ESP8266 only: the gate is declared and defined only there, and its definition is keyed off the Wi-Fi connect.
+void test_gate_is_esp8266_only_and_is_keyed_off_the_connect() {
   std::string h;
   TEST_ASSERT_TRUE(loadSource("src/core/http_tls.h", h));
   const size_t decl = h.find("uint32_t tlsStartDelayMs();");
@@ -177,8 +177,147 @@ void test_gate_is_esp8266_only_and_latches_the_first_call() {
   std::string c;
   TEST_ASSERT_TRUE(loadSource("src/esp8266/http_tls.cpp", c));
   const std::string def = slice(c, "uint32_t tlsStartDelayMs() {", "bool beginHttpsUrl(HTTPClient& http, WiFiClientSecure& sec, const String& url, bool mflnProbeWorthwhile) {");
-  TEST_ASSERT_TRUE(has(def, "if (!started)"));
-  TEST_ASSERT_TRUE(has(def, "fry::tlsBootWaitMs(nowMs, firstMs)"));
+  TEST_ASSERT_TRUE(has(def, "fry_wifi::connectAnchorMs("));
+  TEST_ASSERT_TRUE(has(def, "fry::tlsConnectWaitMs("));
+  TEST_ASSERT_FALSE_MESSAGE(has(def, "started"), "no first-call latch");
+  TEST_ASSERT_FALSE_MESSAGE(has(def, "firstMs"), "no first-call stamp");
+}
+
+// Connect-keyed window, pure part.
+uint32_t waitAt(uint32_t now, uint32_t detect, bool haveDetect, uint32_t assoc, bool haveAssoc) {
+  uint32_t anchor = 0;
+  const bool have = fry::connectAnchorMs(detect, haveDetect, assoc, haveAssoc, &anchor);
+  return fry::tlsConnectWaitMs(now, anchor, have);
+}
+
+void test_no_connect_keeps_the_gate_closed_for_the_full_window_at_any_time() {
+  const uint32_t times[] = {0, 5000, 9000, 21000, 600000, 0xFFFFFFFFu};
+  for (size_t i = 0; i < sizeof(times) / sizeof(times[0]); i++) {
+    TEST_ASSERT_EQUAL_UINT32(fry::kBootAsyncEventDoneMs, fry::tlsConnectWaitMs(times[i], 0, false));
+    TEST_ASSERT_EQUAL_UINT32(fry::kBootAsyncEventDoneMs, waitAt(times[i], 0, false, 0, false));
+  }
+}
+
+void test_a_late_connect_moves_the_window_with_it() {
+  // A boot-keyed gate would open at 9000.
+  TEST_ASSERT_EQUAL_UINT32(fry::kBootAsyncEventDoneMs, waitAt(12000, 12000, true, 0, false));
+  TEST_ASSERT_EQUAL_UINT32(fry::kBootAsyncEventDoneMs, waitAt(9000, 0, false, 0, false));  // no connect yet: full window
+  TEST_ASSERT_EQUAL_UINT32(fry::kBootAsyncEventDoneMs + 2500, waitAt(40000, 0, false, 40000, true));
+  TEST_ASSERT_TRUE(waitAt(12000, 12000, true, 0, false) > 0);
+  TEST_ASSERT_TRUE(waitAt(20999, 12000, true, 0, false) > 0);
+  TEST_ASSERT_EQUAL_UINT32(1, waitAt(20999, 12000, true, 0, false));
+  TEST_ASSERT_EQUAL_UINT32(0, waitAt(21000, 12000, true, 0, false));
+  TEST_ASSERT_EQUAL_UINT32(0, fry::tlsConnectWaitMs(21000, 12000, true));
+  TEST_ASSERT_TRUE(fry::tlsConnectWaitMs(20999, 12000, true) > 0);
+}
+
+void test_the_association_anchor_dominates_when_the_address_comes_fast() {
+  uint32_t a = 0;
+  TEST_ASSERT_TRUE(fry::connectAnchorMs(4500, true, 4000, true, &a));
+  TEST_ASSERT_EQUAL_UINT32(6500, a);
+  TEST_ASSERT_TRUE(waitAt(15499, 4500, true, 4000, true) > 0);
+  TEST_ASSERT_EQUAL_UINT32(0, waitAt(15500, 4500, true, 4000, true));
+}
+
+void test_the_address_anchor_dominates_when_dhcp_is_slow() {
+  uint32_t a = 0;
+  TEST_ASSERT_TRUE(fry::connectAnchorMs(10600, true, 4000, true, &a));
+  TEST_ASSERT_EQUAL_UINT32(10600, a);
+  TEST_ASSERT_EQUAL_UINT32(0, waitAt(10600 + fry::kBootAsyncEventDoneMs, 10600, true, 4000, true));
+  TEST_ASSERT_TRUE(waitAt(10600 + fry::kBootAsyncEventDoneMs - 1, 10600, true, 4000, true) > 0);
+}
+
+// Only one stamp known: never a permanent close while the link is up.
+void test_only_the_association_known_uses_the_association_anchor() {
+  uint32_t a = 0;
+  TEST_ASSERT_TRUE(fry::connectAnchorMs(0, false, 30000, true, &a));
+  TEST_ASSERT_EQUAL_UINT32(30000 + fry::kAssocToDetectLeadMs, a);
+  TEST_ASSERT_TRUE(waitAt(30000 + fry::kAssocToDetectLeadMs + fry::kBootAsyncEventDoneMs - 1, 0, false, 30000, true) > 0);
+  TEST_ASSERT_EQUAL_UINT32(0, waitAt(30000 + fry::kAssocToDetectLeadMs + fry::kBootAsyncEventDoneMs, 0, false, 30000, true));
+}
+
+void test_only_the_address_known_uses_the_address_anchor() {
+  uint32_t a = 0;
+  TEST_ASSERT_TRUE(fry::connectAnchorMs(8000, true, 0, false, &a));
+  TEST_ASSERT_EQUAL_UINT32(8000, a);
+  TEST_ASSERT_EQUAL_UINT32(0, waitAt(8000 + fry::kBootAsyncEventDoneMs, 8000, true, 0, false));
+}
+
+void test_neither_stamp_known_reports_no_connect() {
+  uint32_t a = 77;
+  TEST_ASSERT_FALSE(fry::connectAnchorMs(5, false, 6, false, &a));
+  TEST_ASSERT_EQUAL_UINT32(77, a);
+}
+
+void test_every_link_up_re_arms_the_gate() {
+  // First link up at 6500 (detect), open at 15500; a second association at 40000 with no detect seen yet closes it again.
+  TEST_ASSERT_EQUAL_UINT32(0, waitAt(40000, 6500, true, 4000, true));
+  TEST_ASSERT_TRUE(waitAt(40000, 0, false, 40000, true) > 0);
+  TEST_ASSERT_TRUE(waitAt(40000 + fry::kAssocToDetectLeadMs + fry::kBootAsyncEventDoneMs - 1, 0, false, 40000, true) > 0);
+  TEST_ASSERT_EQUAL_UINT32(0, waitAt(40000 + fry::kAssocToDetectLeadMs + fry::kBootAsyncEventDoneMs, 0, false, 40000, true));
+  // And the detect that follows moves the anchor later again.
+  TEST_ASSERT_TRUE(waitAt(52500, 50000, true, 40000, true) > 0);
+}
+
+void test_the_connect_window_is_wrap_safe() {
+  const uint32_t assoc = 0xFFFFFC00u;                       // 1024 ms before the wrap
+  const uint32_t detect = assoc + 3000u;                    // wrapped, later than assoc + 2500
+  uint32_t a = 0;
+  TEST_ASSERT_TRUE(fry::connectAnchorMs(detect, true, assoc, true, &a));
+  TEST_ASSERT_EQUAL_UINT32(detect, a);
+  TEST_ASSERT_TRUE(fry::connectAnchorMs(assoc + 1000u, true, assoc, true, &a));
+  TEST_ASSERT_EQUAL_UINT32(assoc + 2500u, a);
+  TEST_ASSERT_TRUE(waitAt(detect + fry::kBootAsyncEventDoneMs - 1, detect, true, assoc, true) > 0);
+  TEST_ASSERT_EQUAL_UINT32(0, waitAt(detect + fry::kBootAsyncEventDoneMs, detect, true, assoc, true));
+}
+
+// An anchor that is more than half the counter range old must read as long past, not as lying ahead of now.
+void test_a_long_uptime_never_re_closes_the_gate() {
+  const uint32_t anchor = 1000u;
+  const uint32_t xs[] = {0u, 1u, 1000u, 100000u, 2000000000u};
+  for (size_t i = 0; i < sizeof(xs) / sizeof(xs[0]); i++) {
+    const uint32_t now = anchor + 0x80000000u + xs[i];
+    TEST_ASSERT_EQUAL_UINT32(0, fry::tlsConnectWaitMs(now, anchor, true));
+  }
+  // A recent anchor just before the counter wraps: closed inside the window, open at its end.
+  const uint32_t near = 0xFFFFF000u;
+  TEST_ASSERT_TRUE(fry::tlsConnectWaitMs(near + 100u, near, true) > 0);
+  TEST_ASSERT_EQUAL_UINT32(1, fry::tlsConnectWaitMs(near + fry::kBootAsyncEventDoneMs - 1u, near, true));
+  TEST_ASSERT_EQUAL_UINT32(0, fry::tlsConnectWaitMs(near + fry::kBootAsyncEventDoneMs, near, true));
+}
+
+// The only legitimate anchor in the future is association + lead.
+void test_an_anchor_ahead_is_honoured_only_up_to_the_association_lead() {
+  TEST_ASSERT_EQUAL_UINT32(fry::kAssocToDetectLeadMs + fry::kBootAsyncEventDoneMs,
+                           fry::tlsConnectWaitMs(5000u, 5000u + fry::kAssocToDetectLeadMs, true));
+  TEST_ASSERT_EQUAL_UINT32(0, fry::tlsConnectWaitMs(5000u, 5000u + fry::kAssocToDetectLeadMs + 1u, true));
+}
+
+// The stamps live in the Wi-Fi connect code without adding any heap object, and no path leaves the gate without an anchor.
+void test_wifi_connect_stamps_the_link_up_without_new_heap_and_keeps_an_anchor() {
+  std::string w;
+  TEST_ASSERT_TRUE(loadSource("src/esp8266/wifi_connect.cpp", w));
+  TEST_ASSERT_FALSE_MESSAGE(has(w, "onStationModeGotIP"), "no extra persistent event handler");
+  TEST_ASSERT_FALSE_MESSAGE(has(w, "std::function"), "no std::function growth");
+  const std::string lam = slice(w, "s_evtConn = WiFi.onStationModeConnected(", "s_evtDhcpTo");
+  TEST_ASSERT_TRUE(has(lam, "s_assocMs = millis();"));
+  TEST_ASSERT_TRUE(has(lam, "s_haveAssoc = true;"));
+  TEST_ASSERT_TRUE(has(lam, "s_haveDetect = false;"));
+  TEST_ASSERT_TRUE_MESSAGE(lam.find("s_haveAssoc = true;") != std::string::npos, "association stamped with the clear");
+  // Every statement that clears haveDetect sits in the callback that sets haveAssoc; nothing ever clears haveAssoc.
+  size_t pos = 0, clears = 0;
+  while ((pos = w.find("s_haveDetect = false;  //", pos)) != std::string::npos) { clears++; pos++; }
+  TEST_ASSERT_EQUAL_UINT32_MESSAGE(1, clears, "one place clears the address stamp: the association callback");
+  TEST_ASSERT_FALSE_MESSAGE(has(w, "  s_haveAssoc = false"), "the association anchor is never withdrawn");
+  const std::string conn = slice(w, "if (WiFi.status() == WL_CONNECTED) {\n      s_everConnected = true;", "FRY_PRINTF(");
+  TEST_ASSERT_TRUE(has(conn, "s_detectMs = millis();"));
+  TEST_ASSERT_TRUE(has(conn, "s_haveDetect = true;"));
+  const std::string maint = w.substr(w.find("void maintain() {"));
+  TEST_ASSERT_TRUE(has(maint, "if (s_lost) {"));
+  TEST_ASSERT_TRUE(has(maint, "s_detectMs = now;"));
+  const std::string anchor = w.substr(w.find("bool connectAnchorMs("));
+  TEST_ASSERT_TRUE_MESSAGE(has(anchor, "const bool haveDetect = s_haveDetect;"), "stamps copied into locals");
+  TEST_ASSERT_TRUE(has(anchor, "fry::connectAnchorMs(detectMs, haveDetect, assocMs, haveAssoc, anchorOut)"));
 }
 
 }  // namespace
@@ -198,6 +337,18 @@ int main(int, char**) {
   RUN_TEST(test_telemetry_defers_without_advancing_its_interval_timer);
   RUN_TEST(test_ota_first_check_waits_for_the_gate_before_the_hold_decision);
   RUN_TEST(test_manual_ota_check_is_deferred_by_the_gate_before_any_state_change);
-  RUN_TEST(test_gate_is_esp8266_only_and_latches_the_first_call);
+  RUN_TEST(test_gate_is_esp8266_only_and_is_keyed_off_the_connect);
+  RUN_TEST(test_no_connect_keeps_the_gate_closed_for_the_full_window_at_any_time);
+  RUN_TEST(test_a_late_connect_moves_the_window_with_it);
+  RUN_TEST(test_the_association_anchor_dominates_when_the_address_comes_fast);
+  RUN_TEST(test_the_address_anchor_dominates_when_dhcp_is_slow);
+  RUN_TEST(test_only_the_association_known_uses_the_association_anchor);
+  RUN_TEST(test_only_the_address_known_uses_the_address_anchor);
+  RUN_TEST(test_neither_stamp_known_reports_no_connect);
+  RUN_TEST(test_every_link_up_re_arms_the_gate);
+  RUN_TEST(test_the_connect_window_is_wrap_safe);
+  RUN_TEST(test_a_long_uptime_never_re_closes_the_gate);
+  RUN_TEST(test_an_anchor_ahead_is_honoured_only_up_to_the_association_lead);
+  RUN_TEST(test_wifi_connect_stamps_the_link_up_without_new_heap_and_keeps_an_anchor);
   return UNITY_END();
 }

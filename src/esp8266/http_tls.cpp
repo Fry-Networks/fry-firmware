@@ -1,5 +1,6 @@
 #include "../core/http_tls.h"
 #include "../core/flash_print.h"
+#include "../core/wifi_station.h"
 
 #include "heap_gate.h"
 #include "mfln_cache.h"
@@ -328,14 +329,9 @@ bool beginHttpsUrl(HTTPClient& http, WiFiClientSecure& sec, const String& url, b
 }
 
 uint32_t tlsStartDelayMs() {
-  static bool started = false;
-  static uint32_t firstMs = 0;
-  const uint32_t nowMs = millis();
-  if (!started) {
-    started = true;
-    firstMs = nowMs;
-  }
-  return fry::tlsBootWaitMs(nowMs, firstMs);
+  uint32_t anchorMs = 0;
+  const bool haveConnect = fry_wifi::connectAnchorMs(&anchorMs);
+  return fry::tlsConnectWaitMs(millis(), anchorMs, haveConnect);
 }
 
 bool beginHttpsUrl(HTTPClient& http, WiFiClientSecure& sec, const String& url, bool mflnProbeWorthwhile) {

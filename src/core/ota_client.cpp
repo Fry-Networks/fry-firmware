@@ -1015,6 +1015,10 @@ void tick() {
     if (s_lastCheckMs == 0) s_lastCheckMs = now;
     // Not while the boot's asynchronous 504 B allocation (7.8 s after the connect) can still land inside the check.
     if (fry::otaFirstCheckWaitMs(static_cast<uint32_t>(now), static_cast<uint32_t>(s_lastCheckMs)) != 0) return;
+    // Nor before the boot registration (started when the TLS gate opens, counted from the connect) has had its slot.
+    uint32_t connectAnchor = 0;
+    const bool haveConnect = fry_wifi::connectAnchorMs(&connectAnchor);
+    if (fry::otaFirstCheckAfterConnectWaitMs(static_cast<uint32_t>(now), connectAnchor, haveConnect) != 0) return;
     if (fry_http::tlsStartDelayMs() != 0) return;  // boot TLS gate: only delays the start; the hold decision below is unchanged
     if (holdForTimeWait(now)) return;
 #endif

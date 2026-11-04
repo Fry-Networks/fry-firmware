@@ -4,6 +4,7 @@
 #include "../core/wifi_station.h"
 #include "../core/flash_print.h"
 #include "wifi_reason.h"
+#include "tls_boot_gate.h"
 
 #include <ESP8266WiFi.h>
 
@@ -17,6 +18,12 @@ volatile uint8_t s_lastDiscReason = 0;
 volatile bool s_l2Associated = false;
 volatile bool s_dhcpTimedOut = false;
 bool s_everConnected = false;
+// Link-up stamps for the boot TLS gate. The association callback writes them from the SDK task between loop passes (single
+// core), the loop reads them; no new heap object is created for this.
+volatile uint32_t s_assocMs = 0;
+volatile uint32_t s_detectMs = 0;
+volatile bool s_haveAssoc = false;
+volatile bool s_haveDetect = false;
 WiFiEventHandler s_evtDisc, s_evtConn, s_evtDhcpTo;
 
 }  // namespace
@@ -42,7 +49,12 @@ bool connect(const char* ssid, const char* pass, uint32_t timeoutMs, fry::ProvEr
     s_evtDisc = WiFi.onStationModeDisconnected(
         [](const WiFiEventStationModeDisconnected& e) { s_lastDiscReason = (uint8_t)e.reason; });
     s_evtConn = WiFi.onStationModeConnected(
-        [](const WiFiEventStationModeConnected&) { s_l2Associated = true; });
+        [](const WiFiEventStationModeConnected&) {
+          s_l2Associated = true;
+          s_assocMs = millis();
+          s_haveAssoc = true;
+          s_haveDetect = false;  // a new link-up: the earlier address stamp is stale, the association anchor stays usable
+        });
     s_evtDhcpTo = WiFi.onStationModeDHCPTimeout([]() { s_dhcpTimedOut = true; });
   }
 
@@ -54,6 +66,8 @@ bool connect(const char* ssid, const char* pass, uint32_t timeoutMs, fry::ProvEr
   while (millis() - start < budget) {
     if (WiFi.status() == WL_CONNECTED) {
       s_everConnected = true;
+      s_detectMs = millis();
+      s_haveDetect = true;
       FRY_PRINTF("wifi connected ip=%s rssi=%d\n", WiFi.localIP().toString().c_str(), WiFi.RSSI());
       return true;
     }
@@ -93,6 +107,10 @@ void maintain() {
   s_lastCheck = now;
 
   if (WiFi.status() == WL_CONNECTED) {
+    if (s_lost) {
+      s_detectMs = now;
+      s_haveDetect = true;
+    }
     s_lost = 0;
     return;
   }
@@ -105,6 +123,15 @@ void maintain() {
     WiFi.reconnect();
     s_lost = now;
   }
+}
+
+bool connectAnchorMs(uint32_t* anchorOut) {
+  // Single core, the callback runs between loop passes: copying into locals gives a consistent pair.
+  const bool haveDetect = s_haveDetect;
+  const uint32_t detectMs = s_detectMs;
+  const bool haveAssoc = s_haveAssoc;
+  const uint32_t assocMs = s_assocMs;
+  return fry::connectAnchorMs(detectMs, haveDetect, assocMs, haveAssoc, anchorOut);
 }
 
 }  // namespace fry_wifi
