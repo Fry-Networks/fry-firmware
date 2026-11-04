@@ -37,6 +37,10 @@ bool beginHttpsUrl(HTTPClient& http, WiFiClientSecure& sec, const String& url,
 // four-argument form is smallReply = false. ESP8266 only: the ESP32 declaration and image are unchanged.
 bool beginHttpsUrl(HTTPClient& http, WiFiClientSecure& sec, const String& url, bool mflnProbeWorthwhile,
                    bool smallReply);
+
+// Boot TLS gate (lib/fry_core/tls_boot_gate.h): milliseconds still to wait before a session may start, 0 = go. The first call
+// starts the window. Every session opener calls it before it allocates anything and treats non-zero as a deferral.
+uint32_t tlsStartDelayMs();
 #endif
 
 }  // namespace fry_http

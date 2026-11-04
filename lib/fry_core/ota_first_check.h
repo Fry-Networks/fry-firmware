@@ -22,6 +22,8 @@
 
 #include <cstdint>
 
+#include "tls_boot_gate.h"
+
 namespace fry {
 
 constexpr uint32_t kOtaFirstCheckMinUptimeMs = 20000;
@@ -33,6 +35,27 @@ inline uint32_t otaFirstCheckWaitMs(uint32_t nowMs, uint32_t firstTickMs) {
   uint32_t earliest = firstTickMs + kOtaFirstCheckAfterFirstTickMs;
   if (earliest < kOtaFirstCheckMinUptimeMs) earliest = kOtaFirstCheckMinUptimeMs;
   return nowMs >= earliest ? 0 : earliest - nowMs;
+}
+
+// The first check also comes after the boot registration. The registration is the first TLS session of a boot and starts when the TLS gate
+// opens (the connect anchor + kBootAsyncEventDoneMs); on a normal boot it is done 0.8 s later, and the first check follows at 20 s, 4.1 s
+// after the gate opened (measured: gate open 15866 ms, registered 16698 ms, first check 20000 ms). With a late connect the boot clock says
+// nothing: the gate opens at the late anchor + 9 s, and a check keyed off the clock alone started on the next loop pass after the
+// registration and met its connection still closing. The slot is the measured gate-open-to-first-check time, rounded down. A registration
+// that takes much longer than the slot (a slow server) can still be met by the check while its connection is closing; the hold for closing
+// pcbs (ota_timewait.h) then covers that case, this gate does not.
+constexpr uint32_t kOtaFirstCheckRegSlotMs = 4100;
+
+// Milliseconds still to wait, counted from the connect anchor (fry_wifi::connectAnchorMs), before the first check may start; 0 means go.
+// No connect seen: the whole window. An anchor still ahead of nowMs (association + lead) adds the distance to it. Wrap-safe, and an anchor
+// more than half the counter range behind is long past (the gate never closes again with Wi-Fi up).
+inline uint32_t otaFirstCheckAfterConnectWaitMs(uint32_t nowMs, uint32_t anchorMs, bool haveAnchor) {
+  const uint32_t window = kBootAsyncEventDoneMs + kOtaFirstCheckRegSlotMs;
+  if (!haveAnchor) return window;
+  const int32_t ahead = static_cast<int32_t>(anchorMs - nowMs);
+  if (ahead > 0 && static_cast<uint32_t>(ahead) <= kAssocToDetectLeadMs) return static_cast<uint32_t>(ahead) + window;
+  const uint32_t elapsed = static_cast<uint32_t>(nowMs - anchorMs);
+  return elapsed >= window ? 0 : window - elapsed;
 }
 
 }  // namespace fry

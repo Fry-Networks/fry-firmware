@@ -1,9 +1,11 @@
 #include "../core/http_tls.h"
 #include "../core/flash_print.h"
+#include "../core/wifi_station.h"
 
 #include "heap_gate.h"
 #include "mfln_cache.h"
 #include "tls_sizing.h"
+#include "tls_boot_gate.h"
 #include "config.h"
 
 namespace fry_http {
@@ -324,6 +326,12 @@ bool beginHttpsUrl(HTTPClient& http, WiFiClientSecure& sec, const String& url, b
   http.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);
   http.setRedirectLimit(5);
   return true;
+}
+
+uint32_t tlsStartDelayMs() {
+  uint32_t anchorMs = 0;
+  const bool haveConnect = fry_wifi::connectAnchorMs(&anchorMs);
+  return fry::tlsConnectWaitMs(millis(), anchorMs, haveConnect);
 }
 
 bool beginHttpsUrl(HTTPClient& http, WiFiClientSecure& sec, const String& url, bool mflnProbeWorthwhile) {
