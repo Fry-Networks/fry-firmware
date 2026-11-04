@@ -37,6 +37,7 @@
 #include "ota_settle.h"
 #include "ota_hold_release.h"
 #include "ota_timewait.h"
+#include "ota_version_guard.h"
 #include "sha256.h"
 #include "tls_sizing.h"
 #include "trigger_hooks.h"
@@ -725,6 +726,26 @@ void init() {
         FRY_PRINTF("ota: %s was rolled back by a planned restart - not counted\n", pending.c_str());
       }
     }
+#if defined(ARDUINO_ARCH_ESP8266)
+    // No bootloader rollback here: a different image than the manifest declared (pending) with no
+    // rollback or planned-restart marker is a mislabelled image. One strike, like a failed install.
+    // The boot after an upgrade whose image really is the pending version never gets here (pending ==
+    // running), and a different bad version simply restarts the count at strike 1 (badver != pending).
+    if (fry::shouldRejectManifestVersion(pending.c_str(), FRY_FIRMWARE_VERSION,
+                                         s_rolledBack || counterRolledBack, plannedRestart)) {
+      const String badver = fry_config::getOtaBadVer();
+      bool changed = false;
+      const uint8_t strikes = fry::nextStrikeCount(badver.c_str(), fry_config::getOtaBadN(),
+                                                   pending.c_str(), false, &changed);
+      if (changed) {
+        fry_config::setOtaStrikes(pending.c_str(), strikes);
+        s_firstCheckAfterRollback = true;
+        FRY_PRINTF("ota: version mismatch manifest=%s image=%s - strike %u/%u%s\n", pending.c_str(),
+                      FRY_FIRMWARE_VERSION, strikes, fry::kOtaPermanentStrikes,
+                      strikes >= fry::kOtaPermanentStrikes ? " - it will not be installed again" : "");
+      }
+    }
+#endif
     FRY_PRINTF("ota: boot %s with pending=%s - flag cleared\n", FRY_FIRMWARE_VERSION, pending.c_str());
     fry_config::clearOtaPending();
     fry_config::clearOtaBootFails();
