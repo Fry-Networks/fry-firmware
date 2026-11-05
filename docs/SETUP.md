@@ -64,10 +64,12 @@ Tap your device, then enter:
 
 - your 2.4 GHz Wi-Fi name and password
 - your 58-character Algorand wallet address
+- your **miner key** — `FEM-` followed by 32 letters and digits, the key you hold from the
+  dashboard. **Keep it at hand.** You need it in step 5. A board that has no key yet joins your
+  network and then waits for one instead of making up its own; once it holds a key it keeps it
+  across factory resets.
 
-The board saves the credentials, joins your network, and registers itself. The app shows its
-**miner key** — `FEM-` followed by 32 hex characters. **Write this down.** You need it in step 5,
-and it is derived from the board's MAC, so it stays the same across factory resets.
+The board saves the credentials, joins your network, and registers itself.
 
 ### A board does not appear in the scan
 
@@ -114,7 +116,7 @@ The lines worth knowing:
 
 | Line | Meaning |
 |---|---|
-| `FRY boot v0.3.1 chip=ESP32 mac=... minerkey=FEM-…ABCD` | Boot banner with the board's identity |
+| `FRY boot v0.4.25 chip=ESP32 mac=... minerkey=FEM-…ABCD` | Boot banner with the board's identity |
 | `BLE advertising name=FRY-ESP32-XXXXXX svc=465259` | Waiting to be provisioned |
 | `wifi connected ip=...` | Joined your network |
 | `wifi connect failed reason=201` | Wi-Fi not found — wrong name, out of range, or 5 GHz only |
