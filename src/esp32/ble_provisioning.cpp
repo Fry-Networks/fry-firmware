@@ -13,6 +13,7 @@
 #include "../core/fry_config.h"
 #include "../core/miner_key.h"
 #include "../core/status_snapshot.h"
+#include "ble_idle.h"
 #include "device_status.h"
 #include "key_policy.h"
 #include "provisioning_commit.h"
@@ -51,6 +52,10 @@ NimBLECharacteristic* s_chStatus = nullptr;
 NimBLECharacteristic* s_chKey = nullptr;
 NimBLECharacteristic* s_chKeyWrite = nullptr;
 NimBLECharacteristic* s_chDevStatus = nullptr;
+
+// True from init() until tick() releases the stack once the board is Connected and idle.
+bool s_bleUp = false;
+fry::BleIdleTimer s_bleIdle;
 
 char s_pendingSsid[33] = {0};
 char s_pendingPass[65] = {0};
@@ -252,6 +257,7 @@ ServerCallbacks s_serverCallbacks;
 
 void init(const char* deviceName, const char* minerKey) {
   NimBLEDevice::init(deviceName);
+  s_bleUp = true;
   NimBLEDevice::setMTU(185);  // PROTOCOL.md section 1: the central requests MTU 185
   // PROTOCOL.md sections 11.3/11.8/11.9: the key write (09) needs an encrypted link - LE Secure
   // Connections, Just Works, no bonding - which the client sets up by pairing before it writes 09.
@@ -379,7 +385,7 @@ void notifyApiOk() {
   s_fsm.feed(fry::ProvEvent::ApiOk, {});
   updateStatusChar();
   // Advertising restarted after a handoff disconnect (onDisconnect) ends once the board is Connected.
-  NimBLEServer* server = NimBLEDevice::getServer();
+  NimBLEServer* server = s_bleUp ? NimBLEDevice::getServer() : nullptr;
   if (s_fsm.state() == fry::ProvState::Connected && server && server->getConnectedCount() == 0) {
     NimBLEDevice::stopAdvertising();
   }
@@ -397,8 +403,22 @@ void notifyKeyMissing() {
 
 void tick() {
   // No mandated teardown for BLE in PROTOCOL.md (section 3's AP-teardown rule is ESP8266-only).
-  // The link is never dropped from this side either: the app holds it until Connected + 5 s
-  // (section 11.3) and disconnects itself.
+  // The link is never dropped from this side: the app holds it until Connected + 5 s
+  // (section 11.3) and disconnects itself. Only after the board has stayed Connected with nobody
+  // attached for a whole grace period (lib/fry_core/ble_idle.h) is the NimBLE stack released, which
+  // gives its heap back to the TLS and tunnel sessions. A board that is not Connected keeps
+  // advertising, so re-provisioning is unaffected. Opt-in Olostep builds keep the stack up.
+#if !FRY_HAS_OLOSTEP
+  NimBLEServer* server = s_bleUp ? NimBLEDevice::getServer() : nullptr;
+  const int centrals = server ? static_cast<int>(server->getConnectedCount()) : 0;
+  if (s_bleIdle.poll(s_bleUp, s_fsm.state() == fry::ProvState::Connected, centrals, millis())) {
+    s_chSsid = s_chPass = s_chWallet = s_chStatus = s_chKey = s_chKeyWrite = s_chDevStatus = nullptr;
+    clearStagedKey();
+    NimBLEDevice::deinit(true);
+    s_bleUp = false;
+    Serial.println("BLE released after provisioning");
+  }
+#endif
 }
 
 }  // namespace fry_provisioning
