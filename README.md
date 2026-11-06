@@ -52,7 +52,9 @@ bootstrap credential and registration falls back to per-device tokens only.
   SOCKS5 relay, TLS setup. `platformio.ini`'s `build_src_filter` keeps each chip family from
   compiling the other's sources (PlatformIO compiles every `.cpp` under `src/` for every
   environment regardless of `#ifdef` guards — the Library Dependency Finder only gates `lib/`).
-- `test/test_provisioning/` — the Unity suite for `lib/fry_core/`.
+- `test/test_*/` — the Unity suites, one directory per module of `lib/fry_core/` and `src/core/`.
+  `pio test -e native` runs those listed in `test_filter` under `[env:native]` in `platformio.ini`;
+  a new suite is added to that list.
 - `tools/` — host-side serial provisioning, capture, and QA gate scripts; CLI documented in
   `PROTOCOL.md` section 8:
   - `_serialutil.py` — port resolution (by VID:PID or an explicit `--port`) and the
@@ -71,6 +73,9 @@ bootstrap credential and registration falls back to per-device tokens only.
 
 ## CI
 
-`.github/workflows/build.yml` builds all four board environments plus the native Unity suite,
-uploads each `firmware-<env>.bin` as a build artifact, and — on a `v*` tag — regenerates
-`ota/manifest.json` against the tagged binaries and attaches all five files to a GitHub Release.
+`.github/workflows/build.yml` builds the board environments plus the native Unity suite on pushes to `main` and
+`firmware-dev`, on pull requests, on `v*` tags and on manual dispatch, and uploads each `firmware-<env>.bin` as a
+build artifact; a `v*` tag also makes its release job create a release from those builds. Field releases
+come from `fw-v*` tags and `.github/workflows/release-fw.yml`, which builds without a bootstrap
+token and leaves a draft release for a person to publish after the canary; the procedure is in
+`docs/RELEASE-RUNBOOK.md`. The OTA channel test builds are `.github/workflows/test-channel.yml`.
