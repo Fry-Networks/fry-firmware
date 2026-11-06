@@ -73,8 +73,8 @@ bootstrap credential and registration falls back to per-device tokens only.
 
 ## CI
 
-`.github/workflows/build.yml` builds the board environments plus the native Unity suite on every
-push and pull request, and uploads each `firmware-<env>.bin` as a build artifact. Field releases
+`.github/workflows/build.yml` builds the board environments plus the native Unity suite on pushes to `main` and
+`firmware-dev` and on pull requests, and uploads each `firmware-<env>.bin` as a build artifact. Field releases
 come from `fw-v*` tags and `.github/workflows/release-fw.yml`, which builds without a bootstrap
 token and leaves a draft release for a person to publish after the canary; the procedure is in
 `docs/RELEASE-RUNBOOK.md`. The OTA channel test builds are `.github/workflows/test-channel.yml`.
