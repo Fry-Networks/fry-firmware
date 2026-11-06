@@ -412,6 +412,9 @@ void tick() {
   NimBLEServer* server = s_bleUp ? NimBLEDevice::getServer() : nullptr;
   const int centrals = server ? static_cast<int>(server->getConnectedCount()) : 0;
   if (s_bleIdle.poll(s_bleUp, s_fsm.state() == fry::ProvState::Connected, centrals, millis())) {
+    // deinit(true) deletes the server, and the server deletes the callbacks object it was given
+    // unless told otherwise. ours is a static, so hand the server its default one first.
+    if (server) server->setCallbacks(nullptr);
     s_chSsid = s_chPass = s_chWallet = s_chStatus = s_chKey = s_chKeyWrite = s_chDevStatus = nullptr;
     clearStagedKey();
     NimBLEDevice::deinit(true);
