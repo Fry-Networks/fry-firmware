@@ -1,6 +1,6 @@
 {
   "name": "Fry Firmware",
-  "version": "0.4.1",
+  "version": "0.4.26",
   "new_install_prompt_erase": true,
   "new_install_improv_wait_time": 20,
   "builds": [
@@ -25,7 +25,7 @@
         {
           "path": "fw/firmware-esp32.bin",
           "offset": 65536,
-          "sha256": "950e171fce12171ec39c222216a3228afb58c094653677bdff9f7911001cf755"
+          "sha256": "e8c77e4d07742cf7cd00b4eb07f04914ec9fc8f90be2a7f9618fbf70e8944c76"
         }
       ]
     },
@@ -50,7 +50,7 @@
         {
           "path": "fw/firmware-esp32c3.bin",
           "offset": 65536,
-          "sha256": "d0a7139cea0b81213aef7375963092c4521ed82e6b2fddabb27edf409d9d09a3"
+          "sha256": "96ce850d4b4f63a8e02e3b707290ac3dc3e213b3185f8d203f11094c4d7420cc"
         }
       ]
     },
