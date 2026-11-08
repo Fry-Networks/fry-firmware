@@ -19,9 +19,11 @@
 #include "miner_key.h"
 #include "ota_client.h"
 #include "provisioning_transport.h"
+#include "reg_release.h"
 #include "reg_result.h"
 #include "stale_token_heal.h"
 #include "telemetry.h"
+#include "tls_trust.h"
 #include "trigger_hooks.h"
 #include "wifi_station.h"
 #if defined(FRY_HAS_WIREGUARD) && FRY_HAS_WIREGUARD
@@ -335,6 +337,18 @@ __attribute__((noinline)) String readHealToken(HTTPClient& http) {
   return String(rdoc["device_token"] | "");
 }
 
+#if defined(ARDUINO_ARCH_ESP8266)
+// The registration and heal requests send "Connection: close" (setReuse(false)), so the server closes first and keeps the
+// TIME_WAIT. Once the response is read, wait (bounded, lib/fry_core/reg_release.h) for that FIN, so our close starts from
+// CLOSE_WAIT and the pcb is gone at once instead of lingering for minutes and holding the first OTA check.
+void waitRegPeerClose(WiFiClientSecure& sec) {
+  const uint32_t started = millis();
+  while (fry::regPeerCloseKeepWaiting(sec.connected(), millis() - started)) delay(fry::kRegPeerClosePollMs);
+}
+bool s_regClockDeferring = false;
+unsigned long s_regClockDeferStartMs = 0;
+#endif
+
 // The bounded heal. Only the stale-token signature can reach it, only on a NON-default apiBase (the
 // compiled default's registration route is open, where a transient 404 must never reset a healthy
 // installation), and only while this boot and the persisted 6 h window allow it, so it can never
@@ -396,6 +410,9 @@ bool healStaleTokenIfDue(HTTPClient& http, WiFiClientSecure& sec, const String& 
       if (!fry::healTokenUsable(token.length())) healCode = -1;
     }
   }
+#if defined(ARDUINO_ARCH_ESP8266)
+  waitRegPeerClose(sec);
+#endif
   http.end();
   if (healCode < 200 || healCode >= 300) {
     if (!restoreTokenPair()) {  // the shadows stay: never a board with neither pair
@@ -504,6 +521,7 @@ bool registerInstallation() {
     }
     WiFiClientSecure& sec = clients->sec;
     HTTPClient& http = clients->http;
+    http.setReuse(false);  // "Connection: close": the server closes first (waitRegPeerClose)
 #else
     WiFiClientSecure sec;
     HTTPClient http;
@@ -515,6 +533,27 @@ bool registerInstallation() {
       http.addHeader(FRY_TEXT("Content-Type"), FRY_TEXT("application/json"));
       code = http.POST(body);
     }
+#if defined(ARDUINO_ARCH_ESP8266)
+    if (code == -1) {
+      // The TLS layer refuses while SNTP has not set the clock (and has started it). That is a deferral, not a failed
+      // attempt: no failure count, no backoff, asked again shortly and only for a bounded time (reg_release.h).
+      const bool clockSane = fry::tlsClockSane(static_cast<int64_t>(time(nullptr)));
+      const unsigned long nowMs = millis();
+      if (clockSane) {
+        s_regClockDeferring = false;
+      } else if (fry::regClockAction(false, s_regClockDeferring, static_cast<uint32_t>(nowMs - s_regClockDeferStartMs)) ==
+                 fry::RegClockAction::Defer) {
+        if (!s_regClockDeferring) {
+          s_regClockDeferring = true;
+          s_regClockDeferStartMs = nowMs;
+        }
+        s_nextRegisterDelayMs = fry::kRegClockRecheckMs;
+        return false;
+      }
+    } else {
+      s_regClockDeferring = false;
+    }
+#endif
     s_lastRegHttp = code;
     fry_ota::noteHeartbeat(code, "register");  // any HTTP answer proves this image can reach us
     cls = fry::classifyRegistration(code);
@@ -524,6 +563,9 @@ bool registerInstallation() {
       deserializeJson(rdoc, http.getString());
       const char* token = rdoc["device_token"] | "";
       if (strlen(token) > 0) fry_config::setDeviceToken(token);
+#if defined(ARDUINO_ARCH_ESP8266)
+      waitRegPeerClose(sec);
+#endif
       http.end();
       FRY_PRINTF("api: registered install=%s token=%s\n", installId,
                     strlen(token) > 0 ? "present" : "none");
@@ -539,6 +581,9 @@ bool registerInstallation() {
       // while OUR device token was sent means the token is stale (a WG1 apiBase then skips its
       // token-less first-registration route), and the hourly retry would never clear it.
       readServerDetail(http, minerKey, detail, sizeof(detail));
+#if defined(ARDUINO_ARCH_ESP8266)
+      waitRegPeerClose(sec);
+#endif
       http.end();
       if (healStaleTokenIfDue(http, sec, url, installId, body, code, deviceTokenSent)) {
         s_regFailures = 0;
@@ -548,6 +593,9 @@ bool registerInstallation() {
       }
       break;
     }
+#if defined(ARDUINO_ARCH_ESP8266)
+    waitRegPeerClose(sec);
+#endif
     http.end();
     if (attempt == 0) delay(kQuickRetryMs);
   }
