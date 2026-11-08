@@ -19,6 +19,7 @@
 #include "miner_key.h"
 #include "ota_client.h"
 #include "provisioning_transport.h"
+#include "ota_timewait.h"
 #include "reg_release.h"
 #include "reg_result.h"
 #include "stale_token_heal.h"
@@ -345,6 +346,20 @@ void waitRegPeerClose(WiFiClientSecure& sec) {
   const uint32_t started = millis();
   while (fry::regPeerCloseKeepWaiting(sec.connected(), millis() - started)) delay(fry::kRegPeerClosePollMs);
 }
+// Called after http.end(): close our side now (it is in CLOSE_WAIT, the server closed first) and wait, bounded, until lwIP has no
+// closing pcb left, using the count the OTA hold uses, so the first OTA check is not held by this connection.
+void settleRegPcb(WiFiClientSecure& sec) {
+  sec.stop();
+  const uint32_t started = millis();
+  while (fry::regPcbSettleKeepWaiting(fry::countClosingPcbs(), millis() - started)) delay(fry::kRegPcbSettlePollMs);
+  const unsigned long waited = millis() - started;
+  const uint32_t left = fry::countClosingPcbs();
+  if (left == 0) {
+    FRY_PRINTF("api: reg pcb cleared in %lu ms\n", waited);
+  } else {
+    FRY_PRINTF("api: reg pcb still closing after %lu ms (cl=%u)\n", waited, static_cast<unsigned>(left));
+  }
+}
 bool s_regClockDeferring = false;
 unsigned long s_regClockDeferStartMs = 0;
 #endif
@@ -414,6 +429,9 @@ bool healStaleTokenIfDue(HTTPClient& http, WiFiClientSecure& sec, const String& 
   waitRegPeerClose(sec);
 #endif
   http.end();
+#if defined(ARDUINO_ARCH_ESP8266)
+  settleRegPcb(sec);
+#endif
   if (healCode < 200 || healCode >= 300) {
     if (!restoreTokenPair()) {  // the shadows stay: never a board with neither pair
       FRY_PRINTLN("api: stale-token retry failed and the pair could not be restored; shadows kept");
@@ -567,6 +585,9 @@ bool registerInstallation() {
       waitRegPeerClose(sec);
 #endif
       http.end();
+#if defined(ARDUINO_ARCH_ESP8266)
+      settleRegPcb(sec);
+#endif
       FRY_PRINTF("api: registered install=%s token=%s\n", installId,
                     strlen(token) > 0 ? "present" : "none");
       if (!fry_config::getKeyOk()) fry_config::setKeyOk(true);  // the key is now confirmed
@@ -585,6 +606,9 @@ bool registerInstallation() {
       waitRegPeerClose(sec);
 #endif
       http.end();
+#if defined(ARDUINO_ARCH_ESP8266)
+      settleRegPcb(sec);
+#endif
       if (healStaleTokenIfDue(http, sec, url, installId, body, code, deviceTokenSent)) {
         s_regFailures = 0;
         s_nextRegisterDelayMs = INSTALL_HEARTBEAT_MS;
@@ -597,6 +621,9 @@ bool registerInstallation() {
     waitRegPeerClose(sec);
 #endif
     http.end();
+#if defined(ARDUINO_ARCH_ESP8266)
+    settleRegPcb(sec);
+#endif
     if (attempt == 0) delay(kQuickRetryMs);
   }
 

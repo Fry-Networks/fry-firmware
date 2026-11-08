@@ -20,6 +20,16 @@ inline bool regPeerCloseKeepWaiting(bool stillConnected, uint32_t waitedMs) {
   return stillConnected && waitedMs < kRegPeerCloseWaitMs;
 }
 
+// After the request is over the board closes its side (from CLOSE_WAIT, so only LAST_ACK is left). The pcb it leaves is counted by
+// countClosingPcbs() (lib/fry_core/ota_timewait.h), the same count the first OTA check's hold uses; wait for it to reach zero so that
+// check is not held by the registration's own closing connection. Bounded: a pcb that never clears costs at most kRegPcbSettleMaxMs.
+constexpr uint32_t kRegPcbSettleMaxMs = 500;
+constexpr uint32_t kRegPcbSettlePollMs = 10;
+
+inline bool regPcbSettleKeepWaiting(uint32_t closingPcbs, uint32_t waitedMs) {
+  return closingPcbs != 0 && waitedMs < kRegPcbSettleMaxMs;
+}
+
 constexpr uint32_t kRegClockRecheckMs = 2000;   // next registration pass while the clock is unset
 constexpr uint32_t kRegClockDeferMaxMs = 60000; // total deferral allowed
 

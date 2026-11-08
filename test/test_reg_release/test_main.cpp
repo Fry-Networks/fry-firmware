@@ -179,6 +179,54 @@ void test_clock_not_set_defers_then_gives_up_after_the_bound() {
   TEST_ASSERT_EQUAL_UINT32(60000, fry::kRegClockDeferMaxMs);
 }
 
+// Every http.end() in `fn` is directly followed by the bounded settle on the lwIP closing-pcb count, inside an ESP8266 guard.
+void expectSettleAfterEveryEnd(const std::string& fn, int expectedEnds, const char* what) {
+  int ends = 0;
+  const std::string want = squeeze("http.end();\n#if defined(ARDUINO_ARCH_ESP8266)\nsettleRegPcb(sec);\n#endif");
+  for (size_t pos = fn.find("http.end();"); pos != std::string::npos; pos = fn.find("http.end();", pos + 1)) {
+    ends++;
+    const std::string after = squeeze(fn.substr(pos, 120));
+    TEST_ASSERT_TRUE_MESSAGE(after.compare(0, want.size(), want) == 0, what);
+  }
+  TEST_ASSERT_EQUAL_INT_MESSAGE(expectedEnds, ends, what);
+}
+
+void test_registration_settles_the_closing_pcb_after_ending() {
+  std::string regFn, healFn;
+  TEST_ASSERT_TRUE_MESSAGE(hwapiFunctions(regFn, healFn), "cannot find registerInstallation() / healStaleTokenIfDue()");
+  expectSettleAfterEveryEnd(regFn, 3, "registerInstallation(): every http.end() is followed by settleRegPcb(sec) inside an ESP8266 guard");
+}
+
+void test_heal_settles_the_closing_pcb_after_ending() {
+  std::string regFn, healFn;
+  TEST_ASSERT_TRUE_MESSAGE(hwapiFunctions(regFn, healFn), "cannot find registerInstallation() / healStaleTokenIfDue()");
+  expectSettleAfterEveryEnd(healFn, 1, "healStaleTokenIfDue(): http.end() is followed by settleRegPcb(sec) inside an ESP8266 guard");
+}
+
+void test_the_settle_uses_the_ota_hold_count_and_is_bounded_and_logged() {
+  std::string src, fn;
+  TEST_ASSERT_TRUE_MESSAGE(loadSource("src/core/hardwareapi_client.cpp", src), "cannot read hardwareapi_client.cpp");
+  src = stripLineComments(src);
+  TEST_ASSERT_TRUE_MESSAGE(between(src, "void settleRegPcb(WiFiClientSecure& sec) {", "bool s_regClockDeferring", fn),
+                           "settleRegPcb() is defined");
+  TEST_ASSERT_TRUE_MESSAGE(fn.find("sec.stop();") != std::string::npos, "closes our side first");
+  TEST_ASSERT_TRUE_MESSAGE(
+      fn.find("fry::regPcbSettleKeepWaiting(fry::countClosingPcbs(), millis() - started)") != std::string::npos,
+      "waits on the same countClosingPcbs() the OTA hold uses, bounded by the helper");
+  TEST_ASSERT_TRUE_MESSAGE(fn.find("delay(fry::kRegPcbSettlePollMs)") != std::string::npos, "and yields while it waits");
+  TEST_ASSERT_TRUE_MESSAGE(fn.find("api: reg pcb cleared in %lu ms") != std::string::npos, "logs the cleared case");
+  TEST_ASSERT_TRUE_MESSAGE(fn.find("api: reg pcb still closing after %lu ms") != std::string::npos, "logs the timeout case");
+}
+
+void test_pcb_settle_is_bounded() {
+  TEST_ASSERT_FALSE(fry::regPcbSettleKeepWaiting(0, 0));  // nothing closing: done at once
+  TEST_ASSERT_TRUE(fry::regPcbSettleKeepWaiting(1, 0));
+  TEST_ASSERT_TRUE(fry::regPcbSettleKeepWaiting(2, fry::kRegPcbSettleMaxMs - 1));
+  TEST_ASSERT_FALSE(fry::regPcbSettleKeepWaiting(1, fry::kRegPcbSettleMaxMs));  // bound reached
+  TEST_ASSERT_EQUAL_UINT32(500, fry::kRegPcbSettleMaxMs);
+  TEST_ASSERT_EQUAL_UINT32(10, fry::kRegPcbSettlePollMs);
+}
+
 }  // namespace
 
 // Unity's setUp/tearDown have C linkage, so they must sit at global scope.
@@ -194,5 +242,9 @@ int main(int, char**) {
   RUN_TEST(test_clock_refusal_defers_before_any_failure_bookkeeping);
   RUN_TEST(test_peer_close_wait_is_bounded);
   RUN_TEST(test_clock_not_set_defers_then_gives_up_after_the_bound);
+  RUN_TEST(test_registration_settles_the_closing_pcb_after_ending);
+  RUN_TEST(test_heal_settles_the_closing_pcb_after_ending);
+  RUN_TEST(test_the_settle_uses_the_ota_hold_count_and_is_bounded_and_logged);
+  RUN_TEST(test_pcb_settle_is_bounded);
   return UNITY_END();
 }
