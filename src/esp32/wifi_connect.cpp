@@ -3,6 +3,7 @@
 // src/esp8266/wifi_connect.cpp — just a disconnect-reason-aware wait loop and a reconnect watchdog.
 #include "../core/wifi_station.h"
 #include "wifi_reason.h"
+#include "wifi_tx_fallback.h"
 
 #include <WiFi.h>
 
@@ -15,20 +16,39 @@ namespace {
 volatile bool s_l2Associated = false;
 volatile uint8_t s_lastDiscReason = 0;
 bool s_everConnected = false;
+volatile uint8_t s_lastChannel = 0;
+volatile uint8_t s_lastAuthMode = 0;
+#if defined(CONFIG_IDF_TARGET_ESP32C3)
+// Set once a join only succeeded at reduced TX power: RAM only, this boot only, kept across reconnects.
+bool s_lowTx = false;
+#endif
 
 void onWifiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
   if (event == ARDUINO_EVENT_WIFI_STA_CONNECTED) {
     s_l2Associated = true;
+    s_lastChannel = info.wifi_sta_connected.channel;
+    s_lastAuthMode = static_cast<uint8_t>(info.wifi_sta_connected.authmode);
   } else if (event == ARDUINO_EVENT_WIFI_STA_DISCONNECTED) {
     s_lastDiscReason = info.wifi_sta_disconnected.reason;
   }
 }
 
+// One WiFi.begin + wait loop. True once the station is connected.
+bool joinOnce(const char* ssid, const char* pass, uint32_t timeoutMs) {
+  s_l2Associated = false;
+  s_lastDiscReason = 0;
+  WiFi.begin(ssid, (pass && strlen(pass)) ? pass : nullptr);
+  unsigned long start = millis();
+  while (millis() - start < timeoutMs) {
+    if (WiFi.status() == WL_CONNECTED) return true;
+    delay(250);
+  }
+  return false;
+}
+
 }  // namespace
 
 bool connect(const char* ssid, const char* pass, uint32_t timeoutMs, fry::ProvErr* errOut) {
-  s_l2Associated = false;
-  s_lastDiscReason = 0;
   static bool eventRegistered = false;
   if (!eventRegistered) {
     WiFi.onEvent(onWifiEvent);
@@ -39,16 +59,38 @@ bool connect(const char* ssid, const char* pass, uint32_t timeoutMs, fry::ProvEr
   WiFi.mode(WIFI_STA);
   WiFi.disconnect(true);
   delay(100);
-  WiFi.begin(ssid, (pass && strlen(pass)) ? pass : nullptr);
+#if defined(CONFIG_IDF_TARGET_ESP32C3)
+  if (s_lowTx) {  // this boot needed it once: keep it (setTxPower needs the radio started)
+    WiFi.mode(WIFI_STA);
+    WiFi.setTxPower(WIFI_POWER_8_5dBm);
+  }
+#endif
+  bool joined = joinOnce(ssid, pass, timeoutMs);
 
-  unsigned long start = millis();
-  while (millis() - start < timeoutMs) {
-    if (WiFi.status() == WL_CONNECTED) {
-      s_everConnected = true;
-      Serial.printf("wifi connected ip=%s rssi=%d\n", WiFi.localIP().toString().c_str(), WiFi.RSSI());
-      return true;
+#if defined(CONFIG_IDF_TARGET_ESP32C3)
+  if (!joined && fry::shouldRetryLowTx(s_lastDiscReason, s_l2Associated, s_lowTx)) {
+    // Associated but the handshake failed: retry once at reduced TX power (bounded, no loop).
+    Serial.printf("wifi: join retry at reduced tx power reason=%u\n", (unsigned)s_lastDiscReason);
+    const wifi_power_t prevTx = WiFi.getTxPower();
+    WiFi.disconnect(true);
+    delay(100);
+    WiFi.mode(WIFI_STA);
+    WiFi.setTxPower(WIFI_POWER_8_5dBm);
+    joined = joinOnce(ssid, pass, timeoutMs);
+    if (joined) {
+      s_lowTx = true;
+      Serial.println("wifi: joined at reduced tx power (this boot only)");
+    } else {
+      WiFi.setTxPower(prevTx);
     }
-    delay(250);
+  }
+#endif
+
+  if (joined) {
+    s_everConnected = true;
+    Serial.printf("wifi connected ip=%s rssi=%d tx=%d\n", WiFi.localIP().toString().c_str(), WiFi.RSSI(),
+                  (int)WiFi.getTxPower());
+    return true;
   }
 
   if (errOut) {
@@ -60,6 +102,8 @@ bool connect(const char* ssid, const char* pass, uint32_t timeoutMs, fry::ProvEr
     }
   }
   Serial.printf("wifi connect failed reason=%u associated=%d\n", s_lastDiscReason, (int)s_l2Associated);
+  Serial.printf("wifi diag rssi=%d channel=%u auth=%u tx=%d\n", WiFi.RSSI(), (unsigned)s_lastChannel,
+                (unsigned)s_lastAuthMode, (int)WiFi.getTxPower());
   return false;
 }
 
