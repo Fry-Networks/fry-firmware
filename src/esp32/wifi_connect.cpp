@@ -21,6 +21,10 @@ volatile uint8_t s_lastAuthMode = 0;
 #if defined(CONFIG_IDF_TARGET_ESP32C3)
 // Set once a join only succeeded at reduced TX power: RAM only, this boot only, kept across reconnects.
 bool s_lowTx = false;
+// Set when the low-TX retry has been made, joined or not: it is never repeated this boot (RAM only).
+bool s_lowTxTried = false;
+// True while our own disconnect() settles, so its ASSOC_LEAVE (8) event cannot become the reported reason.
+volatile bool s_ignoreLeave = false;
 #endif
 
 void onWifiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
@@ -29,6 +33,9 @@ void onWifiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
     s_lastChannel = info.wifi_sta_connected.channel;
     s_lastAuthMode = static_cast<uint8_t>(info.wifi_sta_connected.authmode);
   } else if (event == ARDUINO_EVENT_WIFI_STA_DISCONNECTED) {
+#if defined(CONFIG_IDF_TARGET_ESP32C3)
+    if (s_ignoreLeave && info.wifi_sta_disconnected.reason == 8) return;
+#endif
     s_lastDiscReason = info.wifi_sta_disconnected.reason;
   }
 }
@@ -68,15 +75,18 @@ bool connect(const char* ssid, const char* pass, uint32_t timeoutMs, fry::ProvEr
   bool joined = joinOnce(ssid, pass, timeoutMs);
 
 #if defined(CONFIG_IDF_TARGET_ESP32C3)
-  if (!joined && fry::shouldRetryLowTx(s_lastDiscReason, s_l2Associated, s_lowTx)) {
+  if (!joined && fry::shouldRetryLowTx(s_lastDiscReason, s_l2Associated, s_lowTxTried)) {
     // Associated but the handshake failed: retry once at reduced TX power (bounded, no loop).
     Serial.printf("wifi: join retry at reduced tx power reason=%u\n", (unsigned)s_lastDiscReason);
+    s_lowTxTried = true;
     const wifi_power_t prevTx = WiFi.getTxPower();
+    s_ignoreLeave = true;
     WiFi.disconnect(true);
-    delay(100);
+    delay(300);
+    s_ignoreLeave = false;
     WiFi.mode(WIFI_STA);
     WiFi.setTxPower(WIFI_POWER_8_5dBm);
-    joined = joinOnce(ssid, pass, timeoutMs);
+    joined = joinOnce(ssid, pass, fry::lowTxRetryTimeoutMs(timeoutMs));
     if (joined) {
       s_lowTx = true;
       Serial.println("wifi: joined at reduced tx power (this boot only)");

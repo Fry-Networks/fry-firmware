@@ -16,6 +16,15 @@ inline bool isHandshakeClassReason(uint8_t reason) {
   return reason == 2 || reason == 15 || reason == 202 || reason == 203 || reason == 204;
 }
 
+// The retry gets its own short budget so a wrong password (which also associates and then fails the
+// handshake) does not double the time before provisioning takes over.
+constexpr uint32_t kLowTxRetryTimeoutMs = 10000;
+
+inline uint32_t lowTxRetryTimeoutMs(uint32_t timeoutMs) {
+  return timeoutMs < kLowTxRetryTimeoutMs ? timeoutMs : kLowTxRetryTimeoutMs;
+}
+
+// alreadyRetried: a low-TX retry was already made this boot (it joined or it failed). One per boot.
 inline bool shouldRetryLowTx(uint8_t reason, bool associated, bool alreadyRetried) {
   return associated && !alreadyRetried && isHandshakeClassReason(reason);
 }

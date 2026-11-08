@@ -31,6 +31,14 @@ void test_retry_is_bounded() {
   TEST_ASSERT_FALSE(fry::shouldRetryLowTx(202, true, true));
 }
 
+void test_retry_timeout_is_bounded() {
+  TEST_ASSERT_EQUAL_UINT32(10000, fry::kLowTxRetryTimeoutMs);
+  TEST_ASSERT_EQUAL_UINT32(10000, fry::lowTxRetryTimeoutMs(20000));
+  TEST_ASSERT_EQUAL_UINT32(10000, fry::lowTxRetryTimeoutMs(10000));
+  TEST_ASSERT_EQUAL_UINT32(5000, fry::lowTxRetryTimeoutMs(5000));
+  TEST_ASSERT_EQUAL_UINT32(0, fry::lowTxRetryTimeoutMs(0));
+}
+
 bool readFile(const std::string& path, std::string& out) {
   std::ifstream f(path.c_str(), std::ios::in | std::ios::binary);
   if (!f) return false;
@@ -74,6 +82,30 @@ void test_source_has_the_c3_fallback_guarded_to_c3() {
   }
 }
 
+// Once per boot, bounded timeout, no stale leave event: pinned on the source order.
+void test_source_retry_is_once_per_boot_and_bounded() {
+  std::string src;
+  TEST_ASSERT_TRUE_MESSAGE(loadSource(src), "cannot read src/esp32/wifi_connect.cpp");
+  const size_t decide = src.find("fry::shouldRetryLowTx(s_lastDiscReason, s_l2Associated, s_lowTxTried)");
+  TEST_ASSERT_TRUE_MESSAGE(decide != std::string::npos, "retry decision must use s_lowTxTried (once per boot)");
+  const size_t tried = src.find("s_lowTxTried = true;", decide);
+  TEST_ASSERT_TRUE_MESSAGE(tried != std::string::npos, "s_lowTxTried must be set when the retry starts");
+  const size_t bounded = src.find("joinOnce(ssid, pass, fry::lowTxRetryTimeoutMs(timeoutMs))", tried);
+  TEST_ASSERT_TRUE_MESSAGE(bounded != std::string::npos, "retry must use the bounded timeout, after s_lowTxTried is set");
+  // The flag is never cleared, so a failed retry is not repeated by a later connect().
+  const size_t init = src.find("bool s_lowTxTried = false;");
+  TEST_ASSERT_TRUE_MESSAGE(init != std::string::npos, "s_lowTxTried initialiser missing");
+  TEST_ASSERT_TRUE_MESSAGE(src.find("s_lowTxTried = false", init + 10) == std::string::npos,
+                           "s_lowTxTried must never be reset");
+  // The stale-leave guard brackets our own disconnect.
+  const size_t ig = src.find("s_ignoreLeave = true;", tried);
+  TEST_ASSERT_TRUE_MESSAGE(ig != std::string::npos, "leave guard missing");
+  const size_t dis = src.find("WiFi.disconnect(true);", ig);
+  const size_t clr = src.find("s_ignoreLeave = false;", dis);
+  TEST_ASSERT_TRUE_MESSAGE(dis != std::string::npos && clr != std::string::npos && clr < bounded,
+                           "leave guard must wrap disconnect and clear before the retry join");
+}
+
 }  // namespace
 
 void setUp() {}
@@ -85,6 +117,8 @@ int main(int, char**) {
   RUN_TEST(test_no_retry_without_association);
   RUN_TEST(test_no_retry_for_other_reasons);
   RUN_TEST(test_retry_is_bounded);
+  RUN_TEST(test_retry_timeout_is_bounded);
+  RUN_TEST(test_source_retry_is_once_per_boot_and_bounded);
   RUN_TEST(test_source_has_the_c3_fallback_guarded_to_c3);
   return UNITY_END();
 }
