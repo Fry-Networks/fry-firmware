@@ -32,6 +32,7 @@
 #include "ota_manifest_read.h"
 #include "ota_redirect.h"
 #include "ota_retry.h"
+#include "ota_rollback_json.h"
 #include "ota_rollout_json.h"
 #include "ota_session.h"
 #include "ota_settle.h"
@@ -1066,6 +1067,7 @@ FRY_OTA_ESP8266_NOINLINE static bool evaluateManifest(const String& body, OtaPla
     badn = 0;
   }
   const bool skip = fry::skipBadVersion(latest, badver.c_str(), badn, s_firstCheckAfterRollback);
+  const bool firstCheck = s_firstCheckAfterRollback;
   s_firstCheckAfterRollback = false;
   // Staged rollout (lib/fry_core/ota_rollout.h): an optional manifest "rollout" object. Absent or
   // malformed means no gate (0.4.7 behaviour); only a well-formed one that excludes this board
@@ -1095,7 +1097,24 @@ FRY_OTA_ESP8266_NOINLINE static bool evaluateManifest(const String& body, OtaPla
   if (decision == fry::OtaDecision::NotInRollout) {
     FRY_PRINTF("ota: rollout skip bucket=%u\n", static_cast<unsigned>(rolloutBucketNo));
   }
-  const bool willUpdate = decision == fry::OtaDecision::Update;
+  bool willUpdate = decision == fry::OtaDecision::Update;
+  // Manifest-directed rollback (PROTOCOL.md 11.11): only where no forward update exists, only for an explicit
+  // builds.<env>.rollback that lists this running version, and never rollout-gated. The bad version is recorded
+  // with permanent strikes BEFORE the download, so a manifest that still names it as latest cannot pull the board
+  // forward again (strikesReset ran above and keeps a record that names the same version).
+  if (decision == fry::OtaDecision::NotNewer) {
+    fry::RollbackEntry rb;
+    if (fry::readRollbackEntry(build["rollback"], FRY_FIRMWARE_VERSION, &rb) &&
+        fry::decideOtaRollback(channel, FRY_OTA_CHANNEL, FRY_FIRMWARE_VERSION, true, rb.version, badver.c_str(),
+                               badn, firstCheck, rb.url, rb.sha256) == fry::OtaDecision::Rollback) {
+      fry_config::setOtaStrikes(FRY_FIRMWARE_VERSION, fry::kOtaPermanentStrikes);
+      FRY_PRINTF("ota: manifest directs rollback %s -> %s\n", FRY_FIRMWARE_VERSION, rb.version);
+      latest = rb.version;
+      url = rb.url;
+      sha = rb.sha256;
+      willUpdate = true;
+    }
+  }
   FRY_PRINTF("ota: manifest check cur=%s latest=%s action=%s\n", FRY_FIRMWARE_VERSION,
                 strlen(latest) ? latest : "?", willUpdate ? "update" : "none");
   if (!willUpdate) {
