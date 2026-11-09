@@ -92,7 +92,9 @@ bool otaChannelAccepted(const char* manifestChannel, const char* ownChannel);
 bool isSkippedBadVersion(const char* candidate, const char* badver);
 
 // NotInRollout is appended (values of the older enumerators never change).
-enum class OtaDecision : uint8_t { Update, NotNewer, WrongChannel, BadVersion, NoBuild, NotInRollout };
+// Rollback and RollbackRefused are appended by decideOtaRollback (values above never change).
+enum class OtaDecision : uint8_t { Update, NotNewer, WrongChannel, BadVersion, NoBuild, NotInRollout,
+                                   Rollback, RollbackRefused };
 
 // Channel first, then forward-only SemVer precedence, then the bad version, then the staged-rollout
 // gate (ota_rollout.h; `inRollout` false = a well-formed manifest rollout excludes this device),
@@ -102,5 +104,17 @@ OtaDecision decideOtaUpdate(const char* manifestChannel, const char* ownChannel,
                             const char* current, const char* badver, const char* url,
                             const char* sha256, bool inRollout = true);
 const char* otaDecisionName(OtaDecision d);
+
+// Manifest-directed rollback (PROTOCOL.md 11.11): a deliberate, explicit DOWNGRADE to `target`, and
+// only that. The caller asks it only when decideOtaUpdate said NotNewer and the manifest carries a
+// well-formed builds.<env>.rollback whose "from" list names the running version (`runningListed`).
+// Rollback iff: the channel matches; target is a plain MAJOR.MINOR.PATCH[-pre][+meta] version of
+// strictly lower precedence than `running` and above 0.0.0 (so a rollback chain can only descend,
+// never cycle); the strikes do not skip target (skipBadVersion, as for an update); and url plus a
+// 64-hex sha256 are both present. WrongChannel / BadVersion / NoBuild say which gate refused;
+// RollbackRefused is every other refusal.
+OtaDecision decideOtaRollback(const char* manifestChannel, const char* ownChannel, const char* running,
+                              bool runningListed, const char* target, const char* badver, uint8_t badn,
+                              bool firstCheckAfterRollback, const char* url, const char* sha256);
 
 }  // namespace fry

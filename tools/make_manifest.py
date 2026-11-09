@@ -367,6 +367,57 @@ def parse_rollout(lo, hi, allow_path):
     return rollout
 
 
+_SEMVER = re.compile(r"^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$")
+
+
+def _semver_key(v):
+    """Ordering key: MAJOR.MINOR.PATCH, a pre-release sorting below its release. None if not plain semver."""
+    m = _SEMVER.match(v)
+    if not m:
+        return None
+    return (int(m.group(1)), int(m.group(2)), int(m.group(3)), 0 if m.group(4) else 1, m.group(4) or "")
+
+
+def parse_rollback(a):
+    """The optional builds.<env>.rollback object (PROTOCOL.md 11.11, lib/fry_core/ota_rollback_json.h), or
+    None when no --rollback-* flag was given. A device honours it only when its running version is in
+    "from"; it is a deliberate DOWNGRADE, so every input is checked here rather than left to the device."""
+    given = [a.rollback_env, a.rollback_version, a.rollback_url, a.rollback_sha256, a.rollback_from]
+    if all(g is None for g in given):
+        return None
+    if any(g is None for g in given):
+        raise SystemExit("make_manifest: --rollback-env, --rollback-version, --rollback-url, --rollback-sha256 "
+                         "and --rollback-from must be given together")
+    if a.rollback_env not in ENVS:
+        raise SystemExit("make_manifest: --rollback-env: unknown env %s" % a.rollback_env)
+    target = _semver_key(a.rollback_version)
+    if target is None or target[:3] == (0, 0, 0):
+        raise SystemExit("make_manifest: --rollback-version %r is not a plain MAJOR.MINOR.PATCH version above 0.0.0"
+                         % a.rollback_version)
+    if not a.rollback_url.startswith("https://"):
+        raise SystemExit("make_manifest: --rollback-url must be https://")
+    if not re.fullmatch(r"[0-9a-fA-F]{64}", a.rollback_sha256):
+        raise SystemExit("make_manifest: --rollback-sha256 must be 64 hex digits (it is mandatory)")
+    frm = []
+    for v in a.rollback_from.split(","):
+        v = v.strip()
+        if _semver_key(v) is None:
+            raise SystemExit("make_manifest: --rollback-from entry %r is not a plain version" % v)
+        if v not in frm:
+            frm.append(v)
+    if not frm or len(frm) > 16:
+        raise SystemExit("make_manifest: --rollback-from needs 1..16 distinct versions (got %d)" % len(frm))
+    for v in frm:
+        if _semver_key(v) <= target:
+            raise SystemExit("make_manifest: --rollback-version %s is not older than --rollback-from %s "
+                             "(a rollback only goes down)" % (a.rollback_version, v))
+        if _semver_key(a.version) is not None and _semver_key(a.version) > _semver_key(v):
+            raise SystemExit("make_manifest: --version %s is newer than --rollback-from %s: that device would "
+                             "update forward and never roll back" % (a.version, v))
+    return {"version": a.rollback_version, "url": a.rollback_url, "sha256": a.rollback_sha256.lower(),
+            "from": sorted(frm)}
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--version", required=True, help="firmware_version to embed, e.g. 0.2.0")
@@ -413,9 +464,18 @@ def main():
     ap.add_argument("--rollout-allow", default=None,
                     help="with --rollout-lo/--rollout-hi: file of 16-hex SHA-256 key prefixes "
                          "(one per line) that may take the update whatever their bucket")
+    ap.add_argument("--rollback-env", default=None,
+                    help="manifest-directed rollback: the build env whose builds entry gets a rollback object "
+                         "(needs the other --rollback-* flags; without them the manifest is unchanged)")
+    ap.add_argument("--rollback-version", default=None, help="rollback: the older version devices go back to")
+    ap.add_argument("--rollback-url", default=None, help="rollback: https URL of that version's image for the env")
+    ap.add_argument("--rollback-sha256", default=None, help="rollback: sha256 (64 hex) of that image; mandatory")
+    ap.add_argument("--rollback-from", default=None,
+                    help="rollback: comma-separated bad versions; only devices running one of them go back")
     a = ap.parse_args()
 
     rollout = parse_rollout(a.rollout_lo, a.rollout_hi, a.rollout_allow)
+    rollback = parse_rollback(a)
 
     if a.only and a.envs:
         raise SystemExit("make_manifest: --only and --envs are mutually exclusive")
@@ -507,6 +567,12 @@ def main():
                 continue
             if builds.pop(env, None) is not None:
                 print("make_manifest: %s left out of builds{} for channel %s (%s)" % (env, a.channel, reason))
+
+    if rollback is not None:
+        if a.rollback_env not in builds:
+            raise SystemExit("make_manifest: --rollback-env %s has no entry in builds{} for channel %s"
+                             % (a.rollback_env, a.channel))
+        builds[a.rollback_env]["rollback"] = rollback
 
     manifest = {"firmware_version": a.version, "channel": a.channel, "builds": builds,
                 "olostep_kill": False}

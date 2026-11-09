@@ -109,6 +109,44 @@ OtaDecision decideOtaUpdate(const char* manifestChannel, const char* ownChannel,
   return OtaDecision::Update;
 }
 
+namespace {
+bool isDigit(char c) { return c >= '0' && c <= '9'; }
+// MAJOR.MINOR.PATCH, then end, '-' or '+'. Anything else is not a version a rollback may name.
+bool plainSemver(const char* v) {
+  if (empty(v)) return false;
+  for (int part = 0; part < 3; part++) {
+    if (!isDigit(*v)) return false;
+    while (isDigit(*v)) v++;
+    if (part < 2) {
+      if (*v != '.') return false;
+      v++;
+    }
+  }
+  return *v == 0 || *v == '-' || *v == '+';
+}
+bool isHex64(const char* s) {
+  if (empty(s)) return false;
+  size_t n = 0;
+  for (; s[n]; n++) {
+    const char c = s[n];
+    if (!(isDigit(c) || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'))) return false;
+  }
+  return n == 64;
+}
+}  // namespace
+
+OtaDecision decideOtaRollback(const char* manifestChannel, const char* ownChannel, const char* running,
+                              bool runningListed, const char* target, const char* badver, uint8_t badn,
+                              bool firstCheckAfterRollback, const char* url, const char* sha256) {
+  if (!otaChannelAccepted(manifestChannel, ownChannel)) return OtaDecision::WrongChannel;
+  if (!runningListed || !plainSemver(running) || !plainSemver(target)) return OtaDecision::RollbackRefused;
+  if (compareSemverPrecedence(target, running) >= 0) return OtaDecision::RollbackRefused;
+  if (compareSemverPrecedence(target, "0.0.0") <= 0) return OtaDecision::RollbackRefused;
+  if (skipBadVersion(target, badver, badn, firstCheckAfterRollback)) return OtaDecision::BadVersion;
+  if (empty(url) || !isHex64(sha256)) return OtaDecision::NoBuild;
+  return OtaDecision::Rollback;
+}
+
 const char* otaDecisionName(OtaDecision d) {
   switch (d) {
     case OtaDecision::Update:
@@ -123,6 +161,10 @@ const char* otaDecisionName(OtaDecision d) {
       return "no_build";
     case OtaDecision::NotInRollout:
       return "not_in_rollout";
+    case OtaDecision::Rollback:
+      return "rollback";
+    case OtaDecision::RollbackRefused:
+      return "rollback_refused";
   }
   return "not_newer";
 }

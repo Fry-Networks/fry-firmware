@@ -582,3 +582,40 @@ else in section 5 changes.
 ```
 [boot] reset_reason=<n>
 ```
+
+### 11.11 Manifest-directed rollback (optional `builds.<env>.rollback`)
+
+Append-only. It adds one optional field and changes nothing above: the "never downward" rule of 11.5
+still holds for every manifest without this field, and the confirm rule of 11.8 (any HTTP status) is
+untouched. Clients that do not know the field ignore it (`test/test_ota_rollback_legacy`).
+
+```
+"builds": { "<env>": { "url": "...", "sha256": "...",
+    "rollback": { "version": "0.4.24", "url": "https://...", "sha256": "<64 hex>", "from": ["0.4.25"] } } }
+```
+
+- **Purpose.** An operator pulls boards that run a known-bad release back to a named older release when
+  the on-device pending-verify guard did not catch the fault (the image confirmed but misbehaves).
+- **Honoured only if all hold** (`decideOtaRollback`, `lib/fry_core/ota_health.cpp`): the manifest channel
+  is the board's channel; `from` is a non-empty array of at most 16 strings that includes the running
+  version; `version`, `url` and `sha256` are non-empty strings, `url` is fetched like any OTA image, and
+  `sha256` is 64 hex digits (the image is verified against it; mandatory); `version` is a plain
+  `MAJOR.MINOR.PATCH[-pre]` version of strictly lower precedence than the running one and above
+  `0.0.0`, so a chain of rollbacks can only descend; the strikes of 11.8 do not skip it. Any other
+  shape is ignored as if absent (no partial rollback).
+- **Only where no forward update exists.** The rollback is considered only when the ordinary decision is
+  "not newer"; a manifest that offers a newer version updates forward as before. It is not gated by
+  `rollout`: a bad version can be pulled fleet-wide at once. It runs only at the normal manifest check,
+  so none runs while an image is still pending (11.5).
+- **Strikes.** Before the download the board records the version it is leaving as bad with the permanent
+  strike count (3), so a manifest that still names that version as `firmware_version` cannot take it
+  forward again. A manifest naming any other `firmware_version` clears the record as in 11.8.
+- **After the install** the target boots pending like any OTA image and is confirmed the same way. A
+  target that fails to confirm is rolled back by the bootloader (ESP32 family) and strikes itself as in
+  11.8; there is no automatic second hop. ESP8266 has no rollback slot: the field gives it a forward
+  path out of a bad image only if that image can still run a TLS manifest check and download.
+- **Publishing.** `tools/make_manifest.py --rollback-env ENV --rollback-version V --rollback-url U
+  --rollback-sha256 H --rollback-from V1[,V2...]` (all five together; it refuses a target that is not older
+  than every `from`, a `--version` newer than a `from`, a non-https URL and a short or non-hex sha256).
+- **Reach.** Only firmware that contains this amendment honours it. Boards on older firmware keep their
+  existing recovery paths (`fw-hold`, or a forward-fixed `firmware_version`).
