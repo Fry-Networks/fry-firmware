@@ -722,7 +722,7 @@ void init() {
         FRY_PRINTF("ota: %s was rolled back - running %s, strike %u/%u for %s%s\n", pending.c_str(),
                       FRY_FIRMWARE_VERSION, strikes, fry::kOtaPermanentStrikes, pending.c_str(),
                       strikes >= fry::kOtaPermanentStrikes ? " - it will not be installed again"
-                                                           : " - retried after the next 6 h check");
+                                                           : " - retried at the next update check");
       } else if (plannedRestart) {
         FRY_PRINTF("ota: %s was rolled back by a planned restart - not counted\n", pending.c_str());
       }

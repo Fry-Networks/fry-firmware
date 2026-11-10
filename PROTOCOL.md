@@ -460,7 +460,8 @@ AP restarted FRY-SETUP-<MAC6> after the failed join - /provision accepts a new a
 - **Strikes (replaces "never installs it again").** The previous image counts one strike per rollback
   from a version (`fry_ota/badver` + `fry_ota/badn`, written together by that image's boot check
   only). With fewer than 3 strikes the version is skipped on the first check after the rollback and
-  retried at the next 6-hour check; at 3 it is skipped for good. A manifest naming a different
+  retried at the next update check (the first check after a restart, or the next scheduled one);
+  at 3 it is skipped for good. A manifest naming a different
   version clears the strikes. A restart that is not a failure while the image is pending
   (restartToApply, a USB re-key) sets `fry_ota/planrst`, and the rollback it causes is not counted.
   On ESP8266 (no bootloader rollback) a boot that runs a version other than the pending one, with
@@ -493,7 +494,7 @@ ota: image <v> marked valid after <s>s (hardwareapi answered, last http=<code>; 
 ota: marking <v> valid FAILED (err=<n>) - retried on the next hardwareapi answer
 ota: no hardwareapi answer after <s>s of Wi-Fi on pending image <v> - rolling back
 ota: rollback impossible (no other valid image) - staying on pending <v>
-ota: <v> was rolled back - running <v>, strike <n>/3 for <v> - retried after the next 6 h check
+ota: <v> was rolled back - running <v>, strike <n>/3 for <v> - retried at the next update check
 ota: <v> was rolled back - running <v>, strike 3/3 for <v> - it will not be installed again
 ota: <v> was rolled back by a planned restart - not counted
 ota: manifest names <v> - strikes for <v> cleared

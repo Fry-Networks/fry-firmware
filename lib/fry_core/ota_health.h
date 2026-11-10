@@ -73,7 +73,7 @@ uint8_t nextStrikeCount(const char* badver, uint8_t badn, const char* rolledBack
                         bool plannedRestart, bool* changed);
 
 // Whether a manifest check skips `latest`: for good at kOtaPermanentStrikes, otherwise only on the
-// first check after the rollback boot, so the next 6-hour check tries it again.
+// first check after the rollback boot, so the next update check (after a restart or the scheduled one) tries it again.
 bool skipBadVersion(const char* latest, const char* badver, uint8_t badn, bool firstCheckAfterRollback);
 
 // A manifest naming a different version than the one holding strikes clears them.
