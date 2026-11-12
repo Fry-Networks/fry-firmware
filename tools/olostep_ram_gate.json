@@ -1,0 +1,14 @@
+{
+  "max_delta": 3316,
+  "margin": 256,
+  "measured": {
+    "prod_total": 34356,
+    "prod_sections": {".data": 1652, ".rodata": 5640, ".bss": 27064},
+    "olostep_total": 37468,
+    "olostep_sections": {".data": 1660, ".rodata": 8728, ".bss": 27080},
+    "prod_budget": 34408
+  },
+  "rule": "max_delta = (olostep_total - prod_budget) + margin; the olostep image must satisfy olostep_total <= prod_budget + max_delta",
+  "margin_reason": "same 256 B allowance the prod budget keeps over its baseline (tools/check_esp8266_ram_budget.py MARGIN_BYTES)",
+  "source": "CI build of the esp8266 and esp8266_olostep envs with the opt-in module present, measured with size -A; the module is built outside this repository"
+}
