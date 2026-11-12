@@ -1,0 +1,24 @@
+name: key-shape-check
+
+on:
+  push:
+    branches: [main, firmware-dev, 'ci/key-shape-control-*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  key-shape-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Self-test of the check
+        run: python3 tools/test_check_device_key_shapes.py
+      - name: Device-key-shaped strings outside the fixture allowlist
+        if: ${{ !cancelled() }}
+        run: python3 tools/check_device_key_shapes.py
