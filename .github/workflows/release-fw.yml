@@ -10,8 +10,7 @@ name: release-fw
 #
 # ESP32-S3 is built, attached (plain and factory image) and, through the committed literal
 # `--include-env esp32s3` of the second manifest step, listed in the prod manifest. The Pages flasher
-# keeps serving the S3 0.3.3 parts (and ESP8266's) from docs/flash/fw/hold/ until a separate flasher
-# change moves them. (Round 2 R5 had held ESP32-S3 back entirely.) ESP8266 is
+# serves the S3 0.4.28 parts from docs/flash/fw/; only ESP8266's 0.3.3 parts stay in docs/flash/fw/hold/. (Round 2 R5 had held ESP32-S3 back entirely.) ESP8266 is
 # built and attached as a release asset. From 0.4.11 it is also in the prod manifest: the manifest
 # step passes `--include-env esp8266` as a committed literal (tools/ota_channels.json is unchanged
 # and still lists it, so the flag is the one place that decides), with NO rollout key. The 0.3.x
@@ -156,7 +155,7 @@ jobs:
           main = json.load(open("docs/flash/manifest.json"))
           hold = json.load(open("docs/flash/manifest-hold.json"))
           held = {b["chipFamily"]: b["parts"] for b in hold["builds"]}
-          assert sorted(held) == ["ESP32-S3", "ESP8266"], sorted(held)
+          assert sorted(held) == ["ESP8266"], sorted(held)
           for b in main["builds"]:
               if b["chipFamily"] in held:
                   assert b["parts"] == held[b["chipFamily"]], b["chipFamily"]
