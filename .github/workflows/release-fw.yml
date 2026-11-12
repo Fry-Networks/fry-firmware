@@ -8,8 +8,10 @@ name: release-fw
 # releases/latest, which never points at a draft, so nothing ships until a person publishes it
 # after the canary.
 #
-# Round 2 (R5): ESP32-S3 is held back ENTIRELY - not built, not attached and not in the manifest; the
-# Pages flasher keeps serving its 0.3.3 parts (and ESP8266's) from docs/flash/fw/hold/. ESP8266 is
+# ESP32-S3 is built, attached (plain and factory image) and, through the committed literal
+# `--include-env esp32s3` of the second manifest step, listed in the prod manifest. The Pages flasher
+# keeps serving the S3 0.3.3 parts (and ESP8266's) from docs/flash/fw/hold/ until a separate flasher
+# change moves them. (Round 2 R5 had held ESP32-S3 back entirely.) ESP8266 is
 # built and attached as a release asset. From 0.4.11 it is also in the prod manifest: the manifest
 # step passes `--include-env esp8266` as a committed literal (tools/ota_channels.json is unchanged
 # and still lists it, so the flag is the one place that decides), with NO rollout key. The 0.3.x
@@ -31,6 +33,8 @@ jobs:
       fail-fast: true
       matrix:
         env: [esp32, esp32c3, esp8266]
+        include:
+          - env: esp32s3
     steps:
       - uses: actions/checkout@v4
 
@@ -123,6 +127,7 @@ jobs:
           python3 tools/test_make_manifest_envs.py
           python3 tools/test_manifest_esp8266_compat.py
           python3 tools/test_make_manifest_include_env.py
+          python3 tools/test_release_fw_esp32s3.py
           python3 tools/test_check_no_token.py
           python3 tools/test_check_prod_channel.py
           python3 tools/test_ble_key_write_security.py
@@ -191,7 +196,7 @@ jobs:
         run: |
           set -eu
           mkdir -p release
-          for env in esp32 esp32c3 esp8266; do
+          for env in esp32 esp32c3 esp8266 esp32s3; do
             mkdir -p "manifest_input/$env"
             cp "artifacts/fw-$env/firmware-$env.bin" "release/firmware-$env.bin"
             cp "artifacts/fw-$env/firmware-$env.bin" "manifest_input/$env/firmware.bin"
@@ -226,6 +231,32 @@ jobs:
           print("manifest builds:", sorted(m["builds"]), "excluded:", sorted(excluded))
           EOF
 
+      - name: Add the ESP32-S3 entry to the prod manifest
+        # A second, explicit step so that the three-chip manifest above and its assertion stay exactly
+        # as they were: the only change this step may make is the added builds.esp32s3 entry, and the
+        # assertion below proves it. tools/ota_channels.json is unchanged; the flag is the one place
+        # that decides, as it is for esp8266.
+        run: |
+          set -eu
+          cp ota/manifest.json manifest-three-chips.json
+          python3 tools/make_manifest.py --version "${GITHUB_REF_NAME#fw-v}" --channel prod \
+            --envs esp32,esp32c3,esp8266,esp32s3 --include-env esp8266 --include-env esp32s3 --release-base "https://github.com/${{ github.repository }}/releases/download/${GITHUB_REF_NAME}" \
+            --build-dir manifest_input --out ota/manifest.json --dist release
+          python3 - <<'EOF'
+          import json
+          before = json.load(open("manifest-three-chips.json"))
+          m = json.load(open("ota/manifest.json"))
+          assert m["channel"] == "prod", m
+          assert set(m["builds"]) == {"esp32", "esp32c3", "esp8266", "esp32s3"}, sorted(m["builds"])
+          for env, b in m["builds"].items():
+              assert b["url"] and len(b["sha256"]) == 64, (env, b)
+              assert "rollout" not in b, (env, b)
+          assert "rollout" not in m, m
+          assert {k: v for k, v in m.items() if k != "builds"} == {k: v for k, v in before.items() if k != "builds"}
+          assert {k: v for k, v in m["builds"].items() if k != "esp32s3"} == before["builds"], "other chips changed"
+          print("manifest builds:", sorted(m["builds"]), "- esp32s3 is the only addition")
+          EOF
+
       - name: Create the DRAFT GitHub release
         # Pinned to the commit behind the v2 tag at review time (round 2 R1): this job holds
         # contents:write and the OTA trusts the release assets alone, so a moved tag must not be able
@@ -237,6 +268,8 @@ jobs:
             release/firmware-esp32.bin
             release/firmware-esp32c3.bin
             release/firmware-esp8266.bin
+            release/firmware-esp32s3.bin
             release/firmware-esp32-factory.bin
             release/firmware-esp32c3-factory.bin
+            release/firmware-esp32s3-factory.bin
             ota/manifest.json
