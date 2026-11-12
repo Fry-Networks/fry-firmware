@@ -14,12 +14,14 @@ OLOSTEP_MAX_DELTA is deliberately UNSET (None). The opt-in module adds code, so 
 limit, but no olostep build has been measured yet (its private module is not available where this was written). Guessing a
 number would either gate nothing or fail a good build. So until it is set from the first real measurement (olostep total minus
 prod total, plus a small margin, in the same commit), the script refuses to claim PASS and exits 3 UNCALIBRATED. --max-delta N
-overrides the constant for a single run.
+overrides the constant for a single run. --config FILE reads the calibrated value from tools/olostep_ram_gate.json (measured in
+CI with the opt-in module present; see that file); precedence is --max-delta, then --config, then the constant.
 
 Exit codes: 0 within budget, 1 over budget or unmeasurable, 2 usage, 3 uncalibrated (no delta set).
 """
 import argparse
 import importlib.util
+import json
 import os
 import sys
 
@@ -57,14 +59,25 @@ def main(argv):
     ap.add_argument("--prod-size", required=True, help="saved `size -A` of the esp8266 build")
     ap.add_argument("--olostep-size", required=True, help="saved `size -A` of the esp8266_olostep build")
     ap.add_argument("--max-delta", type=int, default=None, help="override OLOSTEP_MAX_DELTA")
+    ap.add_argument("--config", default=None, help="JSON file with an integer max_delta (e.g. tools/olostep_ram_gate.json); --max-delta wins")
     a = ap.parse_args(argv)
+    cfg_delta = None
+    if a.config is not None:
+        try:
+            with open(a.config) as f:
+                cfg_delta = json.load(f)["max_delta"]
+            if type(cfg_delta) is not int or cfg_delta < 0:
+                raise ValueError("max_delta must be a non-negative integer")
+        except (OSError, ValueError, KeyError, TypeError) as e:
+            print("olostep RAM: bad --config %s: %s" % (a.config, e))
+            return 2
     try:
         prod_total = measure(a.prod_size)
         olo_total = measure(a.olostep_size)
     except (prod.Unmeasurable, OSError) as e:
         print("olostep RAM: cannot measure: %s" % e)
         return 1
-    delta = a.max_delta if a.max_delta is not None else OLOSTEP_MAX_DELTA
+    delta = a.max_delta if a.max_delta is not None else (cfg_delta if cfg_delta is not None else OLOSTEP_MAX_DELTA)
     if delta is None:
         print("olostep RAM: UNCALIBRATED (OLOSTEP_MAX_DELTA unset): prod %d B, olostep %d B, delta %d B" % (
             prod_total, olo_total, olo_total - prod_total))

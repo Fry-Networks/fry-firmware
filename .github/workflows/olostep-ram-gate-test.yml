@@ -1,0 +1,29 @@
+name: olostep-ram-gate-test
+
+# Unit tests of the olostep RAM gate and its calibrated config. Pure Python; no firmware build.
+on:
+  pull_request:
+    paths:
+      - tools/check_esp8266_olostep_ram.py
+      - tools/check_esp8266_ram_budget.py
+      - tools/olostep_ram_gate.json
+      - tools/test_check_esp8266_olostep_ram.py
+      - tools/test_olostep_ram_gate_config.py
+      - .github/workflows/olostep-ram-gate-test.yml
+  push:
+    branches: [main]
+    paths:
+      - tools/check_esp8266_olostep_ram.py
+      - tools/olostep_ram_gate.json
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install pytest
+      - run: python3 -m pytest tools/test_check_esp8266_olostep_ram.py tools/test_olostep_ram_gate_config.py -q
