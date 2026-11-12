@@ -1,0 +1,16 @@
+# Synthetic device-key fixture strings used by tests and docs.
+# Every entry must be an obvious placeholder. Adding a line here is the review point for the
+# device-key shape check (tools/check_device_key_shapes.py): the diff of this file is what a
+# reviewer looks at. Do not list anything that came from a real device.
+FEM-0123456789ABCDEF0123456789ABCDEF
+FEM-0123456789abcdef0123456789abcdef
+FEM-5E1F0000000000000000000000000001
+FEM-5e1f0000000000000000000000000001
+FEM-ABCDEFGHIJKLMNOPQRSTUVWXYZ012345
+FEM-TESTKEY0000000000000000000000001
+FEM-TestKey0000000000000000000000002
+IOT-0123456789ABCDEF0123456789ABCDEF
+IOT-0123456789abcdef0123456789abcdef
+IOT-5E1F0000000000000000000000000001
+IOT-5E1F000000000000000000000000000G
+IOT-5e1f0000000000000000000000000001
