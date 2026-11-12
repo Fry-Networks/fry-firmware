@@ -20,4 +20,5 @@ jobs:
       - name: Self-test of the check
         run: python3 tools/test_check_device_key_shapes.py
       - name: Device-key-shaped strings outside the fixture allowlist
+        if: ${{ !cancelled() }}
         run: python3 tools/check_device_key_shapes.py
