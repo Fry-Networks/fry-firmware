@@ -3,14 +3,16 @@
 
     python3 tools/check_device_key_shapes.py [--root DIR] [--allow FILE]
 
-Shape: one of the known prefixes (FEM, IOT, RDN, BM, IDM, SDN, AEM, ISM, SVN, OSM), a dash, then exactly
-32 ASCII letters/digits that are not followed by another letter/digit. Every tracked text file is
-scanned (docs and tests included); files containing a NUL byte are treated as binary and skipped.
-Outside a git checkout the whole tree under --root is walked (minus .git).
+Shape: one of the known prefixes (FEM, IOT, RDN, BM, IDM, SDN, AEM, ISM, SVN, OSM) in any letter case,
+a separator ("-", "_" or a percent-encoded dash), then 28 or more ASCII letters/digits (the whole run). Near-miss lengths
+and a key glued to trailing letters/digits are therefore caught as well. Every tracked file is scanned
+(docs and tests included); a file containing a NUL byte is scanned as raw bytes, like `strings`, and
+reported by byte offset. Outside a git checkout the whole tree under --root is walked (minus .git).
 
 The allowlist (default tools/device_key_fixtures.allow next to this script's repo root) lists the
 synthetic fixture strings that tests use, one per line, '#' starts a comment. It is itself a tracked
-file and is not scanned. Adding a line there is the review point: every entry must also look
+file and is not scanned. An entry only exempts that exact string, byte for byte (so a
+test's deliberate near-miss fixture is listed in its own exact form; no other form of it passes). Adding a line there is the review point: every entry must also look
 synthetic (low per-character entropy, or a plain counting pattern); an entry that looks random is
 rejected, so a random-looking value cannot be waved through just by listing it.
 
@@ -27,8 +29,11 @@ import subprocess
 import sys
 
 PREFIXES = ("FEM", "IOT", "RDN", "BM", "IDM", "SDN", "AEM", "ISM", "SVN", "OSM")
-SHAPE = re.compile(r"(?:%s)-[A-Za-z0-9]{32}(?![A-Za-z0-9])" % "|".join(PREFIXES))
-FULL = re.compile(r"(?:%s)-[A-Za-z0-9]{32}\Z" % "|".join(PREFIXES))
+# Wide net: any prefix (any case), a separator ("-", "_" or a percent-encoded dash), then 28 or more
+# alphanumerics (the whole run). Near-miss lengths and a key glued to trailing alphanumerics are caught too. A
+# letter directly before the prefix means it is only the end of some other word and is ignored.
+SHAPE_B = re.compile(
+    rb"(?<![A-Za-z])(?:%s)(?:-|_|%%2[dD])[A-Za-z0-9]{28,}" % "|".join(PREFIXES).encode(), re.I)
 LOW_ENTROPY_BITS = 2.5
 COUNTING_ALPHABETS = (
     "0123456789ABCDEF", "0123456789abcdef", "0123456789",
@@ -43,8 +48,12 @@ def entropy(s):
     return -sum(v / n * math.log2(v / n) for v in c.values())
 
 
+def key_body(key):
+    return re.split(r"-|_|%2[dD]", key, maxsplit=1)[1]
+
+
 def looks_synthetic(key):
-    body = key.split("-", 1)[1]
+    body = key_body(key)
     if entropy(body) < LOW_ENTROPY_BITS:
         return True
     return any(body in alpha * 4 for alpha in COUNTING_ALPHABETS)
@@ -66,7 +75,7 @@ def load_allow(path):
         s = line.strip()
         if not s or s.startswith("#"):
             continue
-        if not FULL.match(s):
+        if not SHAPE_B.fullmatch(s.encode("utf-8", "replace")):
             errs.append("%s:%d: allowlist line is not a bare key-shaped string (%s)" % (path, n, mask(s)))
         elif not looks_synthetic(s):
             errs.append("%s:%d: allowlist entry %s looks random, not synthetic; entries must be obvious fixtures" % (path, n, mask(s)))
@@ -103,16 +112,14 @@ def scan(root, allow_path):
                 data = fh.read()
         except OSError:
             continue
-        if b"\0" in data:
-            continue
-        text = data.decode("utf-8", "replace")
-        for n, line in enumerate(text.split("\n"), 1):
-            for m in SHAPE.finditer(line):
-                k = m.group(0)
-                if k in keys:
-                    continue
-                label = "synthetic-looking but not on the allowlist" if looks_synthetic(k) else "HIGH-ENTROPY and not on the allowlist"
-                findings.append("%s:%d: %s %s" % (rel, n, mask(k), label))
+        binary = b"\0" in data  # scanned as raw bytes (like `strings`); reported by byte offset
+        for m in SHAPE_B.finditer(data):
+            k = m.group(0).decode("ascii")
+            if k in keys:
+                continue
+            label = "synthetic-looking but not on the allowlist" if looks_synthetic(k) else "HIGH-ENTROPY and not on the allowlist"
+            where = "byte %d" % m.start() if binary else str(data.count(b"\n", 0, m.start()) + 1)
+            findings.append("%s:%s: %s %s" % (rel, where, mask(k), label))
     return findings, []
 
 

@@ -76,23 +76,18 @@ def main():
         rc, out = run(d, "%s\n" % s)
         check("unlisted next to listed fails", rc == 1 and k not in out, out)
 
-    # (a4) all prefixes are covered; 31 chars and 33 chars are not key-shaped.
+    # (a4) all prefixes are covered.
     with tempfile.TemporaryDirectory(dir=base) as d:
         for p in ("FEM", "IOT", "RDN", "BM", "IDM", "SDN", "AEM", "ISM", "SVN", "OSM"):
             write(d, "p/%s.txt" % p, rand_key(p) + "\n")
         rc, out = run(d, "")
         check("all 10 prefixes found", rc == 1 and out.count("FOUND ") == 10, out)
-    with tempfile.TemporaryDirectory(dir=base) as d:
-        write(d, "short.txt", rand_key()[:-1] + "\n")
-        write(d, "long.txt", rand_key() + "x\n")
-        rc, out = run(d, "")
-        check("31 and 33 char strings are not flagged", rc == 0, out)
 
-    # (a5) binary files skipped; the allowlist file itself is not scanned.
+    # (a5) the allowlist file itself is not scanned.
     with tempfile.TemporaryDirectory(dir=base) as d:
-        write(d, "blob.bin", b"\0\1\2" + rand_key().encode(), mode="wb")
-        rc, out = run(d, "# no entries\n")
-        check("binary file skipped", rc == 0, out)
+        s = synthetic_key()
+        rc, out_ = run(d, "%s\n" % s)
+        check("allowlist file is not scanned", rc == 0, out_)
 
     # (a6) a random-looking allowlist entry is rejected (exit 2), even if the string is present.
     with tempfile.TemporaryDirectory(dir=base) as d:
@@ -105,6 +100,54 @@ def main():
     with tempfile.TemporaryDirectory(dir=base) as d:
         r = subprocess.run([sys.executable, "-I", TOOL, "--root", d], capture_output=True, text=True)
         check("missing allowlist is an error", r.returncode == 2, "rc=%d" % r.returncode)
+
+    # (c) widened forms: each must be caught, with masked output only.
+    def body(n):
+        return "".join(secrets.choice(ALNUM) for _ in range(n))
+
+    forms = [
+        ("31-char body", "FEM-" + body(31)),
+        ("33-char body", "FEM-" + body(33)),
+        ("28-char body", "IOT-" + body(28)),
+        ("40-char body", "IOT-" + body(40)),
+        ("lowercase prefix", "fem-" + body(32)),
+        ("mixed-case prefix", "Iot-" + body(32)),
+        ("underscore separator", "FEM_" + body(32)),
+        ("percent-encoded separator", "FEM%2D" + body(32)),
+        ("lowercase percent-encoded separator", "fem%2d" + body(33)),
+        ("followed by a letter", "FEM-" + body(32) + "q"),
+        ("followed by digits", "RDN-" + body(32) + "99"),
+    ]
+    for name, k in forms:
+        with tempfile.TemporaryDirectory(dir=base) as d:
+            write(d, "f/x.txt", "a\nkey: %s end\n" % k)
+            rc, out = run(d, "")
+            tail = k[len(k) // 2:]
+            check("form caught: " + name, rc == 1 and "f/x.txt:2:" in out and k[:6] + "..." in out and tail not in out, "rc=%d %s" % (rc, out))
+
+    # (c2) a NUL-containing file is scanned for printable runs, not skipped; output masked.
+    with tempfile.TemporaryDirectory(dir=base) as d:
+        k = rand_key("OSM")
+        write(d, "img/fw.bin", b"\0\1\2\xff" + b"junk\0" + k.encode() + b"\0\0tail", mode="wb")
+        rc, out = run(d, "")
+        check("key inside a NUL-containing file is caught", rc == 1 and "img/fw.bin" in out and k[10:] not in out, "rc=%d %s" % (rc, out))
+    with tempfile.TemporaryDirectory(dir=base) as d:
+        write(d, "img/fw.bin", b"\0\1\2\xff" + os.urandom(4096), mode="wb")
+        rc, out = run(d, "")
+        check("random binary without a key stays clean", rc == 0, out)
+
+    # (c3) near misses that must NOT be flagged.
+    with tempfile.TemporaryDirectory(dir=base) as d:
+        write(d, "n.txt", "FEM-" + body(27) + "\nFEM_API_TOKEN=abc\nmechanism_" + body(30) + "\nFEM-short\n")
+        rc, out = run(d, "")
+        check("27-char body, identifiers and in-word prefixes are not flagged", rc == 0, out)
+
+    # (c4) an allowlisted entry only passes in its exact canonical form.
+    with tempfile.TemporaryDirectory(dir=base) as d:
+        s = synthetic_key()
+        write(d, "v.txt", s.lower() + "\n" + s.replace("-", "_") + "\n" + s + "z\n" + s + "\n")
+        rc, out = run(d, s + "\n")
+        check("allowlisted key passes only in exact form", rc == 1 and out.count("FOUND ") == 3, out)
 
     # (b) the real repo tree is clean with the committed allowlist.
     r = subprocess.run([sys.executable, "-I", TOOL, "--root", os.path.join(HERE, "..")], capture_output=True, text=True)
