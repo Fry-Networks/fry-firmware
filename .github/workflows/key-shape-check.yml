@@ -2,7 +2,7 @@ name: key-shape-check
 
 on:
   push:
-    branches: [main, firmware-dev, 'ci/key-shape-control-*']
+    branches: [main, firmware-dev, 'ci/key-shape-control*']
   pull_request:
   workflow_dispatch:
 
