@@ -177,11 +177,16 @@ BootDecision decideBoot(const BootInputs& in) {
       if (in.crashEvidence && in.otherSlotIntact) giveUp(in, &d);
     } else {
       const bool silentFailure = !in.record.healthy;  // no earlier attempt ever got Wi-Fi + a 2xx
-      if (!in.crashEvidence && !silentFailure) {
+      if (in.crashEvidence) {
+        if (in.otherSlotIntact) giveUp(in, &d);  // a dump of this build: leave at once
+      } else if (!silentFailure) {
         // External resets: this attempt sticks. If the dump cannot be read, a missing dump proves nothing:
         // neither confirm nor give up, the behaviour stays as it was.
         if (!in.evidenceUnavailable) d.action = BootAction::ConfirmNow;
-      } else if (in.otherSlotIntact) {
+      } else if (d.record.n > kStickyInstallAttempt && in.otherSlotIntact) {
+        // No dump and no attempt ever reached the API, and the install after the sticky attempt did not
+        // either: give up. At the sticky attempt itself two early resets (a power flicker) look the same
+        // as a silent build, so that install runs under the normal confirm rules (it needs a 2xx).
         giveUp(in, &d);
       }
     }

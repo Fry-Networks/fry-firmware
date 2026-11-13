@@ -269,22 +269,33 @@ void test_a_dump_of_this_build_means_never_force_confirm() {
   TEST_ASSERT_EQUAL((int)BootAction::Continue, (int)d.action);
 }
 
-void test_a_silent_failure_is_not_force_confirmed_either() {
-  // no dump, but no earlier attempt ever got Wi-Fi with a 2xx
+void test_a_silent_failure_without_a_dump_gets_one_more_install_before_it_is_given_up() {
+  // no dump, no earlier attempt ever got Wi-Fi with a 2xx: attempt 3 runs under the normal confirm rules
   fry::BootDecision d = fry::decideBoot(in(true, kLast, 0, kSw, true, false, false, true, /*earlierHealth=*/false));
+  TEST_ASSERT_EQUAL((int)BootAction::Continue, (int)d.action);
+  // ... and when that install did not reach the API either, attempt 4 gives up through the quarantine exit
+  d = fry::decideBoot(in(true, kLast + 1, 0, kSw, true, false, false, true, false));
   TEST_ASSERT_EQUAL((int)BootAction::AbandonNow, (int)d.action);
   TEST_ASSERT_TRUE(d.quarantine);
-  d = fry::decideBoot(in(true, kLast, 0, kSw, true, false, false, false, false));  // knob unavailable: as before
+  d = fry::decideBoot(in(true, kLast + 1, 0, kSw, true, false, false, false, false));  // exit unavailable: as before
   TEST_ASSERT_EQUAL((int)BootAction::Continue, (int)d.action);
+  d = fry::decideBoot(in(true, kLast + 1, 0, kSw, false, false, false, true, false));  // no bootable slot
+  TEST_ASSERT_EQUAL((int)BootAction::Continue, (int)d.action);
+  // attempt 3 reached the API and was then reset by something external: attempt 4 confirms
+  d = fry::decideBoot(in(true, kLast + 1, 0, kSw, true, false, false, true, true));
+  TEST_ASSERT_EQUAL((int)BootAction::ConfirmNow, (int)d.action);
 }
 
-void test_unreadable_evidence_never_confirms_but_a_silent_failure_is_still_given_up() {
+void test_unreadable_evidence_never_confirms_and_a_silent_failure_is_given_up_one_install_later() {
   fry::BootInputs b = in(true, kLast, 0, kSw, true, false, false, true, /*earlierHealth=*/true);
   b.evidenceUnavailable = true;  // no dump partition: a missing dump proves nothing
   TEST_ASSERT_EQUAL((int)BootAction::Continue, (int)fry::decideBoot(b).action);
   b.record.healthy = false;
-  TEST_ASSERT_EQUAL((int)BootAction::AbandonNow, (int)fry::decideBoot(b).action);
+  TEST_ASSERT_EQUAL((int)BootAction::Continue, (int)fry::decideBoot(b).action);  // attempt 3: normal rules
+  b.record.n = kLast + 1;
+  TEST_ASSERT_EQUAL((int)BootAction::AbandonNow, (int)fry::decideBoot(b).action);  // attempt 4
   b.evidenceUnavailable = false;
+  b.record.n = kLast;
   b.record.healthy = true;
   TEST_ASSERT_EQUAL((int)BootAction::ConfirmNow, (int)fry::decideBoot(b).action);
 }
@@ -378,8 +389,8 @@ int main(int, char**) {
   RUN_TEST(test_an_open_record_expires_after_a_number_of_boots);
   RUN_TEST(test_external_resets_after_an_earlier_attempt_reached_the_api_confirm_at_once);
   RUN_TEST(test_a_dump_of_this_build_means_never_force_confirm);
-  RUN_TEST(test_a_silent_failure_is_not_force_confirmed_either);
-  RUN_TEST(test_unreadable_evidence_never_confirms_but_a_silent_failure_is_still_given_up);
+  RUN_TEST(test_a_silent_failure_without_a_dump_gets_one_more_install_before_it_is_given_up);
+  RUN_TEST(test_unreadable_evidence_never_confirms_and_a_silent_failure_is_given_up_one_install_later);
   RUN_TEST(test_with_strikes_the_last_attempt_is_never_force_confirmed);
   RUN_TEST(test_probation_at_the_last_attempt_only_gives_up_with_a_dump_and_a_way_out);
   RUN_TEST(test_strike_detection_and_the_quarantine_address);

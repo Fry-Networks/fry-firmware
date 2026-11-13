@@ -140,6 +140,8 @@ BootFlowResult runBootFlow(OtaBootPorts& p, const BootFlowConfig& c) {
       break;
   }
   if (bi.pendingBoot && bd.record.n >= kStickyInstallAttempt) {
+    say(p, "ota: quarantine exit available: %s, other slot bootable: %s", bi.quarantineAvailable ? "yes" : "no",
+        bi.otherSlotIntact ? "yes" : "no");
     say(p, "ota: install attempt %u of %s - not confirmed at once (crash evidence, unreadable evidence, a failing earlier attempt or strikes)",
         static_cast<unsigned>(bd.record.n), c.version);
   }

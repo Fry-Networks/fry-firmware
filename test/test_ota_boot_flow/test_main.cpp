@@ -477,16 +477,68 @@ void test_sequence_a_a_silent_failure_with_a_strike_keeping_previous_image_is_no
   TEST_ASSERT_FALSE(b.installAllowed);  // the previous image's third strike ended it
 }
 
-void test_sequence_b_a_silent_failure_with_a_strike_less_previous_image_is_quarantined() {
+void test_sequence_b_a_silent_failure_with_a_strike_less_previous_image_is_quarantined_after_four_installs() {
   Board b;
   b.install();
   int guard = 0;
   while (guard++ < 50 && b.onNew) b.runNew(kSw, 1300000, -1);
   TEST_ASSERT_FALSE(b.onNew);
   TEST_ASSERT_FALSE(b.confirmedEver);
-  TEST_ASSERT_EQUAL_INT(3, b.installs);
+  TEST_ASSERT_EQUAL_INT(4, b.installs);  // attempt 3 ran under the normal rules and also failed
   TEST_ASSERT_EQUAL_STRING(kQuarantine, b.nvs.url.c_str());
   TEST_ASSERT_EQUAL_STRING("0.4.29", b.nvs.qver.c_str());
+}
+
+void test_two_early_external_resets_never_quarantine_a_healthy_board() {
+  Board b;  // resets at 3 s on attempts 1 and 2, before any 2xx; the third install is healthy
+  b.install();
+  TEST_ASSERT_FALSE(b.runNew(kSw, 3000));
+  TEST_ASSERT_FALSE(b.runNew(kSw, 3000));
+  TEST_ASSERT_TRUE(b.runNew(kSw, 60000));  // attempt 3: no give-up, the normal early confirm decides
+  TEST_ASSERT_TRUE(b.confirmedEver);
+  TEST_ASSERT_EQUAL_INT(3, b.installs);
+  TEST_ASSERT_EQUAL_STRING("", b.nvs.url.c_str());
+  TEST_ASSERT_EQUAL_STRING("", b.nvs.qver.c_str());
+  TEST_ASSERT_TRUE(b.nvs.logged("quarantine exit available: yes, other slot bootable: yes"));
+}
+
+void test_a_third_install_that_reaches_the_api_and_is_then_reset_is_confirmed_by_the_fourth() {
+  Board b;
+  b.install();
+  TEST_ASSERT_FALSE(b.runNew(kSw, 3000));
+  TEST_ASSERT_FALSE(b.runNew(kSw, 3000));
+  TEST_ASSERT_FALSE(b.runNew(kSw, 20000));  // attempt 3: the API answers at 8 s, a reset at 20 s
+  TEST_ASSERT_TRUE(b.runNew(kSw, 60000));   // attempt 4: an earlier attempt reached the API, no dump: confirm
+  TEST_ASSERT_TRUE(b.confirmedEver);
+  TEST_ASSERT_EQUAL_INT(4, b.installs);
+  TEST_ASSERT_EQUAL_STRING("", b.nvs.url.c_str());
+}
+
+void test_three_early_resets_then_a_failing_fourth_is_given_up_and_the_log_says_why_before() {
+  Board b;
+  b.install();
+  for (int i = 0; i < 3; i++) TEST_ASSERT_FALSE(b.runNew(kSw, 3000));
+  TEST_ASSERT_FALSE(b.runNew(kSw, 3000));  // attempt 4: given up at init
+  TEST_ASSERT_FALSE(b.onNew);
+  TEST_ASSERT_EQUAL_INT(4, b.installs);
+  TEST_ASSERT_EQUAL_STRING(kQuarantine, b.nvs.url.c_str());
+}
+
+void test_the_log_says_why_attempt_3_continues() {
+  Fake f;  // an operator override stored: the exit is not available
+  f.pendingVerify = true;
+  f.pending = kVersion;
+  f.att = "0.4.29#2";
+  f.url = "https://lab.example.test/manifest.json";
+  fry::runBootFlow(f, cfg());
+  TEST_ASSERT_TRUE(f.logged("ota: quarantine exit available: no, other slot bootable: yes"));
+  Fake g;  // no bootable previous slot
+  g.pendingVerify = true;
+  g.pending = kVersion;
+  g.att = "0.4.29#2";
+  g.slotIntact = false;
+  fry::runBootFlow(g, cfg());
+  TEST_ASSERT_TRUE(g.logged("ota: quarantine exit available: yes, other slot bootable: no"));
 }
 
 void test_crash_evidence_stops_the_forced_confirm_and_the_board_ends_on_the_previous_image() {
@@ -633,7 +685,7 @@ void test_probation_ends_after_a_long_healthy_run() {
 }
 
 // Property: whatever the reset pattern, with a way to stop the previous image the new image is installed
-// at most kStickyInstallAttempt times.
+// at most kStickyInstallAttempt (strikes, or a dump) or kStickyInstallAttempt + 1 (a silent failure) times.
 void test_no_reset_pattern_alternates_forever() {
   uint32_t seed = 12345;
   const uint32_t reasons[] = {kPowerOn, kSw, kPanic, kBrownout, 6, 2, 0, 8};
@@ -656,8 +708,11 @@ void test_no_reset_pattern_alternates_forever() {
       b.runNew(reason, alive, apiAt, endCrash);
       if (!b.onNew && !b.installAllowed) break;
     }
-    if ((b.oldKeepsStrikes || knob) && b.nvs.slotIntact) {
-      TEST_ASSERT_TRUE_MESSAGE(b.installs <= fry::kStickyInstallAttempt, "installs bounded by the sticky attempt");
+    // Bounds per row (a way to stop the previous image, a bootable slot, a readable dump partition):
+    // strikes or a dump give up at attempt 3; a silent failure without a dump one install later.
+    if ((b.oldKeepsStrikes || knob) && b.nvs.slotIntact && b.coredump) {
+      const int bound = b.oldKeepsStrikes ? fry::kStickyInstallAttempt : fry::kStickyInstallAttempt + 1;
+      TEST_ASSERT_TRUE_MESSAGE(b.installs <= bound, "installs bounded");
     }
   }
 }
@@ -687,7 +742,11 @@ int main(int, char**) {
   RUN_TEST(test_an_image_that_dies_in_the_tunnel_start_is_never_confirmed);
   RUN_TEST(test_three_external_resets_after_reaching_the_api_the_third_install_confirms_and_stays);
   RUN_TEST(test_sequence_a_a_silent_failure_with_a_strike_keeping_previous_image_is_not_stranded);
-  RUN_TEST(test_sequence_b_a_silent_failure_with_a_strike_less_previous_image_is_quarantined);
+  RUN_TEST(test_sequence_b_a_silent_failure_with_a_strike_less_previous_image_is_quarantined_after_four_installs);
+  RUN_TEST(test_two_early_external_resets_never_quarantine_a_healthy_board);
+  RUN_TEST(test_a_third_install_that_reaches_the_api_and_is_then_reset_is_confirmed_by_the_fourth);
+  RUN_TEST(test_three_early_resets_then_a_failing_fourth_is_given_up_and_the_log_says_why_before);
+  RUN_TEST(test_the_log_says_why_attempt_3_continues);
   RUN_TEST(test_crash_evidence_stops_the_forced_confirm_and_the_board_ends_on_the_previous_image);
   RUN_TEST(test_crash_evidence_with_a_previous_image_that_keeps_strikes_needs_no_address);
   RUN_TEST(test_when_the_previous_image_cannot_be_stopped_the_image_is_not_force_confirmed);
