@@ -41,6 +41,7 @@ jobs:
         env:
           FRY_API_TOKEN: ${{ inputs.with_token && secrets.FRY_API_TOKEN || '' }}
           PLATFORMIO_BUILD_FLAGS: -DFRY_BENCH_FAULT=${{ matrix.fault }}
+          FRY_BENCH_BUILD: '1'
         run: pio run -e esp32s3
 
       - name: Name the artifact
@@ -48,7 +49,6 @@ jobs:
           set -eu
           cp ".pio/build/esp32s3/firmware.bin" "firmware-esp32s3-fault${{ matrix.fault }}.bin"
           sha256sum "firmware-esp32s3-fault${{ matrix.fault }}.bin"
-          grep -c "FRY_TEST_FAULT=${{ matrix.fault }}" ".pio/build/esp32s3/firmware.bin" || true
 
       - uses: actions/upload-artifact@v4
         with:
