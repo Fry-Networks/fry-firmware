@@ -123,7 +123,8 @@ void setOtaRolledBack(bool rolledBack);
 // Written only by the image itself, so it survives a rollback to a previous image that does not know it.
 // ESP32 family only (not defined on the ESP8266).
 String getOtaAttempts();
-void setOtaAttempts(const char* record);
+bool setOtaAttempts(const char* record);  // false: the write failed
+bool setOtaBootFailsChecked(uint8_t v);  // false: the write failed
 void clearOtaAttempts();
 // fry_ota/qver: the version that was given up for good; the manifest override then points at the
 // quarantine address (lib/fry_core/ota_confirm.h) so a previous image stops re-installing it.

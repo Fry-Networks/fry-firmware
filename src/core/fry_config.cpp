@@ -545,11 +545,19 @@ String getOtaAttempts() {
   p.end();
   return v;
 }
-void setOtaAttempts(const char* record) {
+bool setOtaAttempts(const char* record) {
   KvStore p;
   p.begin("fry_ota", false);
-  p.putString("att", record ? record : "");
+  const bool ok = p.putString("att", record ? record : "") > 0;  // 0 bytes written: the write failed
   p.end();
+  return ok;
+}
+bool setOtaBootFailsChecked(uint8_t v) {
+  KvStore p;
+  p.begin("fry_ota", false);
+  const bool ok = p.putUChar("bootfails", v) > 0;
+  p.end();
+  return ok;
 }
 void clearOtaAttempts() {
   KvStore p;

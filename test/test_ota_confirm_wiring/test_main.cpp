@@ -76,10 +76,24 @@ void test_main_reports_the_end_of_the_startup_after_the_tunnel_start() {
   TEST_ASSERT_TRUE(body.find("setPhase(BootPhase::Ready);") > close);
 }
 
-void test_the_client_declares_the_startup_note() {
+void test_the_client_declares_the_notes() {
   std::string hdr;
   TEST_ASSERT_TRUE(loadSource("src/core/ota_client.h", hdr));
   TEST_ASSERT_EQUAL_INT(1, countOf(hdr, "void noteStartupDone();"));
+  TEST_ASSERT_EQUAL_INT(1, countOf(hdr, "void noteTunnelBringUpAttempted();"));
+  TEST_ASSERT_EQUAL_INT(1, countOf(hdr, "void noteTunnelFetchAttempted();"));
+}
+
+// The tunnel code reports its attempts; a crash inside the bring-up must not get to the note.
+void test_the_tunnel_code_reports_its_attempts() {
+  std::string vpn, prov, body;
+  TEST_ASSERT_TRUE(loadSource("src/esp32/vpn_wireguard.cpp", vpn));
+  TEST_ASSERT_TRUE(loadSource("src/esp32/wg_provision_client.cpp", prov));
+  TEST_ASSERT_TRUE(bodyOf(vpn, "\nbool bringUp() {", body));
+  const size_t connect = body.find("esp_wireguard_connect(&s_wgCtx)");
+  const size_t note = body.rfind("fry_ota::noteTunnelBringUpAttempted();");
+  TEST_ASSERT_TRUE(connect != std::string::npos && note != std::string::npos && note > connect);
+  TEST_ASSERT_EQUAL_INT(1, countOf(prov, "fry_ota::noteTunnelFetchAttempted();"));
 }
 
 void test_the_early_confirm_runs_in_the_loop_guard_and_keeps_the_old_rules() {
@@ -87,6 +101,10 @@ void test_the_early_confirm_runs_in_the_loop_guard_and_keeps_the_old_rules() {
   TEST_ASSERT_TRUE(loadSource("src/core/ota_client.cpp", src));
   TEST_ASSERT_TRUE(bodyOf(src, "\nvoid loopGuard() {", guard));
   TEST_ASSERT_EQUAL_INT(1, countOf(guard, "fry::decideEarlyConfirm("));
+  TEST_ASSERT_TRUE(guard.find("fry::tunnelSettled(") != std::string::npos);
+  TEST_ASSERT_TRUE(guard.find("s_heartbeat.ageS(") != std::string::npos);  // ageS() >= 0 only after a 2xx
+  TEST_ASSERT_TRUE(guard.find("HEAP_GATE_OTA") != std::string::npos);
+  TEST_ASSERT_TRUE(guard.find("s_pocOk") != std::string::npos);
   // the settle-window fallback and the no-answer rollback are still there, with their old inputs
   TEST_ASSERT_EQUAL_INT(1, countOf(guard, "fry::decideMarkValid(true, s_heartbeat.anyResponse(), now, kMarkValidSettleMs)"));
   TEST_ASSERT_EQUAL_INT(1, countOf(guard, "fry::decideRollbackGuard(s_pendingVerify, s_heartbeat.anyResponse(), s_verifyMs,"));
@@ -96,58 +114,29 @@ void test_the_early_confirm_runs_in_the_loop_guard_and_keeps_the_old_rules() {
   TEST_ASSERT_TRUE(src.find("const uint32_t kMarkValidSettleMs = POC_INTERVAL_MS + 60000UL;") != std::string::npos);
 }
 
-void test_the_early_confirm_needs_a_2xx_not_any_status() {
-  std::string src, guard;
-  TEST_ASSERT_TRUE(loadSource("src/core/ota_client.cpp", src));
-  TEST_ASSERT_TRUE(bodyOf(src, "\nvoid loopGuard() {", guard));
-  TEST_ASSERT_TRUE(guard.find("s_heartbeat.ageS(") != std::string::npos);  // ageS() >= 0 only after a 2xx
-  TEST_ASSERT_TRUE(guard.find("fry_wifi::isConnected()") != std::string::npos);
-  TEST_ASSERT_TRUE(guard.find("HEAP_GATE_OTA") != std::string::npos);
-}
-
-void test_init_decides_the_boot_before_the_pending_check_and_only_on_the_esp32_family() {
+void test_init_runs_the_boot_flow_before_the_pending_check_and_only_on_the_esp32_family() {
   std::string src, init;
   TEST_ASSERT_TRUE(loadSource("src/core/ota_client.cpp", src));
   TEST_ASSERT_TRUE(bodyOf(src, "\nvoid init() {", init));
-  TEST_ASSERT_EQUAL_INT(1, countOf(init, "fry::decideBoot("));
-  const size_t decide = init.find("fry::decideBoot(");
+  TEST_ASSERT_EQUAL_INT(1, countOf(init, "fry::runBootFlow("));
+  const size_t flow = init.find("fry::runBootFlow(");
   const size_t pendingRead = init.find("String pending = fry_config::getOtaPending();");
-  TEST_ASSERT_TRUE(decide != std::string::npos && pendingRead != std::string::npos && decide < pendingRead);
-  // the call sits in a block opened by #if !defined(ARDUINO_ARCH_ESP8266) that is closed before the pending read
-  const size_t open = init.rfind(kIfNot8266, decide);
-  TEST_ASSERT_TRUE_MESSAGE(open != std::string::npos, "decideBoot must be ESP32-family only");
-  const size_t close = init.find("\n#endif", decide);
+  TEST_ASSERT_TRUE(flow != std::string::npos && pendingRead != std::string::npos && flow < pendingRead);
+  const size_t open = init.rfind(kIfNot8266, flow);
+  TEST_ASSERT_TRUE_MESSAGE(open != std::string::npos, "the flow must be ESP32-family only");
+  const size_t close = init.find("\n#endif", flow);
   TEST_ASSERT_TRUE(close != std::string::npos && close < pendingRead);
-  // the probation rollback reuses manualRollback() and the boot-fail counter
-  TEST_ASSERT_TRUE(init.find("manualRollback();") != std::string::npos);
-  TEST_ASSERT_TRUE(init.find("OtaBootCounter") != std::string::npos);
 }
 
-// Crash evidence is a core dump of THIS build; leaving goes through manualRollback() after the quarantine
-// address was stored, and the address is cleared again once a different build runs.
-void test_give_up_uses_the_core_dump_and_the_quarantine_address() {
-  std::string src, init;
-  TEST_ASSERT_TRUE(loadSource("src/core/ota_client.cpp", src));
-  TEST_ASSERT_TRUE(src.find("esp_core_dump_image_check()") != std::string::npos);
-  TEST_ASSERT_TRUE(src.find("esp_core_dump_get_summary(") != std::string::npos);
-  TEST_ASSERT_TRUE(src.find("esp_ota_get_app_elf_sha256(") != std::string::npos);
-  TEST_ASSERT_TRUE(bodyOf(src, "\nvoid init() {", init));
-  const size_t store = init.find("fry_config::setOtaUrl(quarantine);");
-  const size_t roll = init.find("manualRollback();");
-  TEST_ASSERT_TRUE(store != std::string::npos && roll != std::string::npos && store < roll);
-  TEST_ASSERT_TRUE(init.find("fry::shouldClearQuarantine(") != std::string::npos);
-  TEST_ASSERT_TRUE(init.find("fry::BootAction::AbandonNow") != std::string::npos);
-}
-
+// Every use of the new decisions is inside a block that excludes the ESP8266: walk each one back through
+// the preprocessor lines and require that it sits in an ESP32-family branch.
 void test_the_policy_library_is_not_referenced_by_the_esp8266_paths() {
   std::string src;
   TEST_ASSERT_TRUE(loadSource("src/core/ota_client.cpp", src));
-  // every use of the new decisions is inside a block that excludes the ESP8266: walk each one back to
-  // the nearest preceding preprocessor line and require that it opens the ESP32-family branch
-  const char* names[] = {"fry::decideEarlyConfirm(", "fry::decideBoot(", "fry::decideProbationProgress(", "thisBuildCrashed()", "fry::oldKeepsStrikes("};
+  const char* names[] = {"fry::decideEarlyConfirm(", "fry::runBootFlow(", "fry::decideProbationProgress(",
+                         "fry::recordHealthReached(", "class RealBootPorts"};
   for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
     for (size_t pos = src.find(names[i]); pos != std::string::npos; pos = src.find(names[i], pos + 1)) {
-      // count #if/#endif between the start of the file and pos on lines that mention ARDUINO_ARCH_ESP8266
       int depthNot = 0, depthIs = 0;
       std::vector<int> stack;  // 1 = ESP32 branch, 0 = ESP8266 branch, -1 = other
       size_t line = 0;
@@ -173,25 +162,24 @@ void test_the_policy_library_is_not_referenced_by_the_esp8266_paths() {
   }
 }
 
-void test_config_has_the_attempts_record() {
+void test_config_has_the_attempts_record_and_the_quarantine_note() {
   std::string hdr, cpp;
   TEST_ASSERT_TRUE(loadSource("src/core/fry_config.h", hdr));
   TEST_ASSERT_TRUE(loadSource("src/core/fry_config.cpp", cpp));
-  TEST_ASSERT_TRUE(hdr.find("getOtaAttempts") != std::string::npos);
   TEST_ASSERT_TRUE(hdr.find("setOtaAttempts") != std::string::npos);
-  TEST_ASSERT_TRUE(hdr.find("clearOtaAttempts") != std::string::npos);
+  TEST_ASSERT_TRUE(hdr.find("setOtaQuarantined") != std::string::npos);
   TEST_ASSERT_TRUE(cpp.find("\"att\"") != std::string::npos);
+  TEST_ASSERT_TRUE(cpp.find("\"qver\"") != std::string::npos);
 }
 
 int main(int, char**) {
   UNITY_BEGIN();
   RUN_TEST(test_main_reports_the_end_of_the_startup_after_the_tunnel_start);
-  RUN_TEST(test_the_client_declares_the_startup_note);
+  RUN_TEST(test_the_client_declares_the_notes);
+  RUN_TEST(test_the_tunnel_code_reports_its_attempts);
   RUN_TEST(test_the_early_confirm_runs_in_the_loop_guard_and_keeps_the_old_rules);
-  RUN_TEST(test_the_early_confirm_needs_a_2xx_not_any_status);
-  RUN_TEST(test_init_decides_the_boot_before_the_pending_check_and_only_on_the_esp32_family);
-  RUN_TEST(test_give_up_uses_the_core_dump_and_the_quarantine_address);
+  RUN_TEST(test_init_runs_the_boot_flow_before_the_pending_check_and_only_on_the_esp32_family);
   RUN_TEST(test_the_policy_library_is_not_referenced_by_the_esp8266_paths);
-  RUN_TEST(test_config_has_the_attempts_record);
+  RUN_TEST(test_config_has_the_attempts_record_and_the_quarantine_note);
   return UNITY_END();
 }

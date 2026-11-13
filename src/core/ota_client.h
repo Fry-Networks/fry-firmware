@@ -44,6 +44,13 @@ void noteHeartbeat(int http, const char* what);
 // ESP32 family only (not defined on the ESP8266).
 void noteStartupDone();
 
+// The tunnel code reports, once each: its bring-up was attempted (made, or failed with an error; a
+// crash inside it never gets here), and the provisioning fetch completed one attempt (any outcome).
+// A pending image confirms early only after the one that applies to this boot (or a wait cap), see
+// fry::tunnelSettled() in lib/fry_core/ota_confirm.h. ESP32 family only.
+void noteTunnelBringUpAttempted();
+void noteTunnelFetchAttempted();
+
 // Call right before a restart that is not a failure (restartToApply, a USB re-key). While the image
 // is still pending, the bootloader will roll it back; this tells the previous image not to count
 // that as a strike.
