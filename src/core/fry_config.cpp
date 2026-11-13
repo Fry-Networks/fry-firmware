@@ -537,6 +537,43 @@ void setOtaRolledBack(bool rolledBack) {
   p.end();
 }
 
+// ── factory reset ─────────────────────────────────────────────────────────
+
+void factoryReset() {
+  clearWifi();
+
+  // fry namespace: remove wallet/provDone/installId/deviceToken but PRESERVE salt + minerKey.
+  KvStore p;
+  p.begin("fry", false);
+  p.remove("wallet");
+  p.remove("provDone");
+  p.remove("installId");
+  p.remove("deviceToken"); p.remove("shdwInstallId"); p.remove("shdwDevToken");  // + the heal's shadow copy of that pair
+  p.end();
+
+  clearVpn();
+
+  KvStore o;
+  o.begin("fry_ota", false);
+  o.clear();
+  o.end(); FRY_OLOSTEP_ON_FACTORY_RESET()
+}
+
+// The stale-token heal's shadow copy of the installation pair (src/core/hardwareapi_client.cpp kShadowId and
+// kShadowToken: the same two key names). A new key or a factory reset empties the live pair on purpose, and boot
+// recovery would put the shadow pair back into it. NOT part of clearInstallation(): the heal itself clears the live
+// pair right after it stashed the shadows.
+void clearIdentityShadows() {
+  KvStore p;
+  p.begin("fry", false);
+  if (p.isKey("shdwInstallId")) p.remove("shdwInstallId");  // only an erase when the key exists: no NVS error line
+  if (p.isKey("shdwDevToken")) p.remove("shdwDevToken");
+  p.end();
+}
+
+// The install-attempt record, the boot-fail write check and the quarantine note (src/core/ota_client.cpp,
+// lib/fry_core/ota_confirm.h) live below the factory reset on purpose: tools/test_factory_reset_consent.py pins
+// the line of the macro in factoryReset(), so nothing may be added above it.
 #if !defined(ARDUINO_ARCH_ESP8266)  // the install-attempt record is used by the ESP32 family only
 String getOtaAttempts() {
   KvStore p;
@@ -583,39 +620,5 @@ void setOtaQuarantined(const char* version) {
   p.end();
 }
 #endif
-
-// ── factory reset ─────────────────────────────────────────────────────────
-
-void factoryReset() {
-  clearWifi();
-
-  // fry namespace: remove wallet/provDone/installId/deviceToken but PRESERVE salt + minerKey.
-  KvStore p;
-  p.begin("fry", false);
-  p.remove("wallet");
-  p.remove("provDone");
-  p.remove("installId");
-  p.remove("deviceToken"); p.remove("shdwInstallId"); p.remove("shdwDevToken");  // + the heal's shadow copy of that pair
-  p.end();
-
-  clearVpn();
-
-  KvStore o;
-  o.begin("fry_ota", false);
-  o.clear();
-  o.end(); FRY_OLOSTEP_ON_FACTORY_RESET()
-}
-
-// The stale-token heal's shadow copy of the installation pair (src/core/hardwareapi_client.cpp kShadowId and
-// kShadowToken: the same two key names). A new key or a factory reset empties the live pair on purpose, and boot
-// recovery would put the shadow pair back into it. NOT part of clearInstallation(): the heal itself clears the live
-// pair right after it stashed the shadows.
-void clearIdentityShadows() {
-  KvStore p;
-  p.begin("fry", false);
-  if (p.isKey("shdwInstallId")) p.remove("shdwInstallId");  // only an erase when the key exists: no NVS error line
-  if (p.isKey("shdwDevToken")) p.remove("shdwDevToken");
-  p.end();
-}
 
 }  // namespace fry_config
