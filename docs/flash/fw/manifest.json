@@ -15,6 +15,14 @@
       },
       "sha256": "315384a87f91ed81c790e7559d67ce165feefd5b1ef512fbcef962e1eeb5fcd7",
       "url": "fw/firmware-esp32c3.bin"
+    },
+    "esp32s3": {
+      "factory": {
+        "sha256": "b2d739d456990d1a1d03957bc6af9e9dac6c9cfb9897af01181225ce06484a2e",
+        "url": "fw/firmware-esp32s3-factory.bin"
+      },
+      "sha256": "80c5904397b9cd4465ef182b45bee9c0292c98deb0cd78e958d90316f496eb6d",
+      "url": "fw/firmware-esp32s3.bin"
     }
   },
   "channel": "prod",

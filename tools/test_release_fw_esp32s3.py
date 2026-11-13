@@ -122,8 +122,8 @@ def main():
         check("the second step passes a committed literal --include-env esp32s3",
               re.search(r"--envs esp32,esp32c3,esp8266,esp32s3 --include-env esp8266 --include-env esp32s3 ", wf) is not None)
         check("no repo variable or rollout flag feeds the manifest", "vars." not in wf and "--rollout" not in wf)
-        check("the flasher hold check is untouched (the flasher still serves the 0.3.3 S3 parts)",
-              'assert sorted(held) == ["ESP32-S3", "ESP8266"], sorted(held)' in wf)
+        check("the flasher hold check holds only ESP8266 (the S3 parts are served from fw/)",
+              'assert sorted(held) == ["ESP8266"], sorted(held)' in wf)
         check("this test runs in the release tooling tests", "tools/test_release_fw_esp32s3.py" in wf)
 
         print("(c) the second step's assertion:")
