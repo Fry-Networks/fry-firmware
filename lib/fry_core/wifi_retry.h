@@ -27,11 +27,13 @@ const uint32_t kJoinRetryRecheckMs = 30UL * 1000UL;
 
 uint32_t joinRetryDelayMs(uint32_t failures, bool credentialClass);
 
-// A provisioning session as the retry sees it. An in-progress commit (`busy`: the FSM is taking a write
-// or applying a commit) always defers. A connected client defers only while it is active: no write for
-// kSessionIdleMs and it counts as inactive; and total deferral is capped at kDeferCapMs.
+// A provisioning session as the retry sees it. A commit being joined (`busy`) always defers; it ends by
+// itself. Everything else, a connected client or an SSID written without a commit (the client may be gone,
+// the FSM stays in Provisioning), defers only while it is active: no connection or write for kSessionIdleMs
+// and it counts as inactive; and total deferral is capped at kDeferCapMs.
 struct SessionState {
-  bool busy = false;
+  bool busy = false;          // a commit is being joined (FSM Connecting): bounded by the join timeout
+  bool provisioning = false;  // an SSID was written and no commit followed yet (FSM Provisioning)
   bool clientConnected = false;
   uint32_t msSinceActivity = 0;  // since the client connected or last wrote
 };

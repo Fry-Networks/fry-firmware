@@ -17,7 +17,9 @@ using fry::SessionState;
 
 namespace {
 SessionState none() { return SessionState(); }
-SessionState busy() { SessionState x; x.busy = true; x.clientConnected = true; return x; }
+SessionState busy() { SessionState x; x.busy = true; x.clientConnected = true; return x; }  // a commit being joined
+// The FSM sits in Provisioning (an SSID was written, no commit yet); the client may or may not still be there.
+SessionState writing(uint32_t idleMs, bool connected) { SessionState x; x.provisioning = true; x.clientConnected = connected; x.msSinceActivity = idleMs; return x; }
 SessionState client(uint32_t idleMs) { SessionState x; x.clientConnected = true; x.msSinceActivity = idleMs; return x; }
 }  // namespace
 
@@ -94,6 +96,37 @@ void test_a_due_retry_waits_for_a_commit_in_progress_for_as_long_as_it_lasts() {
   // it ends: the retry resumes after the quiet time, not at once
   TEST_ASSERT_EQUAL((int)RetryAction::Wait, (int)r.decide(now - fry::kJoinRetryQuietMs + 1000, none(), true));
   TEST_ASSERT_EQUAL((int)RetryAction::Join, (int)r.decide(now, none(), true));
+}
+
+void test_a_provisioning_session_with_recent_activity_defers_the_retry() {
+  JoinRetry r;
+  r.onFailure(0, ProvErr::BadSsid);
+  TEST_ASSERT_EQUAL((int)RetryAction::DeferSession, (int)r.decide(30000, writing(1000, true), true));
+  TEST_ASSERT_EQUAL((int)RetryAction::DeferSession, (int)r.decide(45000, writing(fry::kSessionIdleMs - 1, false), true));
+}
+
+void test_an_abandoned_provisioning_session_stops_counting_after_the_idle_time() {
+  JoinRetry r;
+  r.onFailure(0, ProvErr::BadSsid);
+  // SSID written, client gone, nothing for 5 minutes: the FSM is still in Provisioning, the retry must go on
+  TEST_ASSERT_EQUAL((int)RetryAction::Join, (int)r.decide(30000, writing(fry::kSessionIdleMs, false), true));
+  JoinRetry q;
+  q.onFailure(0, ProvErr::BadSsid);
+  TEST_ASSERT_EQUAL((int)RetryAction::Join, (int)q.decide(30000, writing(fry::kSessionIdleMs, true), true));  // client idle but connected
+}
+
+void test_a_provisioning_session_is_capped_like_an_active_client() {
+  JoinRetry r;
+  r.onFailure(0, ProvErr::BadSsid);
+  uint32_t now = 30000;
+  RetryAction last = RetryAction::Wait;
+  while (now < 30000 + fry::kDeferCapMs + 2 * fry::kJoinRetryQuietMs) {
+    last = r.decide(now, writing(1000, true), true);
+    if (last == RetryAction::Join) break;
+    now += fry::kJoinRetryQuietMs;
+  }
+  TEST_ASSERT_EQUAL((int)RetryAction::Join, (int)last);
+  TEST_ASSERT_TRUE(now - 30000 >= fry::kDeferCapMs);
 }
 
 void test_a_client_with_recent_writes_defers_the_retry() {
@@ -249,6 +282,20 @@ void test_an_active_session_is_not_disturbed_and_the_retry_resumes_after_it() {
   TEST_ASSERT_EQUAL_INT(2, b.joins);
 }
 
+void test_a_board_with_an_abandoned_setup_rejoins_its_stored_network() {
+  Board b;
+  b.failJoins = 1;  // down at boot; a phone writes an SSID at ~40 s and leaves
+  uint32_t wroteAt = 0;
+  while (b.now < 3600000 && b.phase != fry::BootPhase::Ready) {
+    if (b.now >= 40000 && wroteAt == 0) wroteAt = b.now;
+    b.session = wroteAt ? writing(b.now - wroteAt, false) : none();
+    b.pass(1000);
+  }
+  TEST_ASSERT_EQUAL((int)fry::BootPhase::Ready, (int)b.phase);
+  TEST_ASSERT_TRUE(b.now >= wroteAt + fry::kSessionIdleMs);  // not while the setup could still be going on
+  TEST_ASSERT_TRUE(b.now <= wroteAt + fry::kSessionIdleMs + 2 * fry::kJoinRetryQuietMs + 20000);
+}
+
 void test_an_overnight_ble_client_cannot_keep_the_board_offline() {
   Board b;
   b.failJoins = 1;
@@ -295,6 +342,9 @@ int main(int, char**) {
   RUN_TEST(test_a_join_that_succeeds_forgets_everything);
   RUN_TEST(test_the_millisecond_clock_wrapping_does_not_fire_or_stall_the_retry);
   RUN_TEST(test_a_due_retry_waits_for_a_commit_in_progress_for_as_long_as_it_lasts);
+  RUN_TEST(test_a_provisioning_session_with_recent_activity_defers_the_retry);
+  RUN_TEST(test_an_abandoned_provisioning_session_stops_counting_after_the_idle_time);
+  RUN_TEST(test_a_provisioning_session_is_capped_like_an_active_client);
   RUN_TEST(test_a_client_with_recent_writes_defers_the_retry);
   RUN_TEST(test_an_idle_client_does_not_block_the_retry);
   RUN_TEST(test_total_deferral_by_an_active_client_is_capped);
@@ -305,6 +355,7 @@ int main(int, char**) {
   RUN_TEST(test_provisioning_stays_available_between_retries);
   RUN_TEST(test_the_retry_goes_on_for_ever_at_the_capped_delay);
   RUN_TEST(test_an_active_session_is_not_disturbed_and_the_retry_resumes_after_it);
+  RUN_TEST(test_a_board_with_an_abandoned_setup_rejoins_its_stored_network);
   RUN_TEST(test_an_overnight_ble_client_cannot_keep_the_board_offline);
   RUN_TEST(test_a_rejected_password_class_is_retried_too_only_more_slowly);
   RUN_TEST(test_no_stored_settings_means_no_join);

@@ -368,7 +368,8 @@ fry::ProvState state() { return s_fsm.state(); }
 fry::SessionState sessionState() {
   fry::SessionState s;
   const fry::ProvState st = s_fsm.state();
-  s.busy = st == fry::ProvState::Provisioning || st == fry::ProvState::Connecting;
+  s.busy = st == fry::ProvState::Connecting;
+  s.provisioning = st == fry::ProvState::Provisioning;
   NimBLEServer* server = s_bleUp ? NimBLEDevice::getServer() : nullptr;
   s.clientConnected = server && server->getConnectedCount() > 0;
   s.msSinceActivity = static_cast<uint32_t>(millis() - s_lastBleActivityMs);

@@ -41,7 +41,7 @@ void JoinRetry::defer(uint32_t nowMs, uint32_t ms) {
 
 RetryAction JoinRetry::decide(uint32_t nowMs, const SessionState& s, bool settingsUsable) {
   if (!due(nowMs)) return RetryAction::Wait;
-  const bool active = s.busy || (s.clientConnected && s.msSinceActivity < kSessionIdleMs);
+  const bool active = s.busy || ((s.clientConnected || s.provisioning) && s.msSinceActivity < kSessionIdleMs);
   if (active) {
     if (!_deferring) {
       _deferring = true;
