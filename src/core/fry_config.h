@@ -119,6 +119,11 @@ void setOtaPlannedRestart(bool planned);
 // image where the bootloader left none.
 bool getOtaRolledBack();
 void setOtaRolledBack(bool rolledBack);
+// fry_ota/att: "<version>#<n>", the install attempts of the running image (lib/fry_core/ota_confirm.h).
+// Written only by the image itself, so it survives a rollback to a previous image that does not know it.
+String getOtaAttempts();
+void setOtaAttempts(const char* record);
+void clearOtaAttempts();
 
 // Wipes fry_wifi, fry/wallet, fry/provDone, fry/installId, fry/deviceToken, fry_vpn and fry_ota.
 // PRESERVES fry/salt and fry/minerKey so a re-provisioned board keeps one server identity

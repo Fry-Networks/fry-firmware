@@ -537,6 +537,26 @@ void setOtaRolledBack(bool rolledBack) {
   p.end();
 }
 
+String getOtaAttempts() {
+  KvStore p;
+  p.begin("fry_ota", true);
+  String v = p.getString("att", "");
+  p.end();
+  return v;
+}
+void setOtaAttempts(const char* record) {
+  KvStore p;
+  p.begin("fry_ota", false);
+  p.putString("att", record ? record : "");
+  p.end();
+}
+void clearOtaAttempts() {
+  KvStore p;
+  p.begin("fry_ota", false);
+  p.remove("att");
+  p.end();
+}
+
 // ── factory reset ─────────────────────────────────────────────────────────
 
 void factoryReset() {

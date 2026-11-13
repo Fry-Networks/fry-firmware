@@ -126,6 +126,7 @@ void attemptWifiConnect() {
     fry_trigger_register_now();  // T5 overrides; weak default just logs and returns
 #if !defined(ARDUINO_ARCH_ESP8266)
     fry_trigger_start_vpn();  // T6 overrides
+    fry_ota::noteStartupDone();  // the tunnel bring-up attempt is over: a pending image may confirm itself now
 #endif
     FRY_OLOSTEP_ON_READY()
     setPhase(BootPhase::Ready);
