@@ -22,6 +22,12 @@ void init(const char* deviceName, const char* minerKey);
 void loop();
 
 fry::ProvState state();
+
+#if !defined(ARDUINO_ARCH_ESP8266)
+// A provisioning session is in progress: a client is connected, or the FSM is taking a write or
+// applying a commit. The background retry of the stored network (lib/fry_core/wifi_retry.h) waits.
+bool sessionActive();
+#endif
 fry::ProvErr lastError();
 
 // True exactly while state() == Connecting (PROTOCOL.md state 2) — the boot sequence's cue to

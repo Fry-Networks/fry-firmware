@@ -278,6 +278,17 @@ void test_a_silent_failure_is_not_force_confirmed_either() {
   TEST_ASSERT_EQUAL((int)BootAction::Continue, (int)d.action);
 }
 
+void test_unreadable_evidence_never_confirms_but_a_silent_failure_is_still_given_up() {
+  fry::BootInputs b = in(true, kLast, 0, kSw, true, false, false, true, /*earlierHealth=*/true);
+  b.evidenceUnavailable = true;  // no dump partition: a missing dump proves nothing
+  TEST_ASSERT_EQUAL((int)BootAction::Continue, (int)fry::decideBoot(b).action);
+  b.record.healthy = false;
+  TEST_ASSERT_EQUAL((int)BootAction::AbandonNow, (int)fry::decideBoot(b).action);
+  b.evidenceUnavailable = false;
+  b.record.healthy = true;
+  TEST_ASSERT_EQUAL((int)BootAction::ConfirmNow, (int)fry::decideBoot(b).action);
+}
+
 // ---- the last permitted attempt (previous image keeps strikes) -------------------------------------
 
 void test_with_strikes_the_last_attempt_is_never_force_confirmed() {
@@ -368,6 +379,7 @@ int main(int, char**) {
   RUN_TEST(test_external_resets_after_an_earlier_attempt_reached_the_api_confirm_at_once);
   RUN_TEST(test_a_dump_of_this_build_means_never_force_confirm);
   RUN_TEST(test_a_silent_failure_is_not_force_confirmed_either);
+  RUN_TEST(test_unreadable_evidence_never_confirms_but_a_silent_failure_is_still_given_up);
   RUN_TEST(test_with_strikes_the_last_attempt_is_never_force_confirmed);
   RUN_TEST(test_probation_at_the_last_attempt_only_gives_up_with_a_dump_and_a_way_out);
   RUN_TEST(test_strike_detection_and_the_quarantine_address);

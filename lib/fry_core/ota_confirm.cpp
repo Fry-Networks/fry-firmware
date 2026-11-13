@@ -24,10 +24,10 @@ ResetClass classifyResetReason(uint32_t r) {
   }
 }
 
-bool tunnelSettled(bool configStored, bool bringUpAttempted, bool fetchAttempted, uint32_t uptimeMs) {
+bool tunnelSettled(bool configStored, bool bringUpAttempted, bool fetchAttempted, uint32_t waitedMs) {
   if (bringUpAttempted) return true;
   if (!configStored && fetchAttempted) return true;
-  return uptimeMs >= kTunnelWaitCapMs;
+  return waitedMs >= kTunnelWaitCapMs;
 }
 
 bool coreHealthy(const CoreHealth& h, uint32_t minFreeHeap) {
@@ -178,7 +178,9 @@ BootDecision decideBoot(const BootInputs& in) {
     } else {
       const bool silentFailure = !in.record.healthy;  // no earlier attempt ever got Wi-Fi + a 2xx
       if (!in.crashEvidence && !silentFailure) {
-        d.action = BootAction::ConfirmNow;  // external resets: this attempt sticks
+        // External resets: this attempt sticks. If the dump cannot be read, a missing dump proves nothing:
+        // neither confirm nor give up, the behaviour stays as it was.
+        if (!in.evidenceUnavailable) d.action = BootAction::ConfirmNow;
       } else if (in.otherSlotIntact) {
         giveUp(in, &d);
       }

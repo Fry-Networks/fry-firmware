@@ -120,6 +120,7 @@ uint32_t s_verifyMs = 0;        // time with the station associated + an IP, sin
 unsigned long s_lastGuardMs = 0;
 // Early confirm and probation (lib/fry_core/ota_confirm.h).
 bool s_startupDone = false;     // the tunnel bring-up attempt is over (main.cpp: noteStartupDone)
+unsigned long s_startupDoneMs = 0;  // when
 uint8_t s_loopPasses = 0;       // loopGuard() passes since then
 bool s_earlyAttempted = false;  // loopGuard's one early confirm attempt; answers retry after it
 bool s_earlyOk = false;         // core health was proven: tryMarkValid() skips the settle window
@@ -907,7 +908,10 @@ void noteHeartbeat(int http, const char* what) {
 }
 
 #if !defined(ARDUINO_ARCH_ESP8266)
-void noteStartupDone() { s_startupDone = true; }
+void noteStartupDone() {
+  s_startupDone = true;
+  s_startupDoneMs = millis();
+}
 void noteTunnelBringUpAttempted() { s_tunnelBringUp = true; }
 void noteTunnelFetchAttempted() { s_tunnelFetch = true; }
 #endif
@@ -935,7 +939,8 @@ void loopGuard() {
     h.staUp = fry_wifi::isConnected();
     h.apiOk2xx = s_heartbeat.ageS(now) >= 0;  // ageS() is -1 until a 2xx arrived this boot
     h.startupDone = s_startupDone;
-    h.tunnelSettled = fry::tunnelSettled(fry_config::hasVpnConfig(), s_tunnelBringUp, s_tunnelFetch, now);
+    h.tunnelSettled = fry::tunnelSettled(fry_config::hasVpnConfig(), s_tunnelBringUp, s_tunnelFetch,
+                                        s_startupDone ? static_cast<uint32_t>(now - s_startupDoneMs) : 0);
     h.loopPasses = s_loopPasses;
     h.freeHeap = ESP.getFreeHeap();
     h.uptimeMs = now;

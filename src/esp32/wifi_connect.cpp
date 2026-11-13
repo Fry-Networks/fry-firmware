@@ -62,6 +62,19 @@ bool connect(const char* ssid, const char* pass, uint32_t timeoutMs, fry::ProvEr
     eventRegistered = true;
   }
 
+#if defined(FRY_TEST_FAULT) && FRY_TEST_FAULT == 4
+  // Test channel only (tools/fry_prebuild.py defines FRY_TEST_FAULT for *_test envs and refuses everything
+  // else): the first two joins after a boot fail as if the network were down, so the background retry of
+  // the stored network (lib/fry_core/wifi_retry.h) can be watched on hardware.
+  static int s_faultJoins = 0;
+  if (s_faultJoins < 2) {
+    s_faultJoins++;
+    Serial.printf("[fault] FRY_TEST_FAULT=4 - join %d refused\n", s_faultJoins);
+    delay(5000);
+    if (errOut) *errOut = fry::ProvErr::BadSsid;
+    return false;
+  }
+#endif
   WiFi.persistent(false);  // don't wear the flash — we persist credentials ourselves
   WiFi.mode(WIFI_STA);
   WiFi.disconnect(true);

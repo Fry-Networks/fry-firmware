@@ -48,7 +48,9 @@ const uint32_t kTunnelWaitCapMs = 120000UL;
 // crashes in the tunnel code is still caught by the bootloader. Settled when the bring-up was
 // attempted; or no config is stored and the provisioning fetch completed one attempt (any outcome);
 // or the wait hit its cap, so a tunnel service outage cannot block validation.
-bool tunnelSettled(bool configStored, bool bringUpAttempted, bool fetchAttempted, uint32_t uptimeMs);
+// `waitedMs` is the time since the start-up note (the VPN start call returned), so a Wi-Fi join that
+// succeeds late still waits for the bring-up attempt.
+bool tunnelSettled(bool configStored, bool bringUpAttempted, bool fetchAttempted, uint32_t waitedMs);
 
 // Everything but the uptime floor.
 bool coreHealthy(const CoreHealth& h, uint32_t minFreeHeap);
@@ -106,6 +108,7 @@ struct BootInputs {
   bool otherSlotIntact = false;  // the previous OTA slot can be booted
   uint8_t failLimit = 3;         // OTA_BOOT_FAIL_LIMIT
   bool crashEvidence = false;    // a core dump written by THIS build exists
+  bool evidenceUnavailable = false;  // the core dump cannot be read: absence of a dump proves nothing
   bool oldKeepsStrikes = false;  // the previous image counts strikes (see oldKeepsStrikes())
   bool quarantineAvailable = false;  // the address can be stored (derivable and no other override)
 };
@@ -126,8 +129,8 @@ struct BootDecision {
 //   n >= kStickyInstallAttempt:
 //     previous image keeps strikes -> never force-confirm; with a core dump of this build leave at once
 //       (it counts the strike), otherwise the strikes bound the loop;
-//     strike-less previous image: no dump AND an earlier attempt reached health -> the resets were
-//       external, confirm at once; a dump, or no earlier attempt ever reached health (a silent failure)
+//     strike-less previous image: no dump (readable) AND an earlier attempt reached health -> the resets
+//       were external, confirm at once; a dump, or no earlier attempt ever reached health (a silent failure)
 //       -> give up through the quarantine address, or do nothing special when it cannot be stored.
 // Confirmed boot with an open record: crash-class boots count (a brownout only with a dump); at the
 //   limit roll back while n < kStickyInstallAttempt, later only with a dump and a way out.

@@ -16,7 +16,8 @@
 // Test-only fault injection (tools/fry_prebuild.py sets it from FRY_TEST_FAULT for ESP32-family
 // *_test envs and refuses everything else): 1 abort in setup() after the banner, 2 never
 // heartbeat, 3 crash 60 s after the first heartbeat (after the early confirm: probation counts it, and
-// three such boots in a row roll the image back; see lib/fry_core/ota_confirm.h).
+// three such boots in a row roll the image back; see lib/fry_core/ota_confirm.h), 4 the first two Wi-Fi
+// joins after a boot fail (src/esp32/wifi_connect.cpp), to watch the background retry of the stored network.
 #if defined(FRY_TEST_FAULT) && !defined(FRY_OTA_TEST_CHANNEL)
 #error "FRY_TEST_FAULT is for *_test (test OTA channel) builds only"
 #endif

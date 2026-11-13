@@ -54,6 +54,9 @@ BootFlowResult runBootFlow(OtaBootPorts& p, const BootFlowConfig& c) {
     bi.otherSlotIntact = p.otherSlotIntact();
     const CrashEvidence ev = p.crashEvidence();
     bi.crashEvidence = ev == CrashEvidence::Yes;
+    bi.evidenceUnavailable = ev == CrashEvidence::Unavailable;
+    // A panic or watchdog reset IS evidence even when the dump cannot be read.
+    if (bi.evidenceUnavailable && !bi.pendingBoot && bi.reset == ResetClass::Crash) bi.crashEvidence = true;
     char badver[32] = {0};
     p.getBadVer(badver, sizeof(badver));
     bi.oldKeepsStrikes = oldKeepsStrikes(badver, p.getBadN(), c.version);
@@ -86,8 +89,8 @@ BootFlowResult runBootFlow(OtaBootPorts& p, const BootFlowConfig& c) {
       say(p, "ota: NVS write failed for the install attempt record of %s - the count stays as it was", c.version);
     }
     if (bi.pendingBoot) {
-      say(p, "ota: install attempt %u/%u of %s", static_cast<unsigned>(bd.record.n),
-          static_cast<unsigned>(kStickyInstallAttempt), c.version);
+      say(p, "ota: install attempt %u of %s (decision at attempt %u)", static_cast<unsigned>(bd.record.n), c.version,
+          static_cast<unsigned>(kStickyInstallAttempt));
     } else {
       say(p, "ota: probation for %s - %u/%u crash boots without health, reset_reason=%u", c.version,
           static_cast<unsigned>(bd.failCount), static_cast<unsigned>(c.failLimit),
@@ -100,8 +103,8 @@ BootFlowResult runBootFlow(OtaBootPorts& p, const BootFlowConfig& c) {
 
   switch (bd.action) {
     case BootAction::ConfirmNow:
-      say(p, "ota: install attempt %u/%u of %s - no crash evidence and an earlier attempt reached the API, confirmed at once",
-          static_cast<unsigned>(bd.record.n), static_cast<unsigned>(kStickyInstallAttempt), c.version);
+      say(p, "ota: install attempt %u of %s - no crash evidence and an earlier attempt reached the API, confirmed at once",
+          static_cast<unsigned>(bd.record.n), c.version);
       res.outcome = FlowOutcome::ConfirmNow;
       return res;
     case BootAction::RollbackNow:
@@ -137,8 +140,8 @@ BootFlowResult runBootFlow(OtaBootPorts& p, const BootFlowConfig& c) {
       break;
   }
   if (bi.pendingBoot && bd.record.n >= kStickyInstallAttempt) {
-    say(p, "ota: install attempt %u/%u of %s - not confirmed at once (crash evidence, a failing earlier attempt or strikes)",
-        static_cast<unsigned>(bd.record.n), static_cast<unsigned>(kStickyInstallAttempt), c.version);
+    say(p, "ota: install attempt %u of %s - not confirmed at once (crash evidence, unreadable evidence, a failing earlier attempt or strikes)",
+        static_cast<unsigned>(bd.record.n), c.version);
   }
   return res;
 }

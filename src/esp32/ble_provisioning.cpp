@@ -362,6 +362,12 @@ void loop() {
 }
 
 fry::ProvState state() { return s_fsm.state(); }
+bool sessionActive() {
+  const fry::ProvState st = s_fsm.state();
+  if (st == fry::ProvState::Provisioning || st == fry::ProvState::Connecting) return true;
+  NimBLEServer* server = s_bleUp ? NimBLEDevice::getServer() : nullptr;
+  return server && server->getConnectedCount() > 0;
+}
 fry::ProvErr lastError() { return s_fsm.error(); }
 bool readyToConnect() { return s_fsm.readyToConnect(); }
 

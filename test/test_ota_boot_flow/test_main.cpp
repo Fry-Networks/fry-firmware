@@ -112,7 +112,7 @@ void test_the_first_pending_boot_opens_a_record_and_says_so() {
   const BootFlowResult r = fry::runBootFlow(f, cfg());
   TEST_ASSERT_EQUAL((int)FlowOutcome::Continue, (int)r.outcome);
   TEST_ASSERT_EQUAL_STRING("0.4.29#1", f.att.c_str());
-  TEST_ASSERT_TRUE(f.logged("ota: install attempt 1/3 of 0.4.29"));
+  TEST_ASSERT_TRUE(f.logged("ota: install attempt 1 of 0.4.29 (decision at attempt 3)"));
   TEST_ASSERT_TRUE(r.inProbation);
   TEST_ASSERT_FALSE(f.logged("crash evidence"));  // nothing is read from flash for a build without a record
   TEST_ASSERT_EQUAL(0, f.selected);
@@ -298,7 +298,7 @@ void test_the_last_attempt_lines() {
   f.att = "0.4.29#2#1";
   const BootFlowResult r = fry::runBootFlow(f, cfg());
   TEST_ASSERT_EQUAL((int)FlowOutcome::ConfirmNow, (int)r.outcome);
-  TEST_ASSERT_TRUE(f.logged("ota: install attempt 3/3 of 0.4.29"));
+  TEST_ASSERT_TRUE(f.logged("ota: install attempt 3 of 0.4.29"));
   TEST_ASSERT_TRUE(f.logged("an earlier attempt reached the API, confirmed at once"));
   TEST_ASSERT_EQUAL(0, f.selected);
 }
@@ -522,16 +522,27 @@ void test_when_the_previous_image_cannot_be_stopped_the_image_is_not_force_confi
   TEST_ASSERT_TRUE(b.installs > fry::kStickyInstallAttempt);
 }
 
-void test_unavailable_core_dump_with_an_earlier_healthy_attempt_confirms_at_the_last_one() {
-  Board b;
+void test_unreadable_evidence_is_never_read_as_no_evidence_at_the_last_attempt() {
+  Board b;  // no core dump partition: a missing dump proves nothing
   b.coredump = false;
   b.install();
-  int guard = 0;
-  while (guard++ < 50) {
-    if (b.runNew(kSw, 20000)) break;
-  }
-  TEST_ASSERT_TRUE(b.confirmedEver);
-  TEST_ASSERT_EQUAL_INT(fry::kStickyInstallAttempt, b.installs);
+  for (int i = 0; i < 12; i++) b.runNew(kSw, 20000);  // external-looking resets, the API answered at 8 s each time
+  TEST_ASSERT_FALSE(b.confirmedEver);                  // not force-confirmed
+  TEST_ASSERT_FALSE(b.nvs.url == kQuarantine);         // and not given up either: the behaviour stays as it was
+  TEST_ASSERT_TRUE(b.nvs.logged("not confirmed at once"));
+}
+
+void test_a_panic_is_evidence_even_when_the_dump_cannot_be_read() {
+  Board b;  // a confirmed image panics at 300 s, three times; the dump partition is missing
+  b.coredump = false;
+  b.install();
+  b.rec.n = 0;
+  TEST_ASSERT_TRUE(b.runNew(kSw, 300000, 8000, true));
+  b.nvs.att = "0.4.29#3#1";  // at the last attempt, so a plain rollback is no longer allowed without evidence
+  TEST_ASSERT_TRUE(b.runNew(kPanic, 300000, 8000, true));
+  TEST_ASSERT_TRUE(b.runNew(kPanic, 300000, 8000, true));
+  TEST_ASSERT_FALSE(b.runNew(kPanic, 300000, 8000, true));
+  TEST_ASSERT_EQUAL_STRING(kQuarantine, b.nvs.url.c_str());
 }
 
 // ---- probation (M1, S3) ---------------------------------------------------------------------------
@@ -680,7 +691,8 @@ int main(int, char**) {
   RUN_TEST(test_crash_evidence_stops_the_forced_confirm_and_the_board_ends_on_the_previous_image);
   RUN_TEST(test_crash_evidence_with_a_previous_image_that_keeps_strikes_needs_no_address);
   RUN_TEST(test_when_the_previous_image_cannot_be_stopped_the_image_is_not_force_confirmed);
-  RUN_TEST(test_unavailable_core_dump_with_an_earlier_healthy_attempt_confirms_at_the_last_one);
+  RUN_TEST(test_unreadable_evidence_is_never_read_as_no_evidence_at_the_last_attempt);
+  RUN_TEST(test_a_panic_is_evidence_even_when_the_dump_cannot_be_read);
   RUN_TEST(test_three_consecutive_boots_that_panic_at_300_s_roll_back_on_the_third);
   RUN_TEST(test_the_same_at_500_s);
   RUN_TEST(test_a_boot_that_is_healthy_past_the_horizon_with_a_poc_clears_the_count);
