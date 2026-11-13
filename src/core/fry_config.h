@@ -121,6 +121,7 @@ bool getOtaRolledBack();
 void setOtaRolledBack(bool rolledBack);
 // fry_ota/att: "<version>#<n>", the install attempts of the running image (lib/fry_core/ota_confirm.h).
 // Written only by the image itself, so it survives a rollback to a previous image that does not know it.
+// ESP32 family only (not defined on the ESP8266).
 String getOtaAttempts();
 void setOtaAttempts(const char* record);
 void clearOtaAttempts();

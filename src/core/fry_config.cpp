@@ -537,6 +537,7 @@ void setOtaRolledBack(bool rolledBack) {
   p.end();
 }
 
+#if !defined(ARDUINO_ARCH_ESP8266)  // the install-attempt record is used by the ESP32 family only
 String getOtaAttempts() {
   KvStore p;
   p.begin("fry_ota", true);
@@ -556,6 +557,7 @@ void clearOtaAttempts() {
   p.remove("att");
   p.end();
 }
+#endif
 
 // ── factory reset ─────────────────────────────────────────────────────────
 

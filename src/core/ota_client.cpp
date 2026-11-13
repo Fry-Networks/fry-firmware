@@ -849,11 +849,9 @@ void noteHeartbeat(int http, const char* what) {
 #endif
 }
 
-void noteStartupDone() {
 #if !defined(ARDUINO_ARCH_ESP8266)
-  s_startupDone = true;
+void noteStartupDone() { s_startupDone = true; }
 #endif
-}
 
 void notePlannedRestart() {
   if (s_confirmPending) fry_config::setOtaPlannedRestart(true);

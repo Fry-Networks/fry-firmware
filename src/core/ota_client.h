@@ -41,7 +41,7 @@ void noteHeartbeat(int http, const char* what);
 // Call once the boot's start-up work is over: the tunnel bring-up attempt (made, or skipped because
 // there is no config or no clock yet) has returned. A pending image is confirmed early only after
 // this, so an image that crashes in the tunnel start is still rolled back by the bootloader.
-// ESP32 family only; a no-op elsewhere.
+// ESP32 family only (not defined on the ESP8266).
 void noteStartupDone();
 
 // Call right before a restart that is not a failure (restartToApply, a USB re-key). While the image
