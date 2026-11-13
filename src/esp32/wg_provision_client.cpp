@@ -12,6 +12,7 @@
 #include "../core/hardwareapi_client.h"
 #include "../core/http_tls.h"
 #include "../core/miner_key.h"
+#include "../core/ota_client.h"
 #include "log_throttle.h"
 #include "ntp_kick.h"
 #include "config.h"
@@ -205,6 +206,9 @@ void tick() {
       http.end();
     }
   }
+
+  // A fetch that really went out (token, heap and clock were there) has completed one attempt, whatever its outcome.
+  if (hasToken && heapOk && clockOk) fry_ota::noteTunnelFetchAttempted();
 
   if (parsedOk) {
     uint32_t staIp = arduinoIpToHostOrder(static_cast<uint32_t>(WiFi.localIP()));

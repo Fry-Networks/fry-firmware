@@ -19,6 +19,7 @@
 
 #include "../core/fry_config.h"
 #include "../core/hardwareapi_client.h"
+#include "../core/ota_client.h"
 #include "log_throttle.h"
 #include "relay_dns.h"
 #include "relay_guard.h"
@@ -968,6 +969,7 @@ bool bringUp() {
     s_initAttempted = true;
     err = esp_wireguard_init(&s_wgConfig, &s_wgCtx);
     if (err != ESP_OK) {
+      fry_ota::noteTunnelBringUpAttempted();
       Serial.printf("wg: init failed err=%d\n", static_cast<int>(err));
       return false;
     }
@@ -978,6 +980,7 @@ bool bringUp() {
     Serial.printf("wg: endpoint DNS pending, retry %d/%d\n", attempt, WG_CONNECT_ATTEMPTS);
     delay(WG_CONNECT_RETRY_MS);
   }
+  fry_ota::noteTunnelBringUpAttempted();  // returned (a crash inside the calls above never gets here)
   if (err != ESP_OK) {
     Serial.printf("wg: connect failed err=%d\n", static_cast<int>(err));
     return false;

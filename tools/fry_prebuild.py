@@ -17,6 +17,14 @@ _smuggled = " ".join(env.GetProjectOption("build_flags", []) or []) + " " + os.e
 if not _is_test_env and ("FRY_TEST_FAULT" in _smuggled or "FRY_OTA_TEST_CHANNEL" in _smuggled):
     print("fry_prebuild: REFUSED - FRY_TEST_FAULT / FRY_OTA_TEST_CHANNEL in the flags of %s, which is not a *_test env" % _env_name)
     env.Exit(1)
+# Bench fault macro (include/bench_fault.h): only the fault-images workflow may pass it (tools/bench_guard.py).
+import sys
+sys.path.insert(0, os.path.join(env.subst("$PROJECT_DIR"), "tools"))
+import bench_guard
+_bench_problem = bench_guard.check(_env_name, _smuggled, os.environ)
+if _bench_problem:
+    print("fry_prebuild: REFUSED - %s" % _bench_problem)
+    env.Exit(1)
 if _fault:
     if _fault not in ("1", "2", "3"):
         print("fry_prebuild: REFUSED - FRY_TEST_FAULT must be 1, 2 or 3 (got %r)" % _fault)

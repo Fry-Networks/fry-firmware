@@ -14,6 +14,12 @@ namespace fry_wifi {
 // including an undiagnosed failure); see lib/fry_core/wifi_reason.h.
 bool connect(const char* ssid, const char* pass, uint32_t timeoutMs, fry::ProvErr* errOut);
 
+#if !defined(ARDUINO_ARCH_ESP8266)
+// Called every 250 ms while connect() waits (ESP32 family), so the factory-reset button is still seen
+// during the join, which now recurs in the background (lib/fry_core/wifi_retry.h).
+void setWaitHook(void (*hook)());
+#endif
+
 bool isConnected();
 String localIp();
 int8_t rssi();

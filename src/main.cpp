@@ -20,6 +20,9 @@
 #include "core/trigger_hooks.h"
 #include "core/vpn_relay.h"
 #include "core/wifi_station.h"
+#if !defined(ARDUINO_ARCH_ESP8266)
+#include "wifi_retry.h"
+#endif
 #include "heap_gate.h"
 #include "flash_fmt.h"
 #include "key_policy.h"
@@ -43,6 +46,9 @@ unsigned long s_lastResetHintMs = 0;
 char s_minerKey[40] = "FEM-PENDING";
 char s_deviceName[32] = {0};
 unsigned long s_lastHealthLogMs = 0;
+#if !defined(ARDUINO_ARCH_ESP8266)
+fry::JoinRetry s_joinRetry;  // background retry of the stored network (ESP32 family only)
+#endif
 
 // The only way to change phase. Routing every transition through the policy means no call site
 // can forget to bring the provisioning transport up — which is precisely how a board whose stored
@@ -111,6 +117,12 @@ void attemptWifiConnect() {
   fry::ProvErr err = fry::ProvErr::None;
   if (fry_wifi::connect(ssid, pass, WIFI_CONNECT_TIMEOUT_MS, &err)) {
     fry_provisioning::notifyWifiUp();
+#if !defined(ARDUINO_ARCH_ESP8266)
+    if (s_joinRetry.failures() > 0) {
+      FRY_PRINTF("wifi: stored network reachable again after %u failed joins\n", static_cast<unsigned>(s_joinRetry.failures()));
+    }
+    s_joinRetry.onSuccess();
+#endif
     // registerInstallation() (T5's strong override) reports its own real outcome via
     // notifyApiOk()/notifyApiFail() — it must NOT be assumed to succeed here. Registration is
     // one optional subsystem, not a boot gate: VPN and the Ready-phase report loop start
@@ -126,6 +138,7 @@ void attemptWifiConnect() {
     fry_trigger_register_now();  // T5 overrides; weak default just logs and returns
 #if !defined(ARDUINO_ARCH_ESP8266)
     fry_trigger_start_vpn();  // T6 overrides
+    fry_ota::noteStartupDone();  // the tunnel bring-up attempt is over: a pending image may confirm itself now
 #endif
     FRY_OLOSTEP_ON_READY()
     setPhase(BootPhase::Ready);
@@ -134,6 +147,11 @@ void attemptWifiConnect() {
     // that booted WITH credentials this is also where the transport starts for the first time —
     // notifyWifiAuthFail() below would otherwise be shouting down a radio that was never on.
     setPhase(BootPhase::AwaitingProvisioning);
+#if !defined(ARDUINO_ARCH_ESP8266)
+    s_joinRetry.onFailure(static_cast<uint32_t>(millis()), err);
+    FRY_PRINTF("wifi: stored network not reachable - retry %u in %us\n", static_cast<unsigned>(s_joinRetry.failures()),
+               static_cast<unsigned>(s_joinRetry.lastDelayMs() / 1000UL));
+#endif
     if (err == fry::ProvErr::NoIp) {
       fry_provisioning::notifyWifiNoIp();
     } else if (err == fry::ProvErr::BadSsid) {
@@ -143,6 +161,20 @@ void attemptWifiConnect() {
     }
   }
 }
+
+#if !defined(ARDUINO_ARCH_ESP8266)
+// True when the stored network should be joined again now (see lib/fry_core/wifi_retry.h). The stored
+// settings are read only when a retry is due.
+bool storedNetworkRetryNow() {
+  const uint32_t now = static_cast<uint32_t>(millis());
+  if (!s_joinRetry.due(now)) return false;
+  const bool usable = fry::hasBootCredentials(fry_config::hasWifi(), fry_config::hasWallet(), fry_config::hasProvDone()) &&
+                      fry::keyAllowsJoin(fry::kBuildKeyModel, s_minerKey[0] != 0);
+  // decide() applies the deferrals itself. A client that connects DURING a join is not seen until the join
+  // ends, and a commit landing mid-join is joined with the old settings first; both are harmless.
+  return s_joinRetry.decide(now, fry_provisioning::sessionState(), usable) == fry::RetryAction::Join;
+}
+#endif
 
 // A 0xF0 write over USB stored a different key. A board still provisioning simply registers with
 // it after the join; one that is already Ready restarts so every subsystem (registration, lease,
@@ -170,6 +202,9 @@ void setup() {
   delay(200);
 
   pinMode(FRY_RESET_BUTTON_PIN, INPUT_PULLUP);  // BOOT button, active-low
+#if !defined(ARDUINO_ARCH_ESP8266)
+  fry_wifi::setWaitHook(pollFactoryResetButton);  // a hold is also seen during a (background) join
+#endif
 
   char mac[18] = "00:00:00:00:00:00";
   print_mac(mac, sizeof(mac));
@@ -244,6 +279,12 @@ void loop() {
       if (fry_provisioning::readyToConnect()) {
         setPhase(BootPhase::ConnectingWifi);
       }
+#if !defined(ARDUINO_ARCH_ESP8266)
+      // Valid stored settings whose network was unreachable at boot: keep joining it in the background.
+      if (s_phase == BootPhase::AwaitingProvisioning && storedNetworkRetryNow()) {
+        setPhase(BootPhase::ConnectingWifi);
+      }
+#endif
       break;
 
     case BootPhase::ConnectingWifi:

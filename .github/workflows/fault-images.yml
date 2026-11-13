@@ -1,0 +1,58 @@
+name: fault-images
+
+# Bench-only fault builds of the production esp32s3 env (include/bench_fault.h). Manual, or a push to a
+# bench-faults/** branch; never a release, never a tag, never referenced by a manifest. The images are
+# only uploaded as workflow artifacts named firmware-esp32s3-fault<N>. Faults: 2 never heartbeat,
+# 3 crash 60 s after the first heartbeat, 4 the first two Wi-Fi joins refused, 5 abort 8 s after boot
+# while the image is pending. By default the build carries no bootstrap token.
+
+on:
+  workflow_dispatch:
+    inputs:
+      with_token:
+        description: "Compile the bootstrap token in, like a release build (artifact access is then sensitive)"
+        required: false
+        default: false
+        type: boolean
+  push:
+    branches: ['bench-faults/**']
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        fault: ['2', '3', '4', '5']
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install PlatformIO
+        run: pip install platformio
+
+      - name: Build esp32s3 with fault ${{ matrix.fault }}
+        env:
+          FRY_API_TOKEN: ${{ inputs.with_token && secrets.FRY_API_TOKEN || '' }}
+          PLATFORMIO_BUILD_FLAGS: -DFRY_BENCH_FAULT=${{ matrix.fault }}
+          FRY_BENCH_BUILD: '1'
+        run: pio run -e esp32s3
+
+      - name: Name the artifact
+        run: |
+          set -eu
+          cp ".pio/build/esp32s3/firmware.bin" "firmware-esp32s3-fault${{ matrix.fault }}.bin"
+          sha256sum "firmware-esp32s3-fault${{ matrix.fault }}.bin"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: firmware-esp32s3-fault${{ matrix.fault }}
+          path: firmware-esp32s3-fault${{ matrix.fault }}.bin
+          retention-days: 7
+          if-no-files-found: error

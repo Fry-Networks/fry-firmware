@@ -13,10 +13,15 @@
 // ESP8266, which has a single slot.
 #include <Arduino.h>
 
+#include "bench_fault.h"
+
 // Test-only fault injection (tools/fry_prebuild.py sets it from FRY_TEST_FAULT for ESP32-family
 // *_test envs and refuses everything else): 1 abort in setup() after the banner, 2 never
-// heartbeat, 3 crash 60 s after the first heartbeat (inside the settle window, so it rolls back).
-#if defined(FRY_TEST_FAULT) && !defined(FRY_OTA_TEST_CHANNEL)
+// heartbeat, 3 crash 60 s after the first heartbeat (after the early confirm: probation counts it, and
+// three such boots in a row roll the image back; see lib/fry_core/ota_confirm.h), 4 the first two Wi-Fi
+// joins after a boot fail (src/esp32/wifi_connect.cpp), to watch the background retry of the stored network,
+// 5 abort 8 s after boot while the image is still pending (every boot: install attempts accumulate with a core dump).
+#if defined(FRY_TEST_FAULT) && !defined(FRY_OTA_TEST_CHANNEL) && !defined(FRY_BENCH_IMAGE)
 #error "FRY_TEST_FAULT is for *_test (test OTA channel) builds only"
 #endif
 
@@ -36,6 +41,19 @@ void confirmGood();
 // esp_ota_mark_app_valid_cancel_rollback() when PENDING_VERIFY); every later answer retries a mark
 // that failed. A 2xx refreshes the heartbeat age. `http` <= 0 (transport error) is ignored.
 void noteHeartbeat(int http, const char* what);
+
+// Call once the boot's start-up work is over: the tunnel bring-up attempt (made, or skipped because
+// there is no config or no clock yet) has returned. A pending image is confirmed early only after
+// this, so an image that crashes in the tunnel start is still rolled back by the bootloader.
+// ESP32 family only (not defined on the ESP8266).
+void noteStartupDone();
+
+// The tunnel code reports, once each: its bring-up was attempted (made, or failed with an error; a
+// crash inside it never gets here), and the provisioning fetch completed one attempt (any outcome).
+// A pending image confirms early only after the one that applies to this boot (or a wait cap), see
+// fry::tunnelSettled() in lib/fry_core/ota_confirm.h. ESP32 family only.
+void noteTunnelBringUpAttempted();
+void noteTunnelFetchAttempted();
 
 // Call right before a restart that is not a failure (restartToApply, a USB re-key). While the image
 // is still pending, the bootloader will roll it back; this tells the previous image not to count

@@ -26,6 +26,8 @@
 #include "key_policy.h"
 #include "miner_key.h"
 #include "ota_boot_counter.h"
+#include "ota_boot_flow.h"
+#include "ota_confirm.h"
 #include "ota_first_check.h"
 #include "ota_health.h"
 #include "ota_heap_budget.h"
@@ -46,6 +48,10 @@
 
 #if !defined(ARDUINO_ARCH_ESP8266)
 #include <esp_ota_ops.h>
+#include <esp_system.h>  // esp_reset_reason()
+#include <esp_core_dump.h>
+#include <esp_partition.h>
+#include <stdlib.h>
 #endif
 
 #ifndef FRY_FIRMWARE_VERSION
@@ -112,6 +118,19 @@ bool s_rollbackFailed = false;  // nothing to roll back to: stay, and keep repor
 bool s_markFailLogged = false;
 uint32_t s_verifyMs = 0;        // time with the station associated + an IP, since boot
 unsigned long s_lastGuardMs = 0;
+// Early confirm and probation (lib/fry_core/ota_confirm.h).
+bool s_startupDone = false;     // the tunnel bring-up attempt is over (main.cpp: noteStartupDone)
+unsigned long s_startupDoneMs = 0;  // when
+uint8_t s_loopPasses = 0;       // loopGuard() passes since then
+bool s_earlyAttempted = false;  // loopGuard's one early confirm attempt; answers retry after it
+bool s_earlyOk = false;         // core health was proven: tryMarkValid() skips the settle window
+bool s_inProbation = false;     // this version's install-attempt record is still open
+uint8_t s_probFails = 0;        // fry_ota.bootfails as read at init, kept current
+bool s_tunnelBringUp = false;   // the tunnel bring-up was attempted (vpn_wireguard.cpp)
+bool s_tunnelFetch = false;     // the tunnel provisioning fetch completed one attempt
+bool s_pocOk = false;           // a PoC or lease request was answered 2xx this boot
+bool s_healthGaveUp = false;    // the health note could not be written; not retried every pass
+fry::AttemptRecord s_rec;       // this version's install-attempt record as stored
 #else
 const bool s_rolledBack = false;  // one slot: nothing to roll back to
 #endif
@@ -134,36 +153,128 @@ uint8_t s_readRetries = 0;
 // after boot. This flag forces exactly one check on the first tick after WiFi comes up.
 bool s_firstCheckDone = false;
 
-// Boot-counter rollback: boot into whichever OTA slot is NOT currently running. The second line
-// behind the bootloader's own app rollback (see ota_client.h), for boards whose bootloader - from
-// their first flash - lacks it. fry_ota.pending is left naming this version and fry_ota.rbk is
-// set, so the previous image's init() counts the strike: it is the only writer of the strikes.
-void manualRollback() {
+// Selects the OTA slot that is NOT running for the next boot. fry_ota.pending is left naming this version
+// and fry_ota.rbk is set, so the previous image's init() counts the strike: it is the only writer of the
+// strikes. Returns false (and leaves nothing set) when there is no slot to go back to or it fails its check.
+bool selectOtherSlot() {
 #if defined(ARDUINO_ARCH_ESP8266)
   FRY_PRINTLN("ota: boot-fail limit reached - ROLLBACK IMPOSSIBLE on ESP8266 (one slot)");
   fry_config::clearOtaPending();
+  return false;
 #else
   const esp_partition_t* running = esp_ota_get_running_partition();
   const esp_partition_t* other = esp_ota_get_next_update_partition(nullptr);
   if (other && running && other->address != running->address) {
     FRY_PRINTLN("ota: boot-fail limit reached - booting the other OTA slot");
     fry_config::setOtaRolledBack(true);
-    esp_ota_set_boot_partition(other);
-  } else {
-    FRY_PRINTLN("ota: boot-fail limit reached but no other OTA slot found - staying");
-    fry_config::clearOtaPending();
+    if (esp_ota_set_boot_partition(other) != ESP_OK) {  // the slot failed its image check: stay
+      fry_config::setOtaRolledBack(false);
+      fry_config::clearOtaPending();
+      return false;
+    }
+    return true;
   }
+  FRY_PRINTLN("ota: boot-fail limit reached but no other OTA slot found - staying");
+  fry_config::clearOtaPending();
+  return false;
 #endif
+}
+
+// Boot-counter rollback: boot into whichever OTA slot is NOT currently running. The second line
+// behind the bootloader's own app rollback (see ota_client.h), for boards whose bootloader - from
+// their first flash - lacks it.
+void manualRollback() {
+  selectOtherSlot();
   fry_config::clearOtaBootFails();
   delay(200);
   ESP.restart();
 }
 
+#if !defined(ARDUINO_ARCH_ESP8266)
+// The previous OTA slot can be booted: it is a different slot, its OTA state is not a failed or never-booted one, and
+// it carries an app descriptor. esp_ota_set_boot_partition() runs the full image check once more when it is used.
+bool otherSlotIntact() {
+  const esp_partition_t* running = esp_ota_get_running_partition();
+  const esp_partition_t* other = esp_ota_get_next_update_partition(nullptr);
+  if (!running || !other || other->address == running->address) return false;
+  esp_ota_img_states_t st;
+  if (esp_ota_get_state_partition(other, &st) == ESP_OK &&
+      (st == ESP_OTA_IMG_INVALID || st == ESP_OTA_IMG_ABORTED || st == ESP_OTA_IMG_NEW ||
+       st == ESP_OTA_IMG_PENDING_VERIFY)) {
+    return false;
+  }
+  esp_app_desc_t desc;
+  return esp_ota_get_partition_description(other, &desc) == ESP_OK;
+}
+
+// Evidence that THIS build crashed earlier: the core dump partition holds a dump whose ELF sha256 is the
+// running image's. Panics and the interrupt/task watchdogs leave one; a power cut, an EN or USB reset, a
+// restart and a brownout do not. Unavailable when core dumps to flash are compiled out or there is no partition.
+fry::CrashEvidence thisBuildCrashed() {
+#if defined(CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH) && defined(CONFIG_ESP_COREDUMP_DATA_FORMAT_ELF)
+  if (!esp_partition_find_first(ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_COREDUMP, nullptr)) {
+    return fry::CrashEvidence::Unavailable;
+  }
+  if (esp_core_dump_image_check() != ESP_OK) return fry::CrashEvidence::No;  // no dump, or an unreadable one
+  esp_core_dump_summary_t* sum = static_cast<esp_core_dump_summary_t*>(calloc(1, sizeof(esp_core_dump_summary_t)));
+  if (!sum) return fry::CrashEvidence::Unavailable;
+  bool same = false;
+  char mine[APP_ELF_SHA256_SZ] = {0};
+  if (esp_core_dump_get_summary(sum) == ESP_OK && esp_ota_get_app_elf_sha256(mine, sizeof(mine)) > 0) {
+    same = strncmp(reinterpret_cast<const char*>(sum->app_elf_sha256), mine, CONFIG_APP_RETRIEVE_LEN_ELF_SHA) == 0;
+  }
+  free(sum);
+  return same ? fry::CrashEvidence::Yes : fry::CrashEvidence::No;
+#else
+  return fry::CrashEvidence::Unavailable;
+#endif
+}
+
+void copyString(const String& s, char* out, size_t cap) {
+  if (cap == 0) return;
+  strncpy(out, s.c_str(), cap - 1);
+  out[cap - 1] = 0;
+}
+
+// The ports of lib/fry_core/ota_boot_flow.h on the real NVS, esp_ota_* and the core dump.
+class RealBootPorts : public fry::OtaBootPorts {
+ public:
+  void getAttempts(char* out, size_t cap) override { copyString(fry_config::getOtaAttempts(), out, cap); }
+  bool setAttempts(const char* record) override { return fry_config::setOtaAttempts(record); }
+  void clearAttempts() override { fry_config::clearOtaAttempts(); }
+  uint8_t getBootFails() override { return fry_config::getOtaBootFails(); }
+  bool setBootFails(uint8_t v) override { return fry_config::setOtaBootFailsChecked(v); }
+  void getBadVer(char* out, size_t cap) override { copyString(fry_config::getOtaBadVer(), out, cap); }
+  uint8_t getBadN() override { return fry_config::getOtaBadN(); }
+  void getUrl(char* out, size_t cap) override { copyString(fry_config::getOtaUrl(), out, cap); }
+  void setUrl(const char* url) override { fry_config::setOtaUrl(url); }
+  void getQuarantined(char* out, size_t cap) override { copyString(fry_config::getOtaQuarantined(), out, cap); }
+  void setQuarantined(const char* version) override { fry_config::setOtaQuarantined(version); }
+  void setPending(const char* version) override { fry_config::setOtaPending(version); }
+  bool pendingBoot() override { return s_pendingVerify || fry_config::getOtaPending() == FRY_FIRMWARE_VERSION; }
+  uint32_t resetReason() override { return static_cast<uint32_t>(esp_reset_reason()); }
+  bool otherSlotIntact() override { return ::fry_ota::otherSlotIntact(); }
+  fry::CrashEvidence crashEvidence() override { return thisBuildCrashed(); }
+  bool selectOtherSlot() override { return ::fry_ota::selectOtherSlot(); }
+  void finishRollback() override {
+    fry_config::clearOtaBootFails();
+    delay(200);
+    ESP.restart();
+  }
+  void log(const char* line) override { Serial.println(line); }
+};
+#endif
+
 // Marks the running image valid once decideMarkValid() says so; a failure is retried on the next
 // hardwareapi answer (noteHeartbeat) and the image keeps reporting "pending" meanwhile.
 void tryMarkValid(const char* why) {
   if (!s_confirmPending) return;
-  if (!fry::decideMarkValid(true, s_heartbeat.anyResponse(), millis(), kMarkValidSettleMs)) return;
+#if !defined(ARDUINO_ARCH_ESP8266)
+  const bool earlyOk = s_earlyOk;  // core health proven (loopGuard) or the last permitted install attempt
+#else
+  const bool earlyOk = false;
+#endif
+  if (!earlyOk && !fry::decideMarkValid(true, s_heartbeat.anyResponse(), millis(), kMarkValidSettleMs)) return;
 #if !defined(ARDUINO_ARCH_ESP8266)
   if (s_pendingVerify) {
     const esp_err_t err = esp_ota_mark_app_valid_cancel_rollback();
@@ -693,6 +804,27 @@ void init() {
   const bool counterRolledBack = fry_config::getOtaRolledBack();
   if (counterRolledBack) fry_config::setOtaRolledBack(false);
 
+#if !defined(ARDUINO_ARCH_ESP8266)
+  // Install attempts and probation (lib/fry_core/ota_confirm.h, ota_boot_flow.h): the record is an NVS key the
+  // previous image does not know, so it survives a rollback. Decided before the pending check below.
+  {
+    RealBootPorts ports;
+    fry::BootFlowConfig cfg;
+    cfg.version = FRY_FIRMWARE_VERSION;
+    cfg.manifestUrl = OTA_MANIFEST_URL;
+    cfg.failLimit = OTA_BOOT_FAIL_LIMIT;
+    const fry::BootFlowResult fr = fry::runBootFlow(ports, cfg);  // a rollback restarts and does not return
+    s_inProbation = fr.inProbation;
+    s_probFails = fr.failCount;
+    s_rec = fr.record;
+    if (fr.outcome == fry::FlowOutcome::ConfirmNow) {
+      s_confirmPending = true;
+      s_earlyOk = true;
+      tryMarkValid("last install attempt");
+    }
+  }
+#endif
+
   String pending = fry_config::getOtaPending();
   if (pending.length() == 0) return;
 
@@ -760,6 +892,9 @@ void noteHeartbeat(int http, const char* what) {
   return;  // test fault: this image never proves itself, so loopGuard() must roll it back
 #else
   const bool first = s_heartbeat.note(http, millis());
+#if !defined(ARDUINO_ARCH_ESP8266)
+  if (http >= 200 && http < 300 && what && (strcmp(what, "poc") == 0 || strcmp(what, "lease") == 0)) s_pocOk = true;
+#endif
 #if defined(FRY_TEST_FAULT) && FRY_TEST_FAULT == 3
   if (first) {
     s_faultCrashAtMs = millis() + 60000UL;  // inside the settle window: must roll back
@@ -772,17 +907,80 @@ void noteHeartbeat(int http, const char* what) {
 #endif
 }
 
+#if !defined(ARDUINO_ARCH_ESP8266)
+void noteStartupDone() {
+  s_startupDone = true;
+  s_startupDoneMs = millis();
+}
+void noteTunnelBringUpAttempted() { s_tunnelBringUp = true; }
+void noteTunnelFetchAttempted() { s_tunnelFetch = true; }
+#endif
+
 void notePlannedRestart() {
   if (s_confirmPending) fry_config::setOtaPlannedRestart(true);
 }
 
 void loopGuard() {
   const unsigned long now = millis();
+#if defined(FRY_TEST_FAULT) && FRY_TEST_FAULT == 5
+  // Bench image only: panic while the image is still pending (before any confirm), every boot.
+  if (s_confirmPending && now >= 8000UL) {
+    FRY_PRINTLN("[fault] FRY_TEST_FAULT=5 - aborting 8 s after boot while pending");
+    Serial.flush();
+    abort();
+  }
+#endif
 #if defined(FRY_TEST_FAULT) && FRY_TEST_FAULT == 3
   if (s_faultCrashAtMs && static_cast<long>(now - s_faultCrashAtMs) >= 0) {
     FRY_PRINTLN("[fault] FRY_TEST_FAULT=3 - crashing 60 s after the first heartbeat");
     Serial.flush();
     abort();
+  }
+#endif
+#if !defined(ARDUINO_ARCH_ESP8266)
+  // Core health (lib/fry_core/ota_confirm.h): confirm a pending image as soon as Wi-Fi, a 2xx answer, the end of the
+  // tunnel bring-up attempt and a short uptime prove it works; the settle window below stays the fallback. After the
+  // confirm the same health ends the probation: forgive crash boots after 120 s, drop the record after 30 min.
+  if (s_startupDone && s_loopPasses < 255) s_loopPasses++;
+  if (s_confirmPending || s_inProbation) {
+    fry::CoreHealth h;
+    h.staUp = fry_wifi::isConnected();
+    h.apiOk2xx = s_heartbeat.ageS(now) >= 0;  // ageS() is -1 until a 2xx arrived this boot
+    h.startupDone = s_startupDone;
+    h.tunnelSettled = fry::tunnelSettled(fry_config::hasVpnConfig(), s_tunnelBringUp, s_tunnelFetch,
+                                        s_startupDone ? static_cast<uint32_t>(now - s_startupDoneMs) : 0);
+    h.loopPasses = s_loopPasses;
+    h.freeHeap = ESP.getFreeHeap();
+    h.uptimeMs = now;
+    if (!s_healthGaveUp && s_rec.n > 0 && !s_rec.healthy && h.staUp && h.apiOk2xx) {
+      // Remember that an attempt got as far as the API: a later attempt without this note is a silent failure.
+      RealBootPorts ports;
+      fry::BootFlowConfig cfg;
+      cfg.version = FRY_FIRMWARE_VERSION;
+      cfg.manifestUrl = OTA_MANIFEST_URL;
+      cfg.failLimit = OTA_BOOT_FAIL_LIMIT;
+      if (!fry::recordHealthReached(ports, cfg, &s_rec)) s_healthGaveUp = true;
+    }
+    if (s_confirmPending && !s_earlyAttempted && fry::decideEarlyConfirm(true, h, HEAP_GATE_OTA)) {
+      s_earlyAttempted = true;
+      s_earlyOk = true;
+      tryMarkValid("core health");
+    } else if (!s_confirmPending && s_inProbation) {
+      const fry::ProbationStep step =
+          fry::decideProbationProgress(true, fry::coreHealthy(h, HEAP_GATE_OTA), now, s_probFails, s_pocOk);
+      if (step == fry::ProbationStep::ClearFails) {
+        s_probFails = 0;
+        fry_config::clearOtaBootFails();
+        FRY_PRINTF("ota: probation crash count cleared - healthy for %lus\n", now / 1000UL);
+      } else if (step == fry::ProbationStep::End) {
+        s_inProbation = false;
+        s_probFails = 0;
+        s_rec = fry::AttemptRecord();
+        fry_config::clearOtaBootFails();
+        fry_config::clearOtaAttempts();
+        FRY_PRINTF("ota: probation over for %s - healthy for %lus\n", FRY_FIRMWARE_VERSION, now / 1000UL);
+      }
+    }
   }
 #endif
   // The settle window can end between answers: one attempt here, later ones ride on answers.

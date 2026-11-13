@@ -8,6 +8,9 @@
 #include <Arduino.h>
 
 #include "provisioning_fsm.h"
+#if !defined(ARDUINO_ARCH_ESP8266)
+#include "wifi_retry.h"
+#endif
 
 namespace fry_provisioning {
 
@@ -22,6 +25,12 @@ void init(const char* deviceName, const char* minerKey);
 void loop();
 
 fry::ProvState state();
+
+#if !defined(ARDUINO_ARCH_ESP8266)
+// The provisioning session as the background retry of the stored network sees it
+// (lib/fry_core/wifi_retry.h): a commit in progress, a connected client and how long it has been idle.
+fry::SessionState sessionState();
+#endif
 fry::ProvErr lastError();
 
 // True exactly while state() == Connecting (PROTOCOL.md state 2) — the boot sequence's cue to
