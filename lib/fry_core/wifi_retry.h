@@ -27,6 +27,20 @@ const uint32_t kJoinRetryRecheckMs = 30UL * 1000UL;
 
 uint32_t joinRetryDelayMs(uint32_t failures, bool credentialClass);
 
+// A provisioning session as the retry sees it. An in-progress commit (`busy`: the FSM is taking a write
+// or applying a commit) always defers. A connected client defers only while it is active: no write for
+// kSessionIdleMs and it counts as inactive; and total deferral is capped at kDeferCapMs.
+struct SessionState {
+  bool busy = false;
+  bool clientConnected = false;
+  uint32_t msSinceActivity = 0;  // since the client connected or last wrote
+};
+const uint32_t kSessionIdleMs = 5UL * 60UL * 1000UL;
+const uint32_t kDeferCapMs = 10UL * 60UL * 1000UL;
+
+// What the boot loop does about the stored network on this pass.
+enum class RetryAction : uint8_t { Wait, Join, DeferSession, DeferUnusable };
+
 class JoinRetry {
  public:
   // A join (at boot, or after a commit, or a retry) failed with `why`.
@@ -37,6 +51,9 @@ class JoinRetry {
   bool due(uint32_t nowMs) const;
   // Not now: push the next attempt back by at least `ms` from `nowMs` (never earlier than it was).
   void defer(uint32_t nowMs, uint32_t ms);
+  // The decision for this pass. Applies the deferral itself (kJoinRetryQuietMs after a session,
+  // kJoinRetryRecheckMs for unusable stored settings) and tracks continuous deferral for the cap.
+  RetryAction decide(uint32_t nowMs, const SessionState& s, bool settingsUsable);
 
   bool armed() const { return _armed; }
   uint32_t failures() const { return _failures; }
@@ -47,12 +64,8 @@ class JoinRetry {
   uint32_t _failures = 0;
   uint32_t _nextMs = 0;
   uint32_t _lastDelayMs = 0;
+  bool _deferring = false;
+  uint32_t _deferStartMs = 0;
 };
-
-// What the boot loop does about the stored network on this pass. A provisioning session (a client
-// connected, a write in progress, a commit being applied) is never disturbed: the retry waits and
-// resumes kJoinRetryQuietMs after it ends. A due retry with unusable stored settings checks again later.
-enum class RetryAction : uint8_t { Wait, Join, DeferSession, DeferUnusable };
-RetryAction nextRetryAction(const JoinRetry& r, uint32_t nowMs, bool sessionActive, bool settingsUsable);
 
 }  // namespace fry

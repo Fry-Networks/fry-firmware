@@ -19,6 +19,7 @@ uint32_t joinRetryDelayMs(uint32_t failures, bool credentialClass) {
 
 void JoinRetry::onFailure(uint32_t nowMs, ProvErr why) {
   _armed = true;
+  _deferring = false;
   if (_failures < 0xFFFFFFFFu) _failures++;
   _lastDelayMs = joinRetryDelayMs(_failures, why == ProvErr::WifiAuth);
   _nextMs = nowMs + _lastDelayMs;
@@ -26,6 +27,7 @@ void JoinRetry::onFailure(uint32_t nowMs, ProvErr why) {
 
 void JoinRetry::onSuccess() {
   _armed = false;
+  _deferring = false;
   _failures = 0;
   _lastDelayMs = 0;
 }
@@ -37,10 +39,25 @@ void JoinRetry::defer(uint32_t nowMs, uint32_t ms) {
   if (!atOrAfter(_nextMs, candidate)) _nextMs = candidate;  // only ever later
 }
 
-RetryAction nextRetryAction(const JoinRetry& r, uint32_t nowMs, bool sessionActive, bool settingsUsable) {
-  if (!r.due(nowMs)) return RetryAction::Wait;
-  if (sessionActive) return RetryAction::DeferSession;
-  if (!settingsUsable) return RetryAction::DeferUnusable;
+RetryAction JoinRetry::decide(uint32_t nowMs, const SessionState& s, bool settingsUsable) {
+  if (!due(nowMs)) return RetryAction::Wait;
+  const bool active = s.busy || (s.clientConnected && s.msSinceActivity < kSessionIdleMs);
+  if (active) {
+    if (!_deferring) {
+      _deferring = true;
+      _deferStartMs = nowMs;
+    }
+    // A commit in progress always defers; an active client defers for at most kDeferCapMs in a row.
+    if (s.busy || static_cast<uint32_t>(nowMs - _deferStartMs) < kDeferCapMs) {
+      defer(nowMs, kJoinRetryQuietMs);
+      return RetryAction::DeferSession;
+    }
+  }
+  _deferring = false;
+  if (!settingsUsable) {
+    defer(nowMs, kJoinRetryRecheckMs);
+    return RetryAction::DeferUnusable;
+  }
   return RetryAction::Join;
 }
 

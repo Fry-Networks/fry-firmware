@@ -55,6 +55,7 @@ NimBLECharacteristic* s_chDevStatus = nullptr;
 
 // True from init() until tick() releases the stack once the board is Connected and idle.
 bool s_bleUp = false;
+volatile uint32_t s_lastBleActivityMs = 0;  // a client connected or wrote (the join retry's idle test)
 fry::BleIdleTimer s_bleIdle;
 
 char s_pendingSsid[33] = {0};
@@ -143,6 +144,7 @@ class ProvCallbacks : public NimBLECharacteristicCallbacks {
   }
 
   void onWrite(NimBLECharacteristic* ch, NimBLEConnInfo& connInfo) override { FRY_OLOSTEP_BLE_ONWRITE(ch, connInfo)
+    s_lastBleActivityMs = millis();
     if ((ch == s_chSsid || ch == s_chPass || ch == s_chWallet) && dropUntrusted(connInfo)) {
       return;  // not even copied: a later trusted commit must not pick it up
     }
@@ -239,6 +241,7 @@ class ServerCallbacks : public NimBLEServerCallbacks {
     (void)connInfo;
     clearStagedKey();
     s_loggedUntrusted = false;
+    s_lastBleActivityMs = millis();
   }
   void onDisconnect(NimBLEServer* server, NimBLEConnInfo& connInfo, int reason) override {
     (void)server;
@@ -362,11 +365,14 @@ void loop() {
 }
 
 fry::ProvState state() { return s_fsm.state(); }
-bool sessionActive() {
+fry::SessionState sessionState() {
+  fry::SessionState s;
   const fry::ProvState st = s_fsm.state();
-  if (st == fry::ProvState::Provisioning || st == fry::ProvState::Connecting) return true;
+  s.busy = st == fry::ProvState::Provisioning || st == fry::ProvState::Connecting;
   NimBLEServer* server = s_bleUp ? NimBLEDevice::getServer() : nullptr;
-  return server && server->getConnectedCount() > 0;
+  s.clientConnected = server && server->getConnectedCount() > 0;
+  s.msSinceActivity = static_cast<uint32_t>(millis() - s_lastBleActivityMs);
+  return s;
 }
 fry::ProvErr lastError() { return s_fsm.error(); }
 bool readyToConnect() { return s_fsm.readyToConnect(); }

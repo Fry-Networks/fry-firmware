@@ -13,6 +13,7 @@ namespace fry_wifi {
 
 namespace {
 
+void (*s_waitHook)() = nullptr;
 volatile bool s_l2Associated = false;
 volatile uint8_t s_lastDiscReason = 0;
 bool s_everConnected = false;
@@ -48,12 +49,15 @@ bool joinOnce(const char* ssid, const char* pass, uint32_t timeoutMs) {
   unsigned long start = millis();
   while (millis() - start < timeoutMs) {
     if (WiFi.status() == WL_CONNECTED) return true;
+    if (s_waitHook) s_waitHook();
     delay(250);
   }
   return false;
 }
 
 }  // namespace
+
+void setWaitHook(void (*hook)()) { s_waitHook = hook; }
 
 bool connect(const char* ssid, const char* pass, uint32_t timeoutMs, fry::ProvErr* errOut) {
   static bool eventRegistered = false;

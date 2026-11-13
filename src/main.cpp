@@ -170,19 +170,9 @@ bool storedNetworkRetryNow() {
   if (!s_joinRetry.due(now)) return false;
   const bool usable = fry::hasBootCredentials(fry_config::hasWifi(), fry_config::hasWallet(), fry_config::hasProvDone()) &&
                       fry::keyAllowsJoin(fry::kBuildKeyModel, s_minerKey[0] != 0);
-  switch (fry::nextRetryAction(s_joinRetry, now, fry_provisioning::sessionActive(), usable)) {
-    case fry::RetryAction::Join:
-      return true;
-    case fry::RetryAction::DeferSession:
-      s_joinRetry.defer(now, fry::kJoinRetryQuietMs);
-      return false;
-    case fry::RetryAction::DeferUnusable:
-      s_joinRetry.defer(now, fry::kJoinRetryRecheckMs);
-      return false;
-    case fry::RetryAction::Wait:
-      break;
-  }
-  return false;
+  // decide() applies the deferrals itself. A client that connects DURING a join is not seen until the join
+  // ends, and a commit landing mid-join is joined with the old settings first; both are harmless.
+  return s_joinRetry.decide(now, fry_provisioning::sessionState(), usable) == fry::RetryAction::Join;
 }
 #endif
 
@@ -212,6 +202,9 @@ void setup() {
   delay(200);
 
   pinMode(FRY_RESET_BUTTON_PIN, INPUT_PULLUP);  // BOOT button, active-low
+#if !defined(ARDUINO_ARCH_ESP8266)
+  fry_wifi::setWaitHook(pollFactoryResetButton);  // a hold is also seen during a (background) join
+#endif
 
   char mac[18] = "00:00:00:00:00:00";
   print_mac(mac, sizeof(mac));
