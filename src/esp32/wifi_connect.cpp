@@ -2,6 +2,7 @@
 // ESP8266's, so this does not need the scan-then-match-by-BSSID / forced-PHY workarounds in
 // src/esp8266/wifi_connect.cpp — just a disconnect-reason-aware wait loop and a reconnect watchdog.
 #include "../core/wifi_station.h"
+#include "bench_fault.h"
 #include "wifi_reason.h"
 #include "wifi_tx_fallback.h"
 

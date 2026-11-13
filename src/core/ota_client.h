@@ -13,12 +13,15 @@
 // ESP8266, which has a single slot.
 #include <Arduino.h>
 
+#include "bench_fault.h"
+
 // Test-only fault injection (tools/fry_prebuild.py sets it from FRY_TEST_FAULT for ESP32-family
 // *_test envs and refuses everything else): 1 abort in setup() after the banner, 2 never
 // heartbeat, 3 crash 60 s after the first heartbeat (after the early confirm: probation counts it, and
 // three such boots in a row roll the image back; see lib/fry_core/ota_confirm.h), 4 the first two Wi-Fi
-// joins after a boot fail (src/esp32/wifi_connect.cpp), to watch the background retry of the stored network.
-#if defined(FRY_TEST_FAULT) && !defined(FRY_OTA_TEST_CHANNEL)
+// joins after a boot fail (src/esp32/wifi_connect.cpp), to watch the background retry of the stored network,
+// 5 abort 8 s after boot while the image is still pending (every boot: install attempts accumulate with a core dump).
+#if defined(FRY_TEST_FAULT) && !defined(FRY_OTA_TEST_CHANNEL) && !defined(FRY_BENCH_IMAGE)
 #error "FRY_TEST_FAULT is for *_test (test OTA channel) builds only"
 #endif
 

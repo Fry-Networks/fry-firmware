@@ -922,6 +922,14 @@ void notePlannedRestart() {
 
 void loopGuard() {
   const unsigned long now = millis();
+#if defined(FRY_TEST_FAULT) && FRY_TEST_FAULT == 5
+  // Bench image only: panic while the image is still pending (before any confirm), every boot.
+  if (s_confirmPending && now >= 8000UL) {
+    FRY_PRINTLN("[fault] FRY_TEST_FAULT=5 - aborting 8 s after boot while pending");
+    Serial.flush();
+    abort();
+  }
+#endif
 #if defined(FRY_TEST_FAULT) && FRY_TEST_FAULT == 3
   if (s_faultCrashAtMs && static_cast<long>(now - s_faultCrashAtMs) >= 0) {
     FRY_PRINTLN("[fault] FRY_TEST_FAULT=3 - crashing 60 s after the first heartbeat");
