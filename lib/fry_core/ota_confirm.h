@@ -53,14 +53,33 @@ bool decideEarlyConfirm(bool pending, const CoreHealth& h, uint32_t minFreeHeap)
 uint8_t attemptsOf(const char* record, const char* version);  // 0 for another version or a bad record
 size_t formatAttempts(char* out, size_t cap, const char* version, uint8_t attempts);  // 0 if it does not fit
 
-// The install attempt that sticks: it is confirmed at init and never rolled back by probation, so
-// the new image cannot be rolled back and re-installed again from its own side. A previous image
-// that counts strikes (kOtaPermanentStrikes = 3) stops installing before this ever happens.
-const uint8_t kStickyInstallAttempt = 4;
+// The install attempt at which the image must settle one way or the other. Without evidence that
+// THIS build crashed in the earlier attempts (a core dump of this build), the resets were external
+// (power, cable, EN): the attempt is confirmed at init and sticks. With such evidence it is NOT
+// force-confirmed: the board is sent back to the previous image, and that image is kept from
+// installing it again (its own strike memory, or the quarantine manifest address below).
+const uint8_t kStickyInstallAttempt = 3;
+
+// A previous image that counts strikes has recorded at least one for this version in badver/badn.
+bool oldKeepsStrikes(const char* badver, uint8_t badn, const char* version);
+
+// The manifest address a quarantined board is pointed at, derived from the compiled manifest URL by
+// swapping "/releases/latest/download/" for "/releases/download/quarantine/". False if the compiled
+// URL does not have that shape or `out` is too small. Nothing exists at that address until someone
+// publishes it, which a previous image reads as "no update".
+bool quarantineUrlFrom(const char* manifestUrl, char* out, size_t cap);
+
+// Whether the quarantine address / version note may be cleared: a different build than the
+// quarantined one is running (e.g. a fixed image was flashed or installed). `url` is the current
+// override, empty if none.
+bool shouldClearQuarantine(const char* url, const char* quarantineUrl, const char* quarantinedVersion,
+                           const char* running);
 
 // ---- decision at init ---------------------------------------------------------------------------
 
-enum class BootAction : uint8_t { Continue, ConfirmNow, RollbackNow };
+// RollbackNow: go back to the previous slot (the previous image decides about re-installing).
+// AbandonNow: the same, after the quarantine address was stored when `quarantine` is set.
+enum class BootAction : uint8_t { Continue, ConfirmNow, RollbackNow, AbandonNow };
 
 struct BootInputs {
   bool pendingBoot = false;      // PENDING_VERIFY in otadata or fry_ota.pending names the running version
@@ -69,6 +88,9 @@ struct BootInputs {
   ResetClass reset = ResetClass::Unknown;
   bool otherSlotIntact = false;  // the previous OTA slot can be booted
   uint8_t failLimit = 3;         // OTA_BOOT_FAIL_LIMIT
+  bool crashEvidence = false;    // a core dump written by THIS build exists
+  bool oldKeepsStrikes = false;  // the previous image counts strikes (see oldKeepsStrikes())
+  bool quarantineAvailable = false;  // the address can be stored (derivable and no other override)
 };
 
 struct BootDecision {
@@ -78,6 +100,7 @@ struct BootDecision {
   uint8_t failCount = 0;         // boot-fail counter after this boot
   bool writeFailCount = false;
   bool inProbation = false;      // confirmed image whose record is still open
+  bool quarantine = false;       // with AbandonNow: store the quarantine address first
 };
 
 BootDecision decideBoot(const BootInputs& in);

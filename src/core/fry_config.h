@@ -125,6 +125,10 @@ void setOtaRolledBack(bool rolledBack);
 String getOtaAttempts();
 void setOtaAttempts(const char* record);
 void clearOtaAttempts();
+// fry_ota/qver: the version that was given up for good; the manifest override then points at the
+// quarantine address (lib/fry_core/ota_confirm.h) so a previous image stops re-installing it.
+String getOtaQuarantined();
+void setOtaQuarantined(const char* version);  // "" clears
 
 // Wipes fry_wifi, fry/wallet, fry/provDone, fry/installId, fry/deviceToken, fry_vpn and fry_ota.
 // PRESERVES fry/salt and fry/minerKey so a re-provisioned board keeps one server identity

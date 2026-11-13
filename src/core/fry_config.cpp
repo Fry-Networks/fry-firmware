@@ -557,6 +557,23 @@ void clearOtaAttempts() {
   p.remove("att");
   p.end();
 }
+String getOtaQuarantined() {
+  KvStore p;
+  p.begin("fry_ota", true);
+  String v = p.getString("qver", "");
+  p.end();
+  return v;
+}
+void setOtaQuarantined(const char* version) {
+  KvStore p;
+  p.begin("fry_ota", false);
+  if (version && version[0]) {
+    p.putString("qver", version);
+  } else {
+    p.remove("qver");
+  }
+  p.end();
+}
 #endif
 
 // ── factory reset ─────────────────────────────────────────────────────────

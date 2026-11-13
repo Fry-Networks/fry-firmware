@@ -68,6 +68,46 @@ size_t formatAttempts(char* out, size_t cap, const char* version, uint8_t attemp
   return need - 1;
 }
 
+bool oldKeepsStrikes(const char* badver, uint8_t badn, const char* version) {
+  return badver != nullptr && version != nullptr && badn > 0 && strcmp(badver, version) == 0;
+}
+
+bool quarantineUrlFrom(const char* manifestUrl, char* out, size_t cap) {
+  static const char kFrom[] = "/releases/latest/download/";
+  static const char kTo[] = "/releases/download/quarantine/";
+  if (manifestUrl == nullptr || out == nullptr || cap == 0) return false;
+  const char* at = strstr(manifestUrl, kFrom);
+  if (at == nullptr) return false;
+  const size_t head = static_cast<size_t>(at - manifestUrl);
+  const size_t tail = strlen(at + sizeof(kFrom) - 1);
+  const size_t total = head + sizeof(kTo) - 1 + tail;
+  if (total + 1 > cap) return false;
+  memcpy(out, manifestUrl, head);
+  memcpy(out + head, kTo, sizeof(kTo) - 1);
+  memcpy(out + head + sizeof(kTo) - 1, at + sizeof(kFrom) - 1, tail + 1);
+  return true;
+}
+
+bool shouldClearQuarantine(const char* url, const char* quarantineUrl, const char* quarantinedVersion,
+                           const char* running) {
+  if (url == nullptr || quarantineUrl == nullptr || quarantinedVersion == nullptr || running == nullptr) return false;
+  if (url[0] == 0 || quarantinedVersion[0] == 0) return false;
+  return strcmp(url, quarantineUrl) == 0 && strcmp(quarantinedVersion, running) != 0;
+}
+
+namespace {
+// What to do when the image has to be given up (or must not be force-confirmed): leave through the
+// previous image if it keeps strikes, else store the quarantine address first, else stay put.
+void giveUp(const BootInputs& in, BootDecision* d) {
+  if (in.oldKeepsStrikes) {
+    d->action = BootAction::AbandonNow;
+  } else if (in.quarantineAvailable) {
+    d->action = BootAction::AbandonNow;
+    d->quarantine = true;
+  }
+}
+}  // namespace
+
 BootDecision decideBoot(const BootInputs& in) {
   BootDecision d;
   d.attempts = in.attemptsBefore;
@@ -75,7 +115,13 @@ BootDecision decideBoot(const BootInputs& in) {
   if (in.pendingBoot) {
     d.attempts = in.attemptsBefore < 255 ? static_cast<uint8_t>(in.attemptsBefore + 1) : in.attemptsBefore;
     d.writeAttempts = true;
-    if (d.attempts >= kStickyInstallAttempt) d.action = BootAction::ConfirmNow;
+    if (d.attempts >= kStickyInstallAttempt) {
+      if (!in.crashEvidence) {
+        d.action = BootAction::ConfirmNow;  // external resets: this attempt sticks
+      } else {
+        if (in.otherSlotIntact) giveUp(in, &d);  // this build crashed before: never force-confirm it
+      }
+    }
     return d;
   }
   if (in.attemptsBefore == 0) return d;  // no record: not in probation
@@ -83,8 +129,16 @@ BootDecision decideBoot(const BootInputs& in) {
   if (in.reset != ResetClass::Crash) return d;  // power cycles and restarts neither count nor forgive
   if (in.failCount < 255) d.failCount = static_cast<uint8_t>(in.failCount + 1);
   d.writeFailCount = d.failCount != in.failCount;
-  if (d.failCount >= in.failLimit && in.attemptsBefore < kStickyInstallAttempt && in.otherSlotIntact) {
-    d.action = BootAction::RollbackNow;
+  if (d.failCount >= in.failLimit && in.otherSlotIntact) {
+    if (in.attemptsBefore < kStickyInstallAttempt) {
+      d.action = BootAction::RollbackNow;  // bounded: the install count reaches the sticky attempt
+    } else if (in.crashEvidence) {
+      if (in.oldKeepsStrikes) {
+        d.action = BootAction::RollbackNow;  // bounded by the previous image's strikes
+      } else {
+        giveUp(in, &d);
+      }
+    }
   }
   return d;
 }

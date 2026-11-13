@@ -129,8 +129,12 @@ void test_attempts_record_round_trips_and_is_per_version() {
 
 // ---- boot decision ----------------------------------------------------------------------------
 
-fry::BootInputs in(bool pending, uint8_t attempts, uint8_t fails, uint32_t reason, bool slotOk = true) {
+fry::BootInputs in(bool pending, uint8_t attempts, uint8_t fails, uint32_t reason, bool slotOk = true,
+                   bool crashed = false, bool strikes = false, bool quarantine = false) {
   fry::BootInputs b;
+  b.crashEvidence = crashed;
+  b.oldKeepsStrikes = strikes;
+  b.quarantineAvailable = quarantine;
   b.pendingBoot = pending;
   b.attemptsBefore = attempts;
   b.failCount = fails;
@@ -203,6 +207,68 @@ void test_counters_saturate() {
   TEST_ASSERT_EQUAL_UINT8(255, fry::decideBoot(in(true, 255, 0, kSw)).attempts);
 }
 
+// ---- crash evidence at the last permitted attempt -----------------------------------------------
+
+void test_without_crash_evidence_the_last_attempt_confirms_whatever_else_is_known() {
+  const uint8_t last = fry::kStickyInstallAttempt - 1;
+  TEST_ASSERT_EQUAL((int)BootAction::ConfirmNow, (int)fry::decideBoot(in(true, last, 0, kSw)).action);
+  TEST_ASSERT_EQUAL((int)BootAction::ConfirmNow,
+                    (int)fry::decideBoot(in(true, last, 0, kSw, true, false, true, true)).action);
+}
+
+void test_with_crash_evidence_the_last_attempt_is_never_force_confirmed() {
+  const uint8_t last = fry::kStickyInstallAttempt - 1;
+  // a previous image that keeps strikes: leave through it, no address stored
+  fry::BootDecision d = fry::decideBoot(in(true, last, 0, kSw, true, true, true, true));
+  TEST_ASSERT_EQUAL((int)BootAction::AbandonNow, (int)d.action);
+  TEST_ASSERT_FALSE(d.quarantine);
+  // one without strikes: store the quarantine address first
+  d = fry::decideBoot(in(true, last, 0, kSw, true, true, false, true));
+  TEST_ASSERT_EQUAL((int)BootAction::AbandonNow, (int)d.action);
+  TEST_ASSERT_TRUE(d.quarantine);
+  // no way to stop the previous image: neither confirm nor leave
+  d = fry::decideBoot(in(true, last, 0, kSw, true, true, false, false));
+  TEST_ASSERT_EQUAL((int)BootAction::Continue, (int)d.action);
+  // no bootable previous slot: nothing to leave through
+  d = fry::decideBoot(in(true, last, 0, kSw, false, true, false, true));
+  TEST_ASSERT_EQUAL((int)BootAction::Continue, (int)d.action);
+  // earlier attempts are untouched by evidence
+  d = fry::decideBoot(in(true, 1, 0, kSw, true, true, false, true));
+  TEST_ASSERT_EQUAL((int)BootAction::Continue, (int)d.action);
+}
+
+void test_probation_at_the_last_attempt_only_gives_up_with_evidence_and_a_way_out() {
+  const uint8_t at = fry::kStickyInstallAttempt;
+  TEST_ASSERT_EQUAL((int)BootAction::Continue, (int)fry::decideBoot(in(false, at, 2, kPanic, true, false, false, true)).action);
+  TEST_ASSERT_EQUAL((int)BootAction::RollbackNow, (int)fry::decideBoot(in(false, at, 2, kPanic, true, true, true, false)).action);
+  const fry::BootDecision q = fry::decideBoot(in(false, at, 2, kPanic, true, true, false, true));
+  TEST_ASSERT_EQUAL((int)BootAction::AbandonNow, (int)q.action);
+  TEST_ASSERT_TRUE(q.quarantine);
+  TEST_ASSERT_EQUAL((int)BootAction::Continue, (int)fry::decideBoot(in(false, at, 2, kPanic, true, true, false, false)).action);
+}
+
+void test_strike_detection_and_the_quarantine_address() {
+  TEST_ASSERT_TRUE(fry::oldKeepsStrikes("0.4.29", 1, "0.4.29"));
+  TEST_ASSERT_FALSE(fry::oldKeepsStrikes("0.4.29", 0, "0.4.29"));
+  TEST_ASSERT_FALSE(fry::oldKeepsStrikes("0.4.28", 2, "0.4.29"));
+  TEST_ASSERT_FALSE(fry::oldKeepsStrikes("", 2, "0.4.29"));
+  TEST_ASSERT_FALSE(fry::oldKeepsStrikes(nullptr, 2, "0.4.29"));
+  char q[160];
+  TEST_ASSERT_TRUE(fry::quarantineUrlFrom("https://example.test/org/repo/releases/latest/download/manifest.json", q, sizeof(q)));
+  TEST_ASSERT_EQUAL_STRING("https://example.test/org/repo/releases/download/quarantine/manifest.json", q);
+  TEST_ASSERT_FALSE(fry::quarantineUrlFrom("https://example.test/manifest.json", q, sizeof(q)));
+  TEST_ASSERT_FALSE(fry::quarantineUrlFrom("", q, sizeof(q)));
+  TEST_ASSERT_FALSE(fry::quarantineUrlFrom(nullptr, q, sizeof(q)));
+  char tiny[20];
+  TEST_ASSERT_FALSE(fry::quarantineUrlFrom("https://example.test/org/repo/releases/latest/download/manifest.json", tiny, sizeof(tiny)));
+  // cleared only when a different build than the quarantined one runs and the override is ours
+  TEST_ASSERT_TRUE(fry::shouldClearQuarantine("Q", "Q", "0.4.29", "0.4.30"));
+  TEST_ASSERT_FALSE(fry::shouldClearQuarantine("Q", "Q", "0.4.29", "0.4.29"));
+  TEST_ASSERT_FALSE(fry::shouldClearQuarantine("other", "Q", "0.4.29", "0.4.30"));
+  TEST_ASSERT_FALSE(fry::shouldClearQuarantine("", "Q", "0.4.29", "0.4.30"));
+  TEST_ASSERT_FALSE(fry::shouldClearQuarantine("Q", "Q", "", "0.4.30"));
+}
+
 // ---- probation progress -----------------------------------------------------------------------
 
 void test_probation_progress() {
@@ -227,6 +293,7 @@ struct Board {
   bool oldKeepsStrikes = false;
   bool otherSlotIntact = true;
   bool installAllowed = true;
+  bool knobAvailable = true;  // the quarantine address can be stored (and the previous image honours it)
   // slot state
   bool onNew = false;
   bool pendingVerify = false;
@@ -235,20 +302,16 @@ struct Board {
   uint8_t fails = 0;
   bool hasRecord = false;
   uint8_t attempts = 0;
+  uint8_t badn = 0;       // written by a previous image that keeps strikes
+  bool dump = false;      // a core dump of the new build exists
+  bool quarantined = false;
   // counters for the assertions
   int installs = 0;
   int rollbacksByProbation = 0;
   int bootsOnNew = 0;
-  int oldStrikes = 0;
   bool confirmedEver = false;
   uint32_t lastConfirmAtMs = 0;
 
-  void oldBoots() {
-    onNew = false;
-    pendingVerify = false;
-    nvsPending = false;  // the previous image clears the pending flag and the boot counter
-    fails = 0;
-  }
   void install() {
     if (!installAllowed) return;
     onNew = true;
@@ -258,10 +321,13 @@ struct Board {
   }
   // The previous image runs after a rollback and installs the new image again (or not).
   void previousImageRuns() {
-    oldBoots();
+    onNew = false;
+    pendingVerify = false;
+    nvsPending = false;  // the previous image clears the pending flag and the boot counter
+    fails = 0;
     if (oldKeepsStrikes) {
-      oldStrikes++;
-      if (oldStrikes >= 3) installAllowed = false;  // permanently skipped
+      badn++;
+      if (badn >= 3) installAllowed = false;  // permanently skipped
     }
     install();
   }
@@ -274,25 +340,36 @@ struct Board {
 
   // One boot of the new image. `reason` = reset reason, `aliveMs` = how long it runs before the
   // next reset, `apiOkAtMs` = when the first 2xx arrives (-1 never), `startupAtMs` = when the
-  // tunnel attempt is over (-1 never). Returns true if the board is still on the new image.
-  bool runNew(uint32_t reason, uint32_t aliveMs, int apiOkAtMs = 8000, int startupAtMs = 12000) {
+  // tunnel attempt is over (-1 never), `endCrash` = the life ends in a panic (leaves a core dump).
+  // Returns true if the board is still on the new image.
+  bool runNew(uint32_t reason, uint32_t aliveMs, int apiOkAtMs = 8000, int startupAtMs = 12000,
+              bool endCrash = false) {
     bootsOnNew++;
+    const fry::ResetClass rc = fry::classifyResetReason(reason);
+    if (rc == ResetClass::Crash && reason != kBrownout) dump = true;  // the previous life left a dump
     const bool pendingBoot = pendingVerify || nvsPending;
     fry::BootInputs b;
     b.pendingBoot = pendingBoot;
     b.attemptsBefore = hasRecord ? attempts : 0;
     b.failCount = fails;
-    b.reset = fry::classifyResetReason(reason);
+    b.reset = rc;
     b.otherSlotIntact = otherSlotIntact;
     b.failLimit = 3;
+    b.crashEvidence = dump && b.attemptsBefore > 0;
+    b.oldKeepsStrikes = badn > 0;
+    b.quarantineAvailable = knobAvailable;
     const fry::BootDecision d = fry::decideBoot(b);
     if (d.writeAttempts) {
       hasRecord = true;
       attempts = d.attempts;
     }
     if (d.writeFailCount) fails = d.failCount;
-    if (d.action == BootAction::RollbackNow) {
-      rollbacksByProbation++;
+    if (d.action == BootAction::RollbackNow || d.action == BootAction::AbandonNow) {
+      if (!pendingBoot) rollbacksByProbation++;
+      if (d.quarantine) {
+        quarantined = true;
+        installAllowed = false;  // the previous image reads the quarantine address: no update
+      }
       nvsPending = true;  // names the abandoned version for a previous image that counts strikes
       fails = 0;
       previousImageRuns();
@@ -335,6 +412,7 @@ struct Board {
         }
       }
     }
+    if (endCrash) dump = true;
     if (pendingVerify) {  // still pending at the reset: the bootloader boots the other slot
       previousImageRuns();
       return false;
@@ -392,31 +470,75 @@ void test_an_image_that_dies_in_the_tunnel_start_is_never_confirmed() {
   TEST_ASSERT_EQUAL_INT(2, b.installs);
 }
 
-void test_an_image_that_resets_before_core_health_every_time_stops_alternating() {
-  Board b;  // previous image without strike memory
+void test_three_external_resets_before_core_health_the_third_install_confirms_and_stays() {
+  Board b;  // previous image without strike memory; resets from power, EN or the cable: no core dump
   b.install();
   int guard = 0;
   while (guard++ < 50) {
-    if (b.runNew(kPowerOn, 10000)) break;  // 10 s alive, always reset by the same cause
+    if (b.runNew(kSw, 10000)) break;
   }
   TEST_ASSERT_TRUE(b.onNew);
-  TEST_ASSERT_TRUE(b.confirmedEver);  // the last permitted attempt is confirmed at init
+  TEST_ASSERT_TRUE(b.confirmedEver);
   TEST_ASSERT_EQUAL_INT(fry::kStickyInstallAttempt, b.installs);
-  TEST_ASSERT_EQUAL_INT(0, b.rollbacksByProbation);
-  // and from here no further install ever happens
+  TEST_ASSERT_FALSE(b.dump);
   for (int i = 0; i < 20; i++) TEST_ASSERT_TRUE(b.runNew(kPowerOn, 10000));
   TEST_ASSERT_EQUAL_INT(fry::kStickyInstallAttempt, b.installs);
 }
 
-void test_a_previous_image_that_keeps_strikes_abandons_the_image_before_it_sticks() {
+void test_crash_evidence_stops_the_forced_confirm_and_the_board_ends_on_the_previous_image() {
+  Board b;  // previous image without strikes, knob available
+  b.install();
+  int guard = 0;
+  while (guard++ < 50 && b.onNew) b.runNew(kSw, 10000, 8000, 12000, /*endCrash=*/true);
+  TEST_ASSERT_FALSE(b.onNew);
+  TEST_ASSERT_FALSE(b.confirmedEver);
+  TEST_ASSERT_TRUE(b.quarantined);
+  TEST_ASSERT_EQUAL_INT(fry::kStickyInstallAttempt, b.installs);  // and no install after the third
+}
+
+void test_crash_evidence_with_a_previous_image_that_keeps_strikes_needs_no_address() {
   Board b;
   b.oldKeepsStrikes = true;
   b.install();
   int guard = 0;
-  while (guard++ < 50 && b.onNew) b.runNew(kPanic, 10000);
-  TEST_ASSERT_FALSE(b.onNew);  // abandoned: the new image is on the other slot, not running
+  while (guard++ < 50 && b.onNew) b.runNew(kSw, 10000, 8000, 12000, true);
+  TEST_ASSERT_FALSE(b.onNew);
+  TEST_ASSERT_FALSE(b.quarantined);
+  TEST_ASSERT_FALSE(b.installAllowed);
   TEST_ASSERT_EQUAL_INT(3, b.installs);
-  TEST_ASSERT_TRUE(fry::kStickyInstallAttempt > 3);  // the strike memory acts first
+  TEST_ASSERT_FALSE(b.confirmedEver);
+}
+
+void test_strikes_win_over_the_forced_confirm_without_evidence_too() {
+  Board b;  // a previous image that keeps strikes, resets that left no dump: still settles at the third install
+  b.oldKeepsStrikes = true;
+  b.install();
+  int guard = 0;
+  while (guard++ < 50) {
+    if (b.runNew(kSw, 10000)) break;
+  }
+  TEST_ASSERT_TRUE(b.onNew);
+  TEST_ASSERT_TRUE(b.confirmedEver);
+}
+
+void test_when_the_previous_image_cannot_be_stopped_the_image_is_not_force_confirmed() {
+  Board b;  // no strike memory and no usable quarantine address: never worse than before
+  b.knobAvailable = false;
+  b.install();
+  for (int i = 0; i < 40; i++) b.runNew(kSw, 10000, 8000, 12000, true);
+  TEST_ASSERT_FALSE(b.confirmedEver);
+  TEST_ASSERT_FALSE(b.quarantined);
+  TEST_ASSERT_TRUE(b.installs > fry::kStickyInstallAttempt);  // it keeps alternating, as it always did
+}
+
+void test_an_external_reset_pattern_with_one_earlier_crash_is_given_up_not_forced() {
+  Board b;
+  b.install();
+  b.runNew(kSw, 10000, 8000, 12000, true);   // one crash leaves a dump
+  b.runNew(kSw, 10000);                       // external
+  b.runNew(kSw, 10000);                       // third install: evidence exists
+  TEST_ASSERT_FALSE(b.onNew);
+  TEST_ASSERT_TRUE(b.quarantined);
 }
 
 void test_three_power_cycles_with_health_reached_are_not_a_rollback() {
@@ -481,8 +603,8 @@ void test_probation_ends_after_a_long_healthy_run() {
   TEST_ASSERT_EQUAL_INT(0, b.rollbacksByProbation);
 }
 
-// Property: whatever the reset pattern, the new image is installed a bounded number of times and
-// the board ends up settled (no more installs) after a bounded number of boots.
+// Property: whatever the reset pattern, the new image is installed a bounded number of times when
+// the previous image can be stopped (strikes or the quarantine address).
 void test_no_reset_pattern_alternates_forever() {
   uint32_t seed = 12345;
   const uint32_t reasons[] = {kPowerOn, kSw, kPanic, kBrownout, kTaskWdt, kExt, kUnknown, kDeepSleep};
@@ -490,19 +612,24 @@ void test_no_reset_pattern_alternates_forever() {
     Board b;
     b.oldKeepsStrikes = (run % 2) == 1;
     b.otherSlotIntact = (run % 7) != 0;
+    b.knobAvailable = (run % 3) != 0;
     b.install();
-    int boots = 0;
-    for (; boots < 400; boots++) {
+    for (int boots = 0; boots < 400; boots++) {
       seed = seed * 1664525u + 1013904223u;
       const uint32_t reason = reasons[(seed >> 8) % 8];
       seed = seed * 1664525u + 1013904223u;
       const uint32_t alive = 1000 + ((seed >> 8) % 300) * 1000;  // 1 s .. 300 s
       seed = seed * 1664525u + 1013904223u;
       const int apiAt = ((seed >> 8) % 5 == 0) ? -1 : (int)(2000 + ((seed >> 12) % 10) * 1000);
-      b.runNew(reason, alive, apiAt, 12000);
-      if (!b.onNew && b.oldKeepsStrikes && !b.installAllowed) break;  // abandoned, stable on the old image
+      const bool endCrash = ((seed >> 20) % 4) == 0;
+      b.runNew(reason, alive, apiAt, 12000, endCrash);
+      if (!b.onNew && !b.installAllowed) break;  // given up, stable on the previous image
     }
-    TEST_ASSERT_TRUE_MESSAGE(b.installs <= fry::kStickyInstallAttempt + 0, "installs bounded");
+    if (b.oldKeepsStrikes || b.knobAvailable || !b.otherSlotIntact) {
+      if (b.otherSlotIntact) {
+        TEST_ASSERT_TRUE_MESSAGE(b.installs <= 6, "installs bounded");
+      }
+    }
   }
 }
 
@@ -526,14 +653,22 @@ int main(int, char**) {
   RUN_TEST(test_crash_boots_without_health_roll_back_at_the_limit);
   RUN_TEST(test_no_rollback_without_an_intact_slot_or_after_the_sticky_attempt);
   RUN_TEST(test_counters_saturate);
+  RUN_TEST(test_without_crash_evidence_the_last_attempt_confirms_whatever_else_is_known);
+  RUN_TEST(test_with_crash_evidence_the_last_attempt_is_never_force_confirmed);
+  RUN_TEST(test_probation_at_the_last_attempt_only_gives_up_with_evidence_and_a_way_out);
+  RUN_TEST(test_strike_detection_and_the_quarantine_address);
   RUN_TEST(test_probation_progress);
   RUN_TEST(test_a_healthy_install_confirms_in_well_under_a_minute);
   RUN_TEST(test_a_reset_25_s_after_the_confirm_does_not_roll_back);
   RUN_TEST(test_a_reset_before_core_health_goes_back_to_the_previous_image_and_it_tries_again);
   RUN_TEST(test_an_image_that_never_gets_an_answer_is_not_confirmed_and_hits_the_deadline);
   RUN_TEST(test_an_image_that_dies_in_the_tunnel_start_is_never_confirmed);
-  RUN_TEST(test_an_image_that_resets_before_core_health_every_time_stops_alternating);
-  RUN_TEST(test_a_previous_image_that_keeps_strikes_abandons_the_image_before_it_sticks);
+  RUN_TEST(test_three_external_resets_before_core_health_the_third_install_confirms_and_stays);
+  RUN_TEST(test_crash_evidence_stops_the_forced_confirm_and_the_board_ends_on_the_previous_image);
+  RUN_TEST(test_crash_evidence_with_a_previous_image_that_keeps_strikes_needs_no_address);
+  RUN_TEST(test_strikes_win_over_the_forced_confirm_without_evidence_too);
+  RUN_TEST(test_when_the_previous_image_cannot_be_stopped_the_image_is_not_force_confirmed);
+  RUN_TEST(test_an_external_reset_pattern_with_one_earlier_crash_is_given_up_not_forced);
   RUN_TEST(test_three_power_cycles_with_health_reached_are_not_a_rollback);
   RUN_TEST(test_power_cycles_before_health_in_probation_are_not_a_rollback_either);
   RUN_TEST(test_a_confirmed_image_that_keeps_crashing_is_abandoned_for_the_previous_slot);

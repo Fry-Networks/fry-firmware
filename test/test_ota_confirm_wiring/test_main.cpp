@@ -123,12 +123,28 @@ void test_init_decides_the_boot_before_the_pending_check_and_only_on_the_esp32_f
   TEST_ASSERT_TRUE(init.find("OtaBootCounter") != std::string::npos);
 }
 
+// Crash evidence is a core dump of THIS build; leaving goes through manualRollback() after the quarantine
+// address was stored, and the address is cleared again once a different build runs.
+void test_give_up_uses_the_core_dump_and_the_quarantine_address() {
+  std::string src, init;
+  TEST_ASSERT_TRUE(loadSource("src/core/ota_client.cpp", src));
+  TEST_ASSERT_TRUE(src.find("esp_core_dump_image_check()") != std::string::npos);
+  TEST_ASSERT_TRUE(src.find("esp_core_dump_get_summary(") != std::string::npos);
+  TEST_ASSERT_TRUE(src.find("esp_ota_get_app_elf_sha256(") != std::string::npos);
+  TEST_ASSERT_TRUE(bodyOf(src, "\nvoid init() {", init));
+  const size_t store = init.find("fry_config::setOtaUrl(quarantine);");
+  const size_t roll = init.find("manualRollback();");
+  TEST_ASSERT_TRUE(store != std::string::npos && roll != std::string::npos && store < roll);
+  TEST_ASSERT_TRUE(init.find("fry::shouldClearQuarantine(") != std::string::npos);
+  TEST_ASSERT_TRUE(init.find("fry::BootAction::AbandonNow") != std::string::npos);
+}
+
 void test_the_policy_library_is_not_referenced_by_the_esp8266_paths() {
   std::string src;
   TEST_ASSERT_TRUE(loadSource("src/core/ota_client.cpp", src));
   // every use of the new decisions is inside a block that excludes the ESP8266: walk each one back to
   // the nearest preceding preprocessor line and require that it opens the ESP32-family branch
-  const char* names[] = {"fry::decideEarlyConfirm(", "fry::decideBoot(", "fry::decideProbationProgress("};
+  const char* names[] = {"fry::decideEarlyConfirm(", "fry::decideBoot(", "fry::decideProbationProgress(", "thisBuildCrashed()", "fry::oldKeepsStrikes("};
   for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
     for (size_t pos = src.find(names[i]); pos != std::string::npos; pos = src.find(names[i], pos + 1)) {
       // count #if/#endif between the start of the file and pos on lines that mention ARDUINO_ARCH_ESP8266
@@ -174,6 +190,7 @@ int main(int, char**) {
   RUN_TEST(test_the_early_confirm_runs_in_the_loop_guard_and_keeps_the_old_rules);
   RUN_TEST(test_the_early_confirm_needs_a_2xx_not_any_status);
   RUN_TEST(test_init_decides_the_boot_before_the_pending_check_and_only_on_the_esp32_family);
+  RUN_TEST(test_give_up_uses_the_core_dump_and_the_quarantine_address);
   RUN_TEST(test_the_policy_library_is_not_referenced_by_the_esp8266_paths);
   RUN_TEST(test_config_has_the_attempts_record);
   return UNITY_END();

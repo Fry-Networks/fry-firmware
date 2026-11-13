@@ -48,6 +48,8 @@
 #if !defined(ARDUINO_ARCH_ESP8266)
 #include <esp_ota_ops.h>
 #include <esp_system.h>  // esp_reset_reason()
+#include <esp_core_dump.h>
+#include <stdlib.h>
 #endif
 
 #ifndef FRY_FIRMWARE_VERSION
@@ -187,6 +189,34 @@ bool otherSlotIntact() {
   }
   esp_app_desc_t desc;
   return esp_ota_get_partition_description(other, &desc) == ESP_OK;
+}
+
+// Evidence that THIS build crashed earlier: the core dump partition holds a dump whose ELF sha256 is the
+// running image's. Panics and the interrupt/task watchdogs leave one; a power cut, an EN or USB reset, a
+// restart and a brownout do not. False when the dump cannot be read or core dumps to flash are off.
+bool thisBuildCrashed() {
+#if defined(CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH) && defined(CONFIG_ESP_COREDUMP_DATA_FORMAT_ELF)
+  if (esp_core_dump_image_check() != ESP_OK) return false;
+  esp_core_dump_summary_t* sum = static_cast<esp_core_dump_summary_t*>(calloc(1, sizeof(esp_core_dump_summary_t)));
+  if (!sum) return false;
+  bool same = false;
+  char mine[APP_ELF_SHA256_SZ] = {0};
+  if (esp_core_dump_get_summary(sum) == ESP_OK && esp_ota_get_app_elf_sha256(mine, sizeof(mine)) > 0) {
+    same = strncmp(reinterpret_cast<const char*>(sum->app_elf_sha256), mine, CONFIG_APP_RETRIEVE_LEN_ELF_SHA) == 0;
+  }
+  free(sum);
+  return same;
+#else
+  return false;
+#endif
+}
+
+// The address a previous image is pointed at to stop it installing this build again. Stored only when
+// the compiled manifest address has the expected shape and no other override is in use.
+bool quarantineAddress(char* out, size_t cap) {
+  if (!fry::quarantineUrlFrom(OTA_MANIFEST_URL, out, cap)) return false;
+  const String cur = fry_config::getOtaUrl();
+  return cur.length() == 0 || cur == out;
 }
 #endif
 
@@ -733,13 +763,28 @@ void init() {
   // Install attempts and probation (lib/fry_core/ota_confirm.h): the record is an NVS key the previous image does not
   // know, so it survives a rollback. Decided before the pending check below; the pure decision is unit tested.
   {
+    char quarantine[160] = {0};
+    // A different build than the quarantined one is running: the override has done its job.
+    if (fry::quarantineUrlFrom(OTA_MANIFEST_URL, quarantine, sizeof(quarantine)) &&
+        fry::shouldClearQuarantine(fry_config::getOtaUrl().c_str(), quarantine, fry_config::getOtaQuarantined().c_str(),
+                                   FRY_FIRMWARE_VERSION)) {
+      fry_config::setOtaUrl("");
+      fry_config::setOtaQuarantined("");
+      FRY_PRINTLN("ota: quarantine address cleared - a different build is running");
+    }
     fry::BootInputs bi;
     bi.pendingBoot = s_pendingVerify || fry_config::getOtaPending() == FRY_FIRMWARE_VERSION;
     bi.attemptsBefore = fry::attemptsOf(fry_config::getOtaAttempts().c_str(), FRY_FIRMWARE_VERSION);
     bi.failCount = fry_config::getOtaBootFails();
     bi.reset = fry::classifyResetReason(static_cast<uint32_t>(esp_reset_reason()));
-    // The slot check reads flash: only a confirmed image under probation can ever act on it.
-    bi.otherSlotIntact = bi.attemptsBefore > 0 && !bi.pendingBoot && otherSlotIntact();
+    // The flash reads below only matter for a build whose record is already open (and a pending boot is its next one).
+    bi.otherSlotIntact = bi.attemptsBefore > 0 && otherSlotIntact();
+    if (bi.attemptsBefore > 0) {
+      bi.crashEvidence = thisBuildCrashed();
+      bi.oldKeepsStrikes = fry::oldKeepsStrikes(fry_config::getOtaBadVer().c_str(), fry_config::getOtaBadN(),
+                                                FRY_FIRMWARE_VERSION);
+      bi.quarantineAvailable = quarantineAddress(quarantine, sizeof(quarantine));
+    }
     bi.failLimit = OTA_BOOT_FAIL_LIMIT;
     const fry::BootDecision bd = fry::decideBoot(bi);
     s_inProbation = bd.inProbation || bi.pendingBoot;
@@ -750,22 +795,38 @@ void init() {
         fry_config::setOtaAttempts(rec);
       }
       FRY_PRINTF("ota: install attempt %u/%u of %s\n", bd.attempts, fry::kStickyInstallAttempt, FRY_FIRMWARE_VERSION);
+      if (bd.attempts >= fry::kStickyInstallAttempt) {
+        FRY_PRINTF("ota: crash evidence for %s: %s, previous image keeps strikes: %s\n", FRY_FIRMWARE_VERSION,
+                   bi.crashEvidence ? "yes" : "no", bi.oldKeepsStrikes ? "yes" : "no");
+      }
     } else if (bd.inProbation) {
       FRY_PRINTF("ota: probation for %s - %u/%u crash boots without health, reset_reason=%u\n", FRY_FIRMWARE_VERSION,
                     bd.failCount, OTA_BOOT_FAIL_LIMIT, static_cast<unsigned>(esp_reset_reason()));
     }
     if (bd.writeFailCount) fry_config::setOtaBootFails(bd.failCount);
     if (bd.action == fry::BootAction::ConfirmNow) {
-      FRY_PRINTF("ota: install attempt %u/%u of %s - confirmed at once, no further rollback to the previous image\n",
+      FRY_PRINTF("ota: install attempt %u/%u of %s - no crash evidence, confirmed at once\n",
                     bd.attempts, fry::kStickyInstallAttempt, FRY_FIRMWARE_VERSION);
       s_confirmPending = true;
       s_earlyOk = true;
       tryMarkValid("last install attempt");
-    } else if (bd.action == fry::BootAction::RollbackNow) {
-      FRY_PRINTF("ota: %u crash boots without health during probation of %s - rolling back to the previous image\n",
-                    bd.failCount, FRY_FIRMWARE_VERSION);
+    } else if (bd.action == fry::BootAction::AbandonNow || bd.action == fry::BootAction::RollbackNow) {
+      if (bd.quarantine) {
+        fry_config::setOtaUrl(quarantine);
+        fry_config::setOtaQuarantined(FRY_FIRMWARE_VERSION);
+        FRY_PRINTF("ota: %s is given up - the previous image is pointed at the quarantine manifest\n", FRY_FIRMWARE_VERSION);
+      } else if (bd.action == fry::BootAction::AbandonNow) {
+        FRY_PRINTF("ota: %s is given up - the previous image keeps its strike\n", FRY_FIRMWARE_VERSION);
+      }
+      if (!bi.pendingBoot) {
+        FRY_PRINTF("ota: %u crash boots without health during probation of %s - rolling back to the previous image\n",
+                      bd.failCount, FRY_FIRMWARE_VERSION);
+      }
       fry_config::setOtaPending(FRY_FIRMWARE_VERSION);  // names the abandoned version for a previous image that counts strikes
       manualRollback();  // does not return
+    } else if (bi.pendingBoot && bd.attempts >= fry::kStickyInstallAttempt) {
+      FRY_PRINTF("ota: %s cannot be given up (no way to stop the previous image) - normal confirmation rules apply\n",
+                    FRY_FIRMWARE_VERSION);
     }
   }
 #endif
