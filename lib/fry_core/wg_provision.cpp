@@ -420,7 +420,16 @@ WgRetrySchedule wgRetryDelayMs(WgFetchOutcome outcome, uint32_t attemptNumber,
       sched.delayMs = 900000;
       break;
     case WgFetchOutcome::Forbidden403:
-      sched.delayMs = 21600000;
+      // A Retry-After shorter than one hour is honoured (raised to the 60 s floor). No header, a
+      // header of one hour or more (the server's generic window for a request that cannot
+      // succeed), or a value that wrapped after a negative parse keeps the flat 6 h wait.
+      if (retryAfterHeaderS > 0 && retryAfterHeaderS < 3600) {
+        uint64_t ms = static_cast<uint64_t>(retryAfterHeaderS) * 1000ULL;
+        if (ms < 60000ULL) ms = 60000ULL;
+        sched.delayMs = static_cast<uint32_t>(ms);
+      } else {
+        sched.delayMs = 21600000;
+      }
       break;
     case WgFetchOutcome::Conflict409:
     case WgFetchOutcome::RateLimited429: {
