@@ -68,7 +68,7 @@ The fetch runs on its own schedule, never a tight loop, classified by outcome:
 | Clock not synced yet | 5 min |
 | Transport error / 5xx | 30 s, doubling each attempt, capped at 30 min |
 | 401 (bad/expired token) | 15 min |
-| 403 (`provisioning_not_open`, or any other scope rejection) | 6 h — deliberately long, since a board that isn't allow-listed will see this every time it tries |
+| 403 (`provisioning_not_open`, or any other scope rejection) | a `Retry-After` shorter than 1 h is honoured (raised to 1 min); with no header, a header of 1 h or more, or one that is not a number, 6 h — deliberately long, since a board that isn't allow-listed will see this every time it tries; the wait does not grow with the attempt number |
 | 409 / 429 | honours a `Retry-After` value if the server sends one (clamped to 1 min–24 h), else 1 h |
 | Any other 4xx | 6 h |
 
