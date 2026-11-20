@@ -26,7 +26,9 @@ jobs:
 
       - name: Build ${{ matrix.env }}
         env:
-          FRY_API_TOKEN: ${{ secrets.FRY_API_TOKEN }}
+          # Only a v* tag run (the one the release job consumes) is built with the CI secret; every
+          # other run builds with an empty token.
+          FRY_API_TOKEN: ${{ startsWith(github.ref, 'refs/tags/v') && secrets.FRY_API_TOKEN || '' }}
         run: pio run -e ${{ matrix.env }}
 
       - name: Name the artifact
@@ -55,7 +57,9 @@ jobs:
             --only ${{ matrix.env }}
           ls -l firmware-${{ matrix.env }}-factory.bin
 
+      # Only the tag run's artifacts are used (by the release job below), so only a tag run uploads them.
       - uses: actions/upload-artifact@v4
+        if: startsWith(github.ref, 'refs/tags/v')
         with:
           name: firmware-${{ matrix.env }}
           path: |
@@ -79,6 +83,25 @@ jobs:
 
       - name: Run Unity suite (native)
         run: pio test -e native
+
+      - name: Workflow guard (secret and artifacts only on tag runs)
+        run: python3 tools/test_build_yml_artifacts.py
+
+      # The same tooling tests the release workflow runs on a tag, run here as well so a pull request
+      # shows each test and its result in the job log (TOOLTEST START / TOOLTEST PASS lines).
+      - name: Release tooling tests
+        run: |
+          set -eu
+          for t in test_make_manifest_exclude test_make_manifest_envs test_manifest_esp8266_compat \
+                   test_make_manifest_include_env test_release_fw_esp32s3 test_check_no_token \
+                   test_check_prod_channel test_ble_key_write_security test_check_no_token_unreadable_members \
+                   test_check_no_token_tar_members test_scan_identity_needle_strip; do
+            echo "TOOLTEST START tools/$t.py"
+            python3 "tools/$t.py"
+            echo "TOOLTEST PASS tools/$t.py"
+          done
+          python3 -m pip install pytest==9.0.2
+          python3 -m pytest -v tools/test_factory_reset_consent.py tools/test_make_manifest_olostep_kill.py
 
   # The GitHub Pages flasher serves firmware same-origin out of the committed docs/flash/fw, and
   # nothing here regenerates it. Without this gate a tag can ship while the flasher keeps handing

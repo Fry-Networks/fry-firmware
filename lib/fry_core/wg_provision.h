@@ -187,17 +187,20 @@ struct WgRetrySchedule {
 
 // Wrap-safe: internally widens to uint64_t for the exponential branch before clamping back into
 // uint32_t, so a very large attemptNumber saturates at the cap instead of overflowing to a short
-// delay. `retryAfterHeaderS` is only consulted for Conflict409/RateLimited429 and is otherwise
-// ignored; 0 means "no Retry-After header was present."
+// delay. `retryAfterHeaderS` is only consulted for Forbidden403, Conflict409 and RateLimited429 and
+// is otherwise ignored; 0 means "no Retry-After header was present."
 //   NoToken / NoHeap        -> 60,000 ms flat
 //   NoClock                 -> bounded NTP wait: 5,000 * 2^attemptNumber ms, capped at 60,000 ms
 //                               (a peer exists within a minute of NTP syncing; nothing is sent
 //                               until the clock is plausible)
 //   TransientError / 5xx    -> 30,000 * 2^attemptNumber, capped at 1,800,000 ms
 //   Unauthorized401         -> 900,000 ms flat
-//   Forbidden403            -> 21,600,000 ms flat (deliberately long: a non-QA board that
-//                               web-flashes this firmware gets "provisioning_not_open" and must
-//                               never tight-loop against it)
+//   Forbidden403            -> retryAfterHeaderS * 1,000 ms, raised to 60,000 ms, when the header
+//                               is present and shorter than 3,600 s; otherwise 21,600,000 ms flat
+//                               (deliberately long: a non-QA board that web-flashes this firmware
+//                               gets "provisioning_not_open" and must never tight-loop against it;
+//                               a header of one hour or more, or a wrapped negative value, keeps
+//                               the long wait). Never grows with the attempt number.
 //   Conflict409/RateLimited429 -> retryAfterHeaderS clamped to [60,000, 86,400,000] ms if >0,
 //                               else 3,600,000 ms flat
 //   OtherClientError4xx     -> 21,600,000 ms flat
