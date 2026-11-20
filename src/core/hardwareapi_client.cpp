@@ -466,6 +466,7 @@ bool registerInstallation() {
   }
   char (&minerKey)[40] = text->minerKey;
 #else
+  const unsigned long started = millis();
   char minerKey[40];
 #endif
   fry_identity::ensureMinerKey(minerKey, sizeof(minerKey));
@@ -593,6 +594,10 @@ bool registerInstallation() {
       if (!fry_config::getKeyOk()) fry_config::setKeyOk(true);  // the key is now confirmed
       s_regFailures = 0;
       s_nextRegisterDelayMs = INSTALL_HEARTBEAT_MS;
+#if !defined(ARDUINO_ARCH_ESP8266)
+      s_lastRegisterAttemptMs = fry::nonZeroAttemptStamp(started);
+      s_registered = true;
+#endif
       fry_provisioning::notifyApiOk();
       return true;
     }
@@ -612,6 +617,10 @@ bool registerInstallation() {
       if (healStaleTokenIfDue(http, sec, url, installId, body, code, deviceTokenSent)) {
         s_regFailures = 0;
         s_nextRegisterDelayMs = INSTALL_HEARTBEAT_MS;
+#if !defined(ARDUINO_ARCH_ESP8266)
+        s_lastRegisterAttemptMs = fry::nonZeroAttemptStamp(started);
+        s_registered = true;
+#endif
         fry_provisioning::notifyApiOk();
         return true;
       }
