@@ -450,13 +450,25 @@ AP restarted FRY-SETUP-<MAC6> after the failed join - /provision accepts a new a
     the empty result at once and no scan runs, because the join owns the radio.
 - **Golden vectors** now live in `test/fixtures/improv_fry_vectors.json` (ASCII-only JSON with each
   vector's inputs); the hex lines in 11.4 are the same bytes.
-- **Image verification (replaces the 11.5 bullet).** A pending image is marked valid only once
-  hardwareapi has answered (any HTTP status) AND the image has run for `POC_INTERVAL_MS` + 60 s
-  (11 minutes), so a crash in the VPN start, telemetry or the first PoC/lease cycle still rolls it
-  back. A failed mark is retried on every later answer; a rollback that is impossible (no other
-  valid image) leaves the image running and reported as `pending`. The no-answer deadline (20 min;
-  2 min on the test channel) counts only time with the station associated and holding an IP. The
-  manifest check a pending image skipped runs right after it is marked valid.
+- **Image verification (replaces the 11.5 bullet).** On the ESP32 family, a pending image is marked
+  valid early (`decideEarlyConfirm` in `lib/fry_core/ota_confirm.h`) once it has run for at least
+  30 s (`kEarlyConfirmMinUptimeMs`), completed at least 3 main-loop passes
+  (`kEarlyConfirmMinLoopPasses`) after `startupDone`, holds Wi-Fi + IP (`staUp`), has received a `2xx`
+  registration or heartbeat answer (`apiOk2xx`), has `freeHeap >= HEAP_GATE_OTA`, and tunnel startup
+  has settled (`tunnelSettled`: bring-up attempted, or no config stored and provisioning fetch
+  completed one attempt, or 120 s `kTunnelWaitCapMs` elapsed after `startupDone`). The older
+  `POC_INTERVAL_MS` + 60 s (660 s) rule with any hardwareapi HTTP status (`decideMarkValid`) remains
+  as the fallback path on the ESP32 family and the sole mark-valid path on ESP8266. On the ESP32
+  family, the new build's install-attempt record stays open in post-confirm probation across up to
+  8 confirmed boots (`kProbationMaxBoots`) or 30 min (`kProbationEndMs`) of healthy uptime;
+  crash-class resets (`4..7`, and `9` brownout only when a core dump of the running build exists)
+  count toward `OTA_BOOT_FAIL_LIMIT` (3) unless forgiven after 660 s (`kProbationHealthyMs`) of
+  healthy uptime with a `2xx` PoC or lease answer in that boot (sticky install attempts at attempt 3
+  and quarantine exit follow `ota_confirm.h`). A failed mark is retried on every later answer; a
+  rollback that is impossible (no other valid image) leaves the image running and reported as
+  `pending`. The no-answer deadline (20 min; 2 min on the test channel) counts only time with the
+  station associated and holding an IP. The manifest check a pending image skipped runs right after
+  it is marked valid.
 - **Strikes (replaces "never installs it again").** The previous image counts one strike per rollback
   from a version (`fry_ota/badver` + `fry_ota/badn`, written together by that image's boot check
   only). With fewer than 3 strikes the version is skipped on the first check after the rollback and
@@ -573,7 +585,11 @@ else in section 5 changes.
 | 9 | brownout | not used |
 | 10 and up | other `esp_reset_reason_t` codes of the SDK | not used |
 
-  Note that `0` is "power-on" on an ESP8266 and "unknown" on the ESP32 family.
+  Note that `0` is "power-on" on an ESP8266 and "unknown" on the ESP32 family. On the ESP32 family
+  (ESP-IDF 4.4 `esp_reset_reason_t`, whose enum ends at `10 = ESP_RST_SDIO`), code `9`
+  (`ESP_RST_BROWNOUT`) is classified as `ResetClass::Brownout` and counts as a probation crash only
+  when a core dump matching the running build exists (`lib/fry_core/ota_confirm.h`); code `15` does
+  not exist in ESP-IDF 4.4 `esp_reset_reason_t`.
 - **Compatibility.** A server that does not know the key ignores it (the installation body already
   carries the heap and relay keys the same way); a board on firmware before this amendment sends no
   `reset_reason`, and a reader treats an absent key as "not reported", never as `0`.

@@ -55,4 +55,15 @@ inline bool tooBigForServerDetail(int contentLength) {
   return contentLength < 0 || contentLength > 2048;
 }
 
+// Pure scheduling helpers for boot registration recording (src/core/hardwareapi_client.cpp):
+// a non-zero timestamp records a successful boot registration so tick() waits INSTALL_HEARTBEAT_MS,
+// while failed attempts leave the stored stamp at 0 so tick() retries immediately.
+#define FRY_REG_BOOT_HELPERS 1
+inline unsigned long nonZeroAttemptStamp(unsigned long startedMs) {
+  return startedMs ? startedMs : 1UL;
+}
+inline bool registerAttemptDue(uint32_t nowMs, uint32_t lastAttemptMs, uint32_t nextDelayMs) {
+  return (lastAttemptMs == 0) || static_cast<uint32_t>(nowMs - lastAttemptMs) >= nextDelayMs;
+}
+
 }  // namespace fry
