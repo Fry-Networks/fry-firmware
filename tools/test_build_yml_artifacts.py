@@ -304,7 +304,7 @@ def check_fault_exact(text):
     uploads = 0
     for job, (lo, hi) in jobs.items():
         for step in steps_of(lines, lo, hi):
-            if not any("actions/upload-artifact" in l for l in step):
+            if not any("actions/upload-artifact" in l.lower() for l in step):
                 continue
             uploads += 1
             conds = step_values(step, "if")
@@ -376,7 +376,7 @@ def secret_word_problems(text, exact_line):
     problems = []
     n_exact = 0
     for i, l in enumerate(text.splitlines()):
-        if not re.search(r"\bsecrets\b", l):
+        if not re.search(r"\bsecrets\b", l, re.I):
             continue
         s = l.strip()
         if s == exact_line:
@@ -402,7 +402,7 @@ def check_build_exact(text, tag_jobs=BUILD_TAG_JOBS):
     uploads = 0
     for job, (lo, hi) in jobs.items():
         for step in steps_of(lines, lo, hi):
-            if not any("actions/upload-artifact" in l for l in step):
+            if not any("actions/upload-artifact" in l.lower() for l in step):
                 continue
             uploads += 1
             conds = step_values(step, "if")
@@ -459,9 +459,9 @@ def selftest_build_exact():
     caught("b9d: a release job without a condition is caught",
            good.replace("    needs: [build]\n    if: startsWith(github.ref, 'refs/tags/v')\n", "    needs: [build]\n"))
     caught("b10: an extra use of the secret in the index form is caught",
-           good.replace("        run: pio run\n", "          LEAK: ${{ secrets['FRY_API_TOKEN'] }}\n        run: pio run\n"))
+           good.replace("        run: pio run\n", "          EXTRA: ${{ secrets['FRY_API_TOKEN'] }}\n        run: pio run\n"))
     caught("b11: an extra use of the secret in the dotted form is caught",
-           good.replace("        run: pio run\n", "          LEAK: ${{ secrets.FRY_API_TOKEN }}\n        run: pio run\n"))
+           good.replace("        run: pio run\n", "          EXTRA: ${{ secrets.FRY_API_TOKEN }}\n        run: pio run\n"))
     caught("b12: the token line twice is caught",
            good.replace("        run: pio run\n", "          FRY_API_TOKEN: ${{ startsWith(github.ref, 'refs/tags/v') && secrets.FRY_API_TOKEN || '' }}\n        run: pio run\n"))
     caught("b13: a comment line with an expression that names the secret is caught",
@@ -501,6 +501,50 @@ def selftest_secret_words_fault():
     expect("fault secrets sample: a workflow with no token line is caught", secret_word_problems("name: x\n", FAULT_TOKEN_LINE) != [])
 
 
+# The workflow runner looks up context names and action references without regard to letter case, so
+# `SECRETS.X`, `Secrets['X']`, `toJSON(SECRETS)` and `uses: Actions/Upload-Artifact@v4` mean the same as
+# their lower-case spellings. The scans above compare in lower case; the exact token line and the exact
+# conditions are still compared character for character.
+def selftest_letter_case():
+    def upload_step(spelling):
+        return "\n      - uses: %s@v4\n        with:\n          name: extra\n          path: extra.bin\n" % spelling
+
+    good_b = GOOD_BUILD
+    good_f = GOOD_FAULT.replace("type: boolean", "type: boolean\n        default: false")
+
+    def caught_b(name, mutated):
+        expect("letter case build sample %s" % name, mutated != good_b and check_build_exact(mutated) != [],
+               str(check_build_exact(mutated)))
+
+    def caught_f(name, mutated, fn):
+        expect("letter case fault sample %s" % name, mutated != good_f and fn(mutated) != [], str(fn(mutated)))
+    caught_b("a1: an extra use of the secret with the context name in upper case is caught",
+             good_b.replace("        run: pio run\n", "          EXTRA: ${{ SECRETS.FRY_API_TOKEN }}\n        run: pio run\n"))
+    caught_b("a2: an extra use in the mixed-case index form is caught",
+             good_b.replace("        run: pio run\n", "          EXTRA: ${{ Secrets['FRY_API_TOKEN'] }}\n        run: pio run\n"))
+    caught_b("a3: the whole secrets context in upper case is caught",
+             good_b.replace("        run: pio run\n", "        run: echo ${{ toJSON(SECRETS) }}\n"))
+    caught_b("a3b: a job that passes every secret on, key in mixed case, is caught",
+             good_b + "\n  call:\n    uses: ./.github/workflows/other.yml\n    Secrets: inherit\n")
+    caught_b("a4: an upload step spelled Actions/Upload-Artifact without a condition is caught",
+             good_b.replace("          path: firmware.bin\n\n  flasher-assets:",
+                            "          path: firmware.bin\n" + upload_step("Actions/Upload-Artifact") + "\n  flasher-assets:"))
+    caught_b("a5: the same upload step spelled in lower case is caught",
+             good_b.replace("          path: firmware.bin\n\n  flasher-assets:",
+                            "          path: firmware.bin\n" + upload_step("actions/upload-artifact") + "\n  flasher-assets:"))
+    caught_b("a6: the token line with the context name in upper case is not the exact line and is caught",
+             good_b.replace("&& secrets.FRY_API_TOKEN", "&& SECRETS.FRY_API_TOKEN"))
+    commented = good_b.replace("jobs:\n", "# the SECRETS of the repository are not read here\njobs:\n")
+    expect("letter case build sample: a plain upper-case comment that names the secrets context is not a use",
+           commented != good_b and check_build_exact(commented) == [], str(check_build_exact(commented)))
+    caught_f("f1: an extra use of the secret with the context name in upper case is caught",
+             good_f.replace("        run: pio run -e esp32s3\n", "        run: pio run -e esp32s3\n      - run: echo ${{ SECRETS.OTHER_VALUE }}\n"),
+             lambda t: secret_word_problems(t, FAULT_TOKEN_LINE))
+    caught_f("f2: an upload step spelled Actions/Upload-Artifact without a condition is caught",
+             good_f + upload_step("Actions/Upload-Artifact"), check_fault_exact)
+    caught_f("f3: the same upload step spelled in lower case is caught", good_f + upload_step("actions/upload-artifact"), check_fault_exact)
+
+
 def main():
     path = os.path.abspath(sys.argv[1]) if len(sys.argv) > 1 else os.path.abspath(DEFAULT)
     fault_path = os.path.abspath(sys.argv[2]) if len(sys.argv) > 2 else os.path.abspath(FAULT_DEFAULT)
@@ -529,6 +573,7 @@ def main():
         word_problems = secret_word_problems(f.read(), FAULT_TOKEN_LINE)
     expect("fault-images workflow file: the word secrets appears only in the exact token line",
            word_problems == [], "\n      " + "\n      ".join(word_problems))
+    selftest_letter_case()
     print("%d passed, %d failed" % (passed, failed))
     return 1 if failed else 0
 
