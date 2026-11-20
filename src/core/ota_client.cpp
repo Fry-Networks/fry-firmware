@@ -940,7 +940,8 @@ void loopGuard() {
 #if !defined(ARDUINO_ARCH_ESP8266)
   // Core health (lib/fry_core/ota_confirm.h): confirm a pending image as soon as Wi-Fi, a 2xx answer, the end of the
   // tunnel bring-up attempt and a short uptime prove it works; the settle window below stays the fallback. After the
-  // confirm the same health ends the probation: forgive crash boots after 120 s, drop the record after 30 min.
+  // confirm the same health ends the probation: forgive crash boots after 660 s (kProbationHealthyMs), drop the
+  // record after 30 min.
   if (s_startupDone && s_loopPasses < 255) s_loopPasses++;
   if (s_confirmPending || s_inProbation) {
     fry::CoreHealth h;
