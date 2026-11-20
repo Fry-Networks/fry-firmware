@@ -254,6 +254,113 @@ def selftest_fault():
     expect("fault sample: a workflow without jobs is rejected", check_fault("name: x\n") != [])
 
 
+# The fault-image workflow is also held to the exact expressions, not only to the presence of the tag
+# text: a token expression or an upload condition that merely mentions the tag ref can still hand the
+# secret to a non-tag run or publish a build that asked for it.
+FAULT_TOKEN_LINE = "FRY_API_TOKEN: ${{ inputs.with_token && startsWith(github.ref, 'refs/tags/v') && secrets.FRY_API_TOKEN || '' }}"
+FAULT_UPLOAD_IF = "${{ !inputs.with_token || startsWith(github.ref, 'refs/tags/v') }}"
+
+
+def step_values(step, key):
+    """The values of every `key:` line (also `- key:`) of one step, trailing blanks removed."""
+    out = []
+    for l in step:
+        m = re.match(r"^\s+(?:- )?%s:\s*(.*?)\s*$" % re.escape(key), l)
+        if m:
+            out.append(m.group(1))
+    return out
+
+
+def input_block(lines, name):
+    """The lines of the workflow_dispatch input `name` (its key line and the more deeply indented lines below it)."""
+    for i, l in enumerate(lines):
+        m = re.match(r"^(\s+)%s:\s*$" % re.escape(name), l)
+        if m:
+            ind = len(m.group(1))
+            blk = [l]
+            for k in lines[i + 1:]:
+                if k.strip() and len(k) - len(k.lstrip()) <= ind:
+                    break
+                blk.append(k)
+            return blk
+    return None
+
+
+def check_fault_exact(text):
+    """Problems of a fault-images.yml text against the exact conditions (empty = fine): the only use of a
+    secret is the one token line, character for character; every upload step has exactly one `if:` and it is
+    the exact upload condition; the with_token input is a boolean that defaults to false."""
+    problems = []
+    lines = text.splitlines()
+    jobs = jobs_of(lines)
+    if not jobs:
+        return ["no jobs found"]
+    uses = [(i, l.strip()) for i, l in enumerate(lines) if not l.lstrip().startswith("#") and "secrets." in l]
+    for i, l in uses:
+        if l != FAULT_TOKEN_LINE:
+            problems.append("line %d is not the exact token line: %s" % (i + 1, l))
+    if len(uses) != 1:
+        problems.append("expected exactly one use of a secret, found %d" % len(uses))
+    uploads = 0
+    for job, (lo, hi) in jobs.items():
+        for step in steps_of(lines, lo, hi):
+            if not any("actions/upload-artifact" in l for l in step):
+                continue
+            uploads += 1
+            conds = step_values(step, "if")
+            if conds != [FAULT_UPLOAD_IF]:
+                problems.append("job %s: the upload condition is %s, expected [%r]" % (job, conds, FAULT_UPLOAD_IF))
+    if uploads == 0:
+        problems.append("no upload-artifact step found")
+    blk = input_block(lines, "with_token")
+    if blk is None:
+        problems.append("the with_token input is missing")
+    else:
+        if step_values(blk, "type") != ["boolean"]:
+            problems.append("with_token is not a boolean input")
+        if step_values(blk, "default") != ["false"]:
+            problems.append("with_token does not default to false")
+    return problems
+
+
+def selftest_fault_exact():
+    good = GOOD_FAULT.replace("type: boolean", "type: boolean\n        default: false")
+    expect("fault exact sample: the exact workflow has no problem", good != GOOD_FAULT and check_fault_exact(good) == [],
+           str(check_fault_exact(good)))
+    w5 = good.replace("inputs.with_token && startsWith", "startsWith")
+    expect("fault exact sample w5: a token expression without the with_token operand is caught",
+           w5 != good and check_fault_exact(w5) != [], str(check_fault_exact(w5)))
+    w6 = good.replace("if: ${{ !inputs.with_token ||", "if: ${{ inputs.with_token ||")
+    expect("fault exact sample w6: an upload condition with the with_token operand flipped is caught",
+           w6 != good and check_fault_exact(w6) != [], str(check_fault_exact(w6)))
+    w7 = good.replace("inputs.with_token && startsWith(github.ref, 'refs/tags/v') && secrets.FRY_API_TOKEN",
+                      "startsWith(github.ref, 'refs/tags/v') || inputs.with_token && secrets.FRY_API_TOKEN")
+    expect("fault exact sample w7: a token expression that an untagged with_token run satisfies is caught",
+           w7 != good and check_fault_exact(w7) != [] and check_fault(w7) == [], str(check_fault_exact(w7)))
+    w8 = good.replace("startsWith(github.ref, 'refs/tags/v') }}\n        with:", "startsWith(github.ref, 'refs/tags/v') || true }}\n        with:")
+    expect("fault exact sample w8: an upload condition that is always true is caught",
+           w8 != good and check_fault_exact(w8) != [] and check_fault(w8) == [], str(check_fault_exact(w8)))
+    second = good.replace("        run: pio run -e esp32s3\n", "        run: pio run -e esp32s3\n      - run: echo ${{ secrets.OTHER_VALUE }}\n")
+    expect("fault exact sample: a second use of a secret is caught", second != good and check_fault_exact(second) != [],
+           str(check_fault_exact(second)))
+    noif = good.replace("        if: ${{ !inputs.with_token || startsWith(github.ref, 'refs/tags/v') }}\n", "")
+    expect("fault exact sample: an upload without a condition is caught", noif != good and check_fault_exact(noif) != [],
+           str(check_fault_exact(noif)))
+    twoif = good.replace("        if: ${{ !inputs.with_token || startsWith(github.ref, 'refs/tags/v') }}\n",
+                         "        if: ${{ !inputs.with_token || startsWith(github.ref, 'refs/tags/v') }}\n        if: true\n")
+    expect("fault exact sample: a second if: on the upload is caught", twoif != good and check_fault_exact(twoif) != [],
+           str(check_fault_exact(twoif)))
+    dflt = good.replace("default: false", "default: true")
+    expect("fault exact sample: with_token defaulting to true is caught", dflt != good and check_fault_exact(dflt) != [],
+           str(check_fault_exact(dflt)))
+    nodef = GOOD_FAULT
+    expect("fault exact sample: with_token without a default is caught", check_fault_exact(nodef) != [], str(check_fault_exact(nodef)))
+    comment = good.replace("jobs:\n", "# a note that names secrets.FRY_API_TOKEN\njobs:\n")
+    expect("fault exact sample: a comment that names the secret is not a use", comment != good and check_fault_exact(comment) == [],
+           str(check_fault_exact(comment)))
+    expect("fault exact sample: a workflow without jobs is rejected", check_fault_exact("name: x\n") != [])
+
+
 def main():
     path = os.path.abspath(sys.argv[1]) if len(sys.argv) > 1 else os.path.abspath(DEFAULT)
     fault_path = os.path.abspath(sys.argv[2]) if len(sys.argv) > 2 else os.path.abspath(FAULT_DEFAULT)
@@ -268,6 +375,11 @@ def main():
         fault_problems = check_fault(f.read())
     expect("fault-images workflow file: the secret only on a tag ref, and a tag condition on every upload",
            fault_problems == [], "\n      " + "\n      ".join(fault_problems))
+    selftest_fault_exact()
+    with open(fault_path) as f:
+        exact_problems = check_fault_exact(f.read())
+    expect("fault-images workflow file: the exact token line and the exact upload condition",
+           exact_problems == [], "\n      " + "\n      ".join(exact_problems))
     print("%d passed, %d failed" % (passed, failed))
     return 1 if failed else 0
 
