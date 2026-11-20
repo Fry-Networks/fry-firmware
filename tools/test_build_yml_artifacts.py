@@ -361,6 +361,146 @@ def selftest_fault_exact():
     expect("fault exact sample: a workflow without jobs is rejected", check_fault_exact("name: x\n") != [])
 
 
+# build.yml is held to the exact expressions as well, and both workflows are scanned for the word
+# `secrets` in any syntax (secrets.X, secrets['X'], toJSON(secrets), `secrets: inherit`), not only the
+# dotted form: a token expression, an upload condition or a job condition that merely contains the tag
+# text can still be true on a run that is not a tag run.
+BUILD_TOKEN_LINE = "FRY_API_TOKEN: ${{ startsWith(github.ref, 'refs/tags/v') && secrets.FRY_API_TOKEN || '' }}"
+BUILD_TAG_JOBS = ("flasher-assets", "release")
+
+
+def secret_word_problems(text, exact_line):
+    """Problems of a workflow text about secrets (empty = fine): every line that carries the word `secrets`
+    is the exact token line, and that line occurs exactly once. A comment line is skipped unless it holds a
+    `${{` expression (inside a run block such a line is still evaluated)."""
+    problems = []
+    n_exact = 0
+    for i, l in enumerate(text.splitlines()):
+        if not re.search(r"\bsecrets\b", l):
+            continue
+        s = l.strip()
+        if s == exact_line:
+            n_exact += 1
+            continue
+        if s.startswith("#") and "${{" not in s:
+            continue
+        problems.append("line %d uses a secret outside the exact token line: %s" % (i + 1, s[:100]))
+    if n_exact != 1:
+        problems.append("the exact token line must occur exactly once, found %d" % n_exact)
+    return problems
+
+
+def check_build_exact(text, tag_jobs=BUILD_TAG_JOBS):
+    """Problems of a build.yml text against the exact expressions (empty = fine): the one secret use is the
+    exact token line; every upload step has exactly one `if:` and it is the tag condition; each job in
+    `tag_jobs` exists and has exactly one job-level `if:`, the tag condition."""
+    problems = secret_word_problems(text, BUILD_TOKEN_LINE)
+    lines = text.splitlines()
+    jobs = jobs_of(lines)
+    if not jobs:
+        return problems + ["no jobs found"]
+    uploads = 0
+    for job, (lo, hi) in jobs.items():
+        for step in steps_of(lines, lo, hi):
+            if not any("actions/upload-artifact" in l for l in step):
+                continue
+            uploads += 1
+            conds = step_values(step, "if")
+            if conds != [TAG_GUARD]:
+                problems.append("job %s: the upload condition is %s, expected [%r]" % (job, conds, TAG_GUARD))
+    if uploads == 0:
+        problems.append("no upload-artifact step found")
+    for job in tag_jobs:
+        if job not in jobs:
+            problems.append("job %s is missing" % job)
+            continue
+        lo, hi = jobs[job]
+        conds = []
+        for l in lines[lo:hi]:
+            m = re.match(r"^    if:\s*(.*?)\s*$", l)
+            if m:
+                conds.append(m.group(1))
+        if conds != [TAG_GUARD]:
+            problems.append("job %s: the job condition is %s, expected [%r]" % (job, conds, TAG_GUARD))
+    return problems
+
+
+GOOD_BUILD = GOOD.replace(
+    "  release:\n",
+    "  flasher-assets:\n    if: startsWith(github.ref, 'refs/tags/v')\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n\n  release:\n")
+
+
+def selftest_build_exact():
+    good = GOOD_BUILD
+    expect("build exact sample: the exact workflow has no problem", good != GOOD and check_build_exact(good) == [],
+           str(check_build_exact(good)))
+
+    def caught(name, mutated):
+        expect("build exact sample %s" % name, mutated != good and check_build_exact(mutated) != [],
+               str(check_build_exact(mutated)))
+    caught("b5: a second use of the secret after the empty fallback is caught",
+           good.replace("&& secrets.FRY_API_TOKEN || '' }}", "&& secrets.FRY_API_TOKEN || '' || secrets.FRY_API_TOKEN }}"))
+    caught("b6: a token expression that a run without the tag satisfies is caught",
+           good.replace("'refs/tags/v') && secrets.FRY_API_TOKEN", "'refs/tags/v') || secrets.FRY_API_TOKEN"))
+    caught("b7: an upload condition that is always true is caught",
+           good.replace("        if: startsWith(github.ref, 'refs/tags/v')\n        with:",
+                        "        if: startsWith(github.ref, 'refs/tags/v') || true\n        with:"))
+    caught("b8: an upload condition that another event satisfies is caught",
+           good.replace("        if: startsWith(github.ref, 'refs/tags/v')\n        with:",
+                        "        if: startsWith(github.ref, 'refs/tags/v') || github.event_name != 'push'\n        with:"))
+    caught("b9: a release job condition that is always true is caught",
+           good.replace("    needs: [build]\n    if: startsWith(github.ref, 'refs/tags/v')\n",
+                        "    needs: [build]\n    if: startsWith(github.ref, 'refs/tags/v') || true\n"))
+    caught("b9b: a flasher-assets job condition that is always true is caught",
+           good.replace("  flasher-assets:\n    if: startsWith(github.ref, 'refs/tags/v')\n",
+                        "  flasher-assets:\n    if: startsWith(github.ref, 'refs/tags/v') || true\n"))
+    caught("b9c: a flasher-assets job without a condition is caught",
+           good.replace("  flasher-assets:\n    if: startsWith(github.ref, 'refs/tags/v')\n", "  flasher-assets:\n"))
+    caught("b9d: a release job without a condition is caught",
+           good.replace("    needs: [build]\n    if: startsWith(github.ref, 'refs/tags/v')\n", "    needs: [build]\n"))
+    caught("b10: an extra use of the secret in the index form is caught",
+           good.replace("        run: pio run\n", "          LEAK: ${{ secrets['FRY_API_TOKEN'] }}\n        run: pio run\n"))
+    caught("b11: an extra use of the secret in the dotted form is caught",
+           good.replace("        run: pio run\n", "          LEAK: ${{ secrets.FRY_API_TOKEN }}\n        run: pio run\n"))
+    caught("b12: the token line twice is caught",
+           good.replace("        run: pio run\n", "          FRY_API_TOKEN: ${{ startsWith(github.ref, 'refs/tags/v') && secrets.FRY_API_TOKEN || '' }}\n        run: pio run\n"))
+    caught("b13: a comment line with an expression that names the secret is caught",
+           good.replace("        run: pio run\n", "        run: |\n          # ${{ secrets.FRY_API_TOKEN }}\n          pio run\n"))
+    caught("b14: the whole secrets context is caught",
+           good.replace("        run: pio run\n", "        run: echo ${{ toJSON(secrets) }}\n"))
+    caught("b15: an extra job that passes every secret on is caught",
+           good + "\n  call:\n    uses: ./.github/workflows/other.yml\n    secrets: inherit\n")
+    caught("b16: an upload step with a second if: is caught",
+           good.replace("        if: startsWith(github.ref, 'refs/tags/v')\n        with:",
+                        "        if: startsWith(github.ref, 'refs/tags/v')\n        if: true\n        with:"))
+    caught("b17: a workflow without the flasher-assets job is caught", good.replace("  flasher-assets:\n", "  flasher-other:\n"))
+    commented = good.replace("jobs:\n", "# the token is read as secrets.FRY_API_TOKEN below\njobs:\n")
+    expect("build exact sample: a plain comment that names the secrets context is not a use",
+           commented != good and check_build_exact(commented) == [], str(check_build_exact(commented)))
+    expect("build exact sample: a workflow without jobs is rejected", check_build_exact("name: x\n") != [])
+
+
+def selftest_secret_words_fault():
+    good = GOOD_FAULT.replace("type: boolean", "type: boolean\n        default: false")
+    expect("fault secrets sample: the exact workflow has no problem", good != GOOD_FAULT and secret_word_problems(good, FAULT_TOKEN_LINE) == [],
+           str(secret_word_problems(good, FAULT_TOKEN_LINE)))
+
+    def caught(name, mutated):
+        expect("fault secrets sample %s" % name, mutated != good and secret_word_problems(mutated, FAULT_TOKEN_LINE) != [],
+               str(secret_word_problems(mutated, FAULT_TOKEN_LINE)))
+    caught("x13: a second use in the dotted form is caught",
+           good.replace("        run: pio run -e esp32s3\n", "        run: pio run -e esp32s3\n      - run: echo ${{ secrets.OTHER_VALUE }}\n"))
+    caught("x14: a second use in the index form is caught",
+           good.replace("        run: pio run -e esp32s3\n", "        run: pio run -e esp32s3\n      - run: echo ${{ secrets['OTHER_VALUE'] }}\n"))
+    caught("x15: the whole secrets context is caught",
+           good.replace("        run: pio run -e esp32s3\n", "        run: pio run -e esp32s3\n      - run: echo ${{ toJSON(secrets) }}\n"))
+    caught("x16: an extra job that passes every secret on is caught",
+           good + "\n  call:\n    uses: ./.github/workflows/build.yml\n    secrets: inherit\n")
+    caught("x19: the token line twice is caught",
+           good.replace("        run: pio run -e esp32s3\n", "          FRY_API_TOKEN: ${{ inputs.with_token && startsWith(github.ref, 'refs/tags/v') && secrets.FRY_API_TOKEN || '' }}\n        run: pio run -e esp32s3\n"))
+    expect("fault secrets sample: a workflow with no token line is caught", secret_word_problems("name: x\n", FAULT_TOKEN_LINE) != [])
+
+
 def main():
     path = os.path.abspath(sys.argv[1]) if len(sys.argv) > 1 else os.path.abspath(DEFAULT)
     fault_path = os.path.abspath(sys.argv[2]) if len(sys.argv) > 2 else os.path.abspath(FAULT_DEFAULT)
@@ -380,6 +520,15 @@ def main():
         exact_problems = check_fault_exact(f.read())
     expect("fault-images workflow file: the exact token line and the exact upload condition",
            exact_problems == [], "\n      " + "\n      ".join(exact_problems))
+    selftest_build_exact()
+    build_exact_problems = check_build_exact(text)
+    expect("workflow file: the exact token line, the exact upload condition and the exact job conditions",
+           build_exact_problems == [], "\n      " + "\n      ".join(build_exact_problems))
+    selftest_secret_words_fault()
+    with open(fault_path) as f:
+        word_problems = secret_word_problems(f.read(), FAULT_TOKEN_LINE)
+    expect("fault-images workflow file: the word secrets appears only in the exact token line",
+           word_problems == [], "\n      " + "\n      ".join(word_problems))
     print("%d passed, %d failed" % (passed, failed))
     return 1 if failed else 0
 
