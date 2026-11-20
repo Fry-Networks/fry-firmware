@@ -10,6 +10,10 @@
 #
 #   python3 tools/test_build_yml_artifacts.py                   # check the sibling workflow file
 #   python3 tools/test_build_yml_artifacts.py <path-to-a-copy>  # check a specific copy (pre-fix proof)
+#   python3 tools/test_build_yml_artifacts.py <build.yml> <fault-images.yml>   # also pick the fault-images copy
+#
+# fault-images.yml is held to the same rule: its token is compiled in only on a v* tag ref, and its
+# upload step carries a condition that names the tag ref.
 #
 # Exit 0 = all pass, 1 = a failure. The checker is first shown to catch each defect on built-in
 # samples, then run on the workflow file.
@@ -19,6 +23,7 @@ import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DEFAULT = os.path.join(HERE, "..", ".github", "workflows", "build.yml")
+FAULT_DEFAULT = os.path.join(HERE, "..", ".github", "workflows", "fault-images.yml")
 
 TAG_GUARD = "startsWith(github.ref, 'refs/tags/v')"
 
@@ -173,14 +178,96 @@ def selftest():
     expect("sample: a workflow without the jobs is rejected", check("name: x\n") != [])
 
 
+def check_fault(text):
+    """The list of problems found in a fault-images.yml text (empty = fine). The fault-image workflow may
+    compile the CI secret in only on a v* tag ref (with an empty-string fallback), and an artifact upload
+    must carry a condition that names the tag ref, so a request for the token on any other ref neither
+    receives it nor publishes a build."""
+    problems = []
+    lines = text.splitlines()
+    jobs = jobs_of(lines)
+    if not jobs:
+        return ["no jobs found"]
+    for i, l in enumerate(lines):
+        if l.lstrip().startswith("#"):
+            continue
+        if "secrets.FRY_API_TOKEN" in l and (TAG_GUARD not in l or "|| ''" not in l):
+            problems.append("line %d hands the CI secret to runs that are not tag runs: %s" % (i + 1, l.strip()))
+    for job, (lo, hi) in jobs.items():
+        for step in steps_of(lines, lo, hi):
+            if not any("actions/upload-artifact" in l for l in step):
+                continue
+            guarded = any(re.match(r"^\s+(- )?if:\s", l) and TAG_GUARD in l for l in step)
+            if not guarded:
+                problems.append("job %s: an upload-artifact step has no tag condition: %s" % (job, step[0].strip()))
+    return problems
+
+
+GOOD_FAULT = """name: fault-images
+on:
+  workflow_dispatch:
+    inputs:
+      with_token:
+        type: boolean
+  push:
+    branches: ['bench-faults/**']
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build
+        env:
+          FRY_API_TOKEN: ${{ inputs.with_token && startsWith(github.ref, 'refs/tags/v') && secrets.FRY_API_TOKEN || '' }}
+        run: pio run -e esp32s3
+
+      - uses: actions/upload-artifact@v4
+        if: ${{ !inputs.with_token || startsWith(github.ref, 'refs/tags/v') }}
+        with:
+          name: firmware-fault
+          path: firmware.bin
+"""
+
+
+def selftest_fault():
+    expect("fault sample: the guarded workflow has no problem", check_fault(GOOD_FAULT) == [], str(check_fault(GOOD_FAULT)))
+    bad_token = GOOD_FAULT.replace("inputs.with_token && startsWith(github.ref, 'refs/tags/v') && secrets.FRY_API_TOKEN || ''",
+                                   "inputs.with_token && secrets.FRY_API_TOKEN || ''")
+    expect("fault sample: the secret handed to every with_token run is caught",
+           bad_token != GOOD_FAULT and len(check_fault(bad_token)) == 1, str(check_fault(bad_token)))
+    no_fallback = GOOD_FAULT.replace("secrets.FRY_API_TOKEN || ''", "secrets.FRY_API_TOKEN")
+    expect("fault sample: a tag guard without the empty fallback is caught",
+           no_fallback != GOOD_FAULT and len(check_fault(no_fallback)) == 1, str(check_fault(no_fallback)))
+    bad_upload = GOOD_FAULT.replace("        if: ${{ !inputs.with_token || startsWith(github.ref, 'refs/tags/v') }}\n", "")
+    expect("fault sample: an upload without a tag condition is caught",
+           bad_upload != GOOD_FAULT and len(check_fault(bad_upload)) == 1, str(check_fault(bad_upload)))
+    wrong_if = GOOD_FAULT.replace("${{ !inputs.with_token || startsWith(github.ref, 'refs/tags/v') }}", "${{ !inputs.with_token }}")
+    expect("fault sample: an upload condition that never names the tag ref is caught",
+           wrong_if != GOOD_FAULT and len(check_fault(wrong_if)) == 1, str(check_fault(wrong_if)))
+    both = bad_upload.replace("inputs.with_token && startsWith(github.ref, 'refs/tags/v') && secrets.FRY_API_TOKEN || ''",
+                              "inputs.with_token && secrets.FRY_API_TOKEN || ''")
+    expect("fault sample: the secret and the upload defects are both reported", len(check_fault(both)) == 2, str(check_fault(both)))
+    commented = GOOD_FAULT.replace("jobs:\n", "# the secret is read as secrets.FRY_API_TOKEN below\njobs:\n")
+    expect("fault sample: a comment that names the secret is not a use", commented != GOOD_FAULT and check_fault(commented) == [],
+           str(check_fault(commented)))
+    expect("fault sample: a workflow without jobs is rejected", check_fault("name: x\n") != [])
+
+
 def main():
     path = os.path.abspath(sys.argv[1]) if len(sys.argv) > 1 else os.path.abspath(DEFAULT)
+    fault_path = os.path.abspath(sys.argv[2]) if len(sys.argv) > 2 else os.path.abspath(FAULT_DEFAULT)
     selftest()
     with open(path) as f:
         text = f.read()
     problems = check(text)
     expect("workflow file: untagged and pull-request runs get no secret and upload nothing", problems == [],
            "\n      " + "\n      ".join(problems))
+    selftest_fault()
+    with open(fault_path) as f:
+        fault_problems = check_fault(f.read())
+    expect("fault-images workflow file: the secret only on a tag ref, and a tag condition on every upload",
+           fault_problems == [], "\n      " + "\n      ".join(fault_problems))
     print("%d passed, %d failed" % (passed, failed))
     return 1 if failed else 0
 
