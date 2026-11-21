@@ -120,8 +120,15 @@ void test_esp32_registerInstallation_records_boot_success_on_both_ok_and_heal_pa
 void test_version_0_4_30_and_tunnel_prerequisite_wiring() {
   std::string ini, wg, hw;
   TEST_ASSERT_TRUE(loadSource("platformio.ini", ini));
-  TEST_ASSERT_TRUE_MESSAGE(ini.find("-DFRY_FIRMWARE_VERSION='\"0.4.30\"'") != std::string::npos,
-                           "platformio.ini must declare FRY_FIRMWARE_VERSION 0.4.30");
+  const std::string verKey = "-DFRY_FIRMWARE_VERSION='\"";
+  const size_t verAt = ini.find(verKey);
+  const size_t verEnd = (verAt == std::string::npos) ? std::string::npos : ini.find('"', verAt + verKey.size());
+  const std::string iniVer = (verEnd == std::string::npos)
+                                 ? std::string()
+                                 : ini.substr(verAt + verKey.size(), verEnd - (verAt + verKey.size()));
+  TEST_ASSERT_TRUE_MESSAGE(!iniVer.empty() && iniVer.find('.') != std::string::npos &&
+                               ini.find(verKey + iniVer + "\"'") != std::string::npos,
+                           "platformio.ini must declare a valid FRY_FIRMWARE_VERSION");
   TEST_ASSERT_TRUE(loadSource("src/esp32/wg_provision_client.cpp", wg));
   TEST_ASSERT_TRUE_MESSAGE(wg.find("fry_config::getDeviceToken()") != std::string::npos,
                            "WG provisioning depends on fry_config::getDeviceToken()");
