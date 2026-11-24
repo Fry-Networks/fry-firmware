@@ -117,18 +117,11 @@ void test_esp32_registerInstallation_records_boot_success_on_both_ok_and_heal_pa
                                 "failed registration must leave s_registered untouched");
 }
 
-void test_version_0_4_30_and_tunnel_prerequisite_wiring() {
+void test_version_0_4_31_and_tunnel_prerequisite_wiring() {
   std::string ini, wg, hw;
   TEST_ASSERT_TRUE(loadSource("platformio.ini", ini));
-  const std::string verKey = "-DFRY_FIRMWARE_VERSION='\"";
-  const size_t verAt = ini.find(verKey);
-  const size_t verEnd = (verAt == std::string::npos) ? std::string::npos : ini.find('"', verAt + verKey.size());
-  const std::string iniVer = (verEnd == std::string::npos)
-                                 ? std::string()
-                                 : ini.substr(verAt + verKey.size(), verEnd - (verAt + verKey.size()));
-  TEST_ASSERT_TRUE_MESSAGE(!iniVer.empty() && iniVer.find('.') != std::string::npos &&
-                               ini.find(verKey + iniVer + "\"'") != std::string::npos,
-                           "platformio.ini must declare a valid FRY_FIRMWARE_VERSION");
+  TEST_ASSERT_TRUE_MESSAGE(ini.find("-DFRY_FIRMWARE_VERSION='\"0.4.31\"'") != std::string::npos,
+                           "platformio.ini must declare FRY_FIRMWARE_VERSION 0.4.31");
   TEST_ASSERT_TRUE(loadSource("src/esp32/wg_provision_client.cpp", wg));
   TEST_ASSERT_TRUE_MESSAGE(wg.find("fry_config::getDeviceToken()") != std::string::npos,
                            "WG provisioning depends on fry_config::getDeviceToken()");
@@ -393,7 +386,7 @@ void tearDown() {}
 int main(int, char**) {
   UNITY_BEGIN();
   RUN_TEST(test_esp32_registerInstallation_records_boot_success_on_both_ok_and_heal_paths);
-  RUN_TEST(test_version_0_4_30_and_tunnel_prerequisite_wiring);
+  RUN_TEST(test_version_0_4_31_and_tunnel_prerequisite_wiring);
   RUN_TEST(test_case1_boot_success_suppresses_duplicate_on_tick_within_heartbeat);
   RUN_TEST(test_case2_boot_failure_retries_immediately_on_next_tick);
   RUN_TEST(test_case3_ota_reboot_on_0_4_30_sends_exactly_one_registration_with_new_version);
