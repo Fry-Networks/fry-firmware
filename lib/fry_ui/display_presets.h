@@ -61,6 +61,31 @@ size_t formatBootLine(char* out, size_t cap, const Info& i, const char* driver, 
 // something wins and the rest are never touched. Returns the chosen preset (0 = nothing found).
 uint8_t autodetect(const uint8_t* presets, size_t n, BusOps& bus, uint32_t totalBudgetMs, Info& best);
 
+// ---- boot probe scope (fleet-safety policy) -------------------------------------------------------------------------------
+// A miner with unknown wiring must never have SPI / TFT / XPT2046 pins driven. The scope is decided from the config store
+// (explicit board preset, explicit display_mode) and nothing else:
+//   Off        display_mode=none: nothing is touched.
+//   I2cDefault no preset and display_mode=Auto: ONLY the bounded I2C address/register probe on the board's default I2C pins.
+//   Preset     a board preset is set (config store or compiled in): that preset's pins, SPI / touch included.
+//   Candidates no preset but display_mode=screen/touch was set explicitly: the per-chip candidate presets.
+enum class ProbeScope : uint8_t { Off, I2cDefault, Preset, Candidates };
+ProbeScope probeScope(uint8_t preset, uint8_t displayMode /* cfg::DisplayMode: 0 Auto, 1 None, 2 Screen, 3 Touch */);
+
+// `full` with every SPI / TFT / touch pin cleared: only sda / scl (and the forbidden list) remain.
+BoardPins i2cOnlyPins(const BoardPins& full);
+
+// Lets the device bus follow the probe (select the SPI / XPT pins before a preset is probed, release them after).
+struct BusHook {
+  virtual void select(uint8_t preset, const BoardPins& p) = 0;
+  virtual void release(const BoardPins& p) = 0;
+  virtual ~BusHook() {}
+};
+
+// Runs exactly the probe the scope allows. `defaultI2cPreset` names the chip's default I2C pin preset; `cands` are the
+// Candidates-scope presets. Returns the preset that answered (or the explicit preset; 0 when none), fills `best` and `pinsOut`.
+uint8_t bootProbe(uint8_t preset, uint8_t displayMode, uint8_t defaultI2cPreset, const uint8_t* cands, size_t nCands,
+                  BusOps& bus, BusHook* hook, uint32_t totalBudgetMs, Info& best, BoardPins& pinsOut, bool& havePins);
+
 }  // namespace disp
 }  // namespace fry
 

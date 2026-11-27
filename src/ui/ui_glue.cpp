@@ -14,6 +14,14 @@
 #if defined(ARDUINO_ARCH_ESP8266)
 #include <ESP8266WiFi.h>
 #include <Updater.h>
+#elif defined(FRY_BOARDS_PORT)
+#include <WiFi.h>
+#if defined(FRY_BOARD_PICO)
+#include <Updater.h>
+#else
+#include <Update.h>
+#endif
+#include "../../include/fry_board_hal.h"
 #else
 #include <Update.h>
 #include <WiFi.h>
@@ -37,8 +45,21 @@
 
 #if defined(ARDUINO_ARCH_ESP8266)
 #define WIFI_AUTH_OPEN_VALUE ENC_TYPE_NONE
+#elif defined(FRY_BOARDS_PORT)
+#define WIFI_AUTH_OPEN_VALUE 0
 #else
 #define WIFI_AUTH_OPEN_VALUE WIFI_AUTH_OPEN
+#endif
+// fry::cfg::deviceStore() has exactly ONE owner per env: this file on the ESP envs, src/hal/config_store_boards.cpp on the board
+// ports (FRY_BOARDS_PORT; it guards its definition with FRY_UI_PROVIDES_DEVICE_STORE, which an env sets when it wants this
+// file's store instead). The bring-up image (FRY_UI_BARE) has no Store at all.
+#if !defined(FRY_UI_BARE) && (!defined(FRY_BOARDS_PORT) || defined(FRY_UI_PROVIDES_DEVICE_STORE))
+#define FRY_UI_OWNS_DEVICE_STORE 1
+#endif
+#if defined(FRY_BOARDS_PORT)
+#define FRY_UI_RESTART() fry::board::restart()
+#else
+#define FRY_UI_RESTART() ESP.restart()
 #endif
 #ifndef FRY_FIRMWARE_VERSION
 #define FRY_FIRMWARE_VERSION "0"
@@ -92,6 +113,7 @@ UiPrefs loadPrefs() {
   return p;
 }
 
+#if defined(FRY_UI_OWNS_DEVICE_STORE)
 class DevStore : public cfg::Store {
  public:
   bool load(cfg::Snapshot& o) override {
@@ -162,6 +184,8 @@ class DevStore : public cfg::Store {
   }
 };
 
+#endif  // FRY_UI_OWNS_DEVICE_STORE
+
 class DevStatus : public ui::StatusSource {
  public:
   void read(ui::MinerStatus& o) override {
@@ -213,6 +237,11 @@ class DevStatus : public ui::StatusSource {
 
 class DevActions : public ui::Actions {
  public:
+#if defined(FRY_BOARDS_PORT)
+  // Board ports (Pico W / BK7231N) are screen-only: no touch setup UI, so no on-device Wi-Fi scan. Provisioning is the SoftAP portal / Improv.
+  bool startWifiScan() override { return false; }
+  int scanResults(char[][33], int8_t*, bool*, int) override { return 0; }
+#else
   bool startWifiScan() override {
     if (WiFi.getMode() == WIFI_OFF) WiFi.mode(WIFI_STA);
     WiFi.scanDelete();
@@ -239,6 +268,7 @@ class DevActions : public ui::Actions {
     WiFi.scanDelete();
     return out;
   }
+#endif  // FRY_BOARDS_PORT
   void requestConnect() override { scheduleRestart(2000); }
   void requestOtaCheck() override { fry_trigger_ota_now(); }
   void reboot() override { scheduleRestart(1500); }
@@ -250,7 +280,7 @@ class DevActions : public ui::Actions {
       FRY_PRINTLN("[ui] planned restart to apply new settings");
       fry_ota::notePlannedRestart();  // not a failure: a pending image must not take a strike
       Serial.flush();
-      ESP.restart();
+      FRY_UI_RESTART();
     }
   }
 
@@ -262,7 +292,9 @@ class DevActions : public ui::Actions {
   uint32_t restartAt_ = 0;
 };
 
+#if defined(FRY_UI_OWNS_DEVICE_STORE)
 DevStore s_store;
+#endif
 DevStatus s_status;
 DevActions s_actions;
 #endif  // !FRY_UI_BARE
@@ -277,7 +309,7 @@ void logLine(const char* line) { FRY_PRINTF("%s\n", line); }
 
 }  // namespace
 
-#if !defined(FRY_UI_BARE)
+#if defined(FRY_UI_OWNS_DEVICE_STORE)
 namespace fry {
 namespace cfg {
 Store& deviceStore() { return s_store; }
@@ -296,41 +328,46 @@ extern "C" void fry_ui_setup(void) {
   disp::Info probed;
   memset(&probed, 0, sizeof(probed));
   uint8_t preset = prefs.preset ? prefs.preset : (uint8_t)FRY_UI_PRESET;
+#if !defined(FRY_UI_BARE)
+  if (!prefs.preset && FRY_UI_PRESET) {
+    // A preset image (esp32-cyd-touch ...) remembers its board in the config store, so an OTA to the unified default image
+    // (which has no compiled-in preset) keeps probing this board's pins and the UI survives the update.
+    KvStore kv;
+    if (kv.begin("fry_ui", false)) {
+      kv.putUChar("dispPreset", (uint8_t)FRY_UI_PRESET);
+      kv.end();
+    }
+  }
+#endif
   disp::BoardPins pins;
   bool havePins = false;
 
   const uint32_t t0 = millis();
-  if (preset && disp::presetPins(preset, pins)) {
-    havePins = true;
-    bus.setSpi(pins.spiSck, pins.spiMosi, pins.spiMiso);
-    bus.setXpt(fry_dispdev::devPinsFor(preset));
-    probed = disp::probe(pins, bus, 400);
-  } else {
-    // Unified image: try each candidate wiring in turn, bounded; the first that answers wins.
+  // Fleet safety (lib/fry_ui bootProbe + probeScope): with no board preset and display_mode=Auto only the bounded I2C probe on
+  // the chip's default I2C pins runs. SPI / TFT / XPT2046 pins are driven only for a preset (config store or compiled in) or an
+  // explicit display_mode=screen/touch.
 #if defined(CONFIG_IDF_TARGET_ESP32S3)
-    static const uint8_t kCands[] = {disp::PRESET_ESP32S3_CAPTOUCH, disp::PRESET_ESP32S3_TFT, disp::PRESET_ESP32S3_OLED};
+  static const uint8_t kCands[] = {disp::PRESET_ESP32S3_CAPTOUCH, disp::PRESET_ESP32S3_TFT, disp::PRESET_ESP32S3_OLED};
+  const uint8_t defaultI2c = disp::PRESET_ESP32S3_OLED;
 #elif defined(ARDUINO_ARCH_ESP32)
-    static const uint8_t kCands[] = {disp::PRESET_ESP32_OLED, disp::PRESET_ESP32_CYD};
+  static const uint8_t kCands[] = {disp::PRESET_ESP32_OLED, disp::PRESET_ESP32_CYD};
+  const uint8_t defaultI2c = disp::PRESET_ESP32_OLED;
 #else
-    static const uint8_t kCands[] = {disp::PRESET_ESP8266_OLED};
+  static const uint8_t kCands[] = {disp::PRESET_ESP8266_OLED};
+  const uint8_t defaultI2c = disp::PRESET_ESP8266_OLED;
 #endif
-    const uint32_t each = 400 / (sizeof(kCands) / sizeof(kCands[0]));
-    for (size_t i = 0; i < sizeof(kCands) / sizeof(kCands[0]); i++) {
-      disp::BoardPins cp;
-      if (!disp::presetPins(kCands[i], cp)) continue;
-      bus.setSpi(cp.spiSck, cp.spiMosi, cp.spiMiso);
-      bus.setXpt(fry_dispdev::devPinsFor(kCands[i]));
-      const disp::Info got = disp::probe(cp, bus, each);
-      bus.release(cp);
-      if (got.mode != disp::FRY_DISP_NONE) {
-        probed = got;
-        preset = kCands[i];
-        pins = cp;
-        havePins = true;
-        break;
-      }
+  struct Hook : disp::BusHook {
+    fry_dispdev::Bus* b;
+    void select(uint8_t pr, const disp::BoardPins& p) override {
+      b->setSpi(p.spiSck, p.spiMosi, p.spiMiso);
+      b->setXpt(fry_dispdev::devPinsFor(pr));
     }
-  }
+    void release(const disp::BoardPins& p) override { b->release(p); }
+  } hook;
+  hook.b = &bus;
+  const uint8_t chosen = disp::bootProbe(preset, (uint8_t)prefs.mode, defaultI2c, kCands, sizeof(kCands) / sizeof(kCands[0]), bus,
+                                         &hook, 400, probed, pins, havePins);
+  if (chosen) preset = chosen;
 
   char line[200];
   FRY_PRINTF("[ui] probe preset=%s panel=%s id=0x%06X touch=%s taddr=0x%02X ms=%u\n", disp::presetName(preset),
@@ -365,9 +402,9 @@ extern "C" void fry_ui_setup(void) {
   if (res.mode == disp::FRY_DISP_TOUCHSCREEN && fry_dispdev::driverTouch()) {
 #if !defined(FRY_UI_BARE)
     int16_t cal[8];
-    if (s_store.loadTouchCal(cal)) fry_dispdev::driverApplyCal(cal);
+    if (cfg::deviceStore().loadTouchCal(cal)) fry_dispdev::driverApplyCal(cal);
     s_touchUi = new ui::TouchUI();
-    s_touchUi->begin(*canvas, *fry_dispdev::driverTouch(), s_store, s_status, s_actions);
+    s_touchUi->begin(*canvas, *fry_dispdev::driverTouch(), cfg::deviceStore(), s_status, s_actions);
     s_mode = disp::FRY_DISP_TOUCHSCREEN;
     FRY_PRINTF("[ui] TouchUI init screen=%u controller=%s\n", (unsigned)s_touchUi->screenId(), disp::touchName(res.touch));
 #endif

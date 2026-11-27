@@ -253,5 +253,63 @@ uint8_t autodetect(const uint8_t* presets, size_t n, BusOps& bus, uint32_t total
   return 0;
 }
 
+ProbeScope probeScope(uint8_t preset, uint8_t displayMode) {
+  if (displayMode == 1) return ProbeScope::Off;
+  if (preset != 0) return ProbeScope::Preset;
+  if (displayMode == 2 || displayMode == 3) return ProbeScope::Candidates;
+  return ProbeScope::I2cDefault;
+}
+
+BoardPins i2cOnlyPins(const BoardPins& full) {
+  BoardPins p = full;
+  p.spiSck = p.spiMosi = p.spiMiso = -1;
+  p.tftCs = p.tftDc = p.tftRst = p.tftBl = -1;
+  p.touchCs = p.touchIrq = p.touchSda = p.touchScl = p.touchRst = -1;
+  return p;
+}
+
+uint8_t bootProbe(uint8_t preset, uint8_t displayMode, uint8_t defaultI2cPreset, const uint8_t* cands, size_t nCands,
+                  BusOps& bus, BusHook* hook, uint32_t totalBudgetMs, Info& best, BoardPins& pinsOut, bool& havePins) {
+  best = blankInfo();
+  havePins = false;
+  const ProbeScope scope = probeScope(preset, displayMode);
+  if (scope == ProbeScope::Off) return 0;
+  if (scope == ProbeScope::Preset) {
+    BoardPins pp;
+    if (!presetPins(preset, pp)) return preset;
+    pinsOut = pp;
+    havePins = true;
+    if (hook) hook->select(preset, pp);
+    best = probe(pp, bus, totalBudgetMs);
+    return preset;
+  }
+  if (scope == ProbeScope::I2cDefault) {
+    BoardPins dp;
+    if (!presetPins(defaultI2cPreset, dp)) return 0;
+    const BoardPins ip = i2cOnlyPins(dp);
+    best = probe(ip, bus, totalBudgetMs);
+    if (hook) hook->release(ip);
+    if (best.mode == FRY_DISP_NONE) return 0;
+    pinsOut = ip;
+    havePins = true;
+    return defaultI2cPreset;
+  }
+  const uint32_t each = nCands ? totalBudgetMs / (uint32_t)nCands : 0;
+  for (size_t i = 0; i < nCands; i++) {
+    BoardPins cp;
+    if (!presetPins(cands[i], cp)) continue;
+    if (hook) hook->select(cands[i], cp);
+    const Info got = probe(cp, bus, each);
+    if (hook) hook->release(cp);
+    if (got.mode != FRY_DISP_NONE) {
+      best = got;
+      pinsOut = cp;
+      havePins = true;
+      return cands[i];
+    }
+  }
+  return 0;
+}
+
 }  // namespace disp
 }  // namespace fry

@@ -7,7 +7,10 @@
 
 #include <string.h>
 
-#include "../../lib/fry_ui/config_snapshot.h"
+// Spelled through a macro so PlatformIO's library finder (which matches literal #include lines and ignores #if) does not pull
+// lib/fry_ui into the ESP envs, where this file compiles to nothing (see src/ui/fry_inc.h).
+#include "../ui/fry_inc.h"
+#include FRY_INC_LIB(config_snapshot.h)
 #include "../core/fry_config.h"
 #include "../core/kv_store.h"
 #include "../core/miner_key.h"

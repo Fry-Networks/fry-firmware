@@ -30,6 +30,9 @@
 #define FRY_BOARD_BUTTON_OVERRIDE 1
 #endif
 #include "config.h"
+#if defined(FRY_HAS_DISPLAY)
+#include "../../include/fry_touch_ui.h"  // fry_ui_setup / fry_ui_loop (strong in src/ui/ui_glue.cpp)
+#endif
 
 #ifndef FRY_FIRMWARE_VERSION
 #define FRY_FIRMWARE_VERSION "0.0.0-dev"
@@ -200,11 +203,18 @@ void setup() {
   if (hasCredentials && !keyOk) FRY_PRINTLN("[boot] wifi credentials stored but no miner key - staying provisionable");
   setPhase(fry::initialBootPhase(hasCredentials && keyOk));
 
+#if defined(FRY_HAS_DISPLAY)
+  fry_ui_setup();
+#endif
+
   FRY_PRINTLN("[boot] ready");
 }
 
 void loop() {
   fry_ota::loopGuard();
+#if defined(FRY_HAS_DISPLAY)
+  fry_ui_loop();
+#endif
 
   // Improv Serial answers its read-only commands and the 0xF0 key write in every phase; Wi-Fi settings only while the provisioning
   // transport is up.
