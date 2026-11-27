@@ -15,6 +15,7 @@
 #include "heap_gate.h"
 #include "heap_gate_wait.h"
 #include "http_tls.h"
+#include "iso8601_utc.h"
 #include "miner_key.h"
 #include "telemetry_body.h"
 #include "wifi_station.h"
@@ -57,9 +58,8 @@ uint32_t stackHighWater() {
 bool nowIso8601(char* out, size_t outLen) {
   time_t now = time(nullptr);
   if (now < 1600000000) return false;  // clearly pre-NTP
-  struct tm t;
-  gmtime_r(&now, &t);
-  return strftime(out, outLen, "%Y-%m-%dT%H:%M:%SZ", &t) > 0;
+  // No strftime/gmtime: they pull libc's locale tables (~640 B of ESP8266 DRAM). lib/fry_core/iso8601_utc.h.
+  return fry::formatIso8601Utc(static_cast<int64_t>(now), out, outLen) > 0;
 }
 
 }  // namespace

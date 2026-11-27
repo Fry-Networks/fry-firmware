@@ -1,0 +1,11 @@
+{
+  "_comment": "Stricter ESP8266 static-RAM guard (tools/esp8266_ram_margin.py). measured_total is .data+.rodata+.bss of the esp8266 prod image at the T-ESP commit (xtensa-lx106-elf-size -A): data 1648 + rodata 4892 + bss 27056. The old gate (tools/check_esp8266_ram_budget.py, 34408 B) is untouched and still applies; this one fails the build at measured_total + headroom, so the ~760 B won back by T-ESP (strftime removal, +40 B for the IRAM heap) cannot be quietly spent again. Raising it needs a new measured_total in the same commit and a reason.",
+  "env_gated": ["esp8266", "esp8266_test"],
+  "measured_total": 33596,
+  "headroom": 64,
+  "data": 1648,
+  "rodata": 4892,
+  "bss": 27056,
+  "pre_t_esp_total": 34356,
+  "old_budget": 34408
+}
