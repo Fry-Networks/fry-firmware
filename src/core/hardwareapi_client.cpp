@@ -515,6 +515,7 @@ bool registerInstallation() {
 #endif
   addHeartbeatResetReason(doc);
   String body;
+  body.reserve(measureJson(doc));  // one block, no realloc growth steps splitting the ESP8266 heap
   serializeJson(doc, body);
 
   String url = fry_config::getApiBase() + FRY_TEXT("/installations/") + minerKey + FRY_TEXT("/installations/") + installId;
@@ -667,6 +668,7 @@ bool renewLease() {
   JsonDocument doc;
   doc["lease_seconds"] = LEASE_SECONDS;
   String body;
+  body.reserve(measureJson(doc));
   serializeJson(doc, body);
 
   String url = fry_config::getApiBase() + FRY_TEXT("/installations/") + minerKey + FRY_TEXT("/leases/") + installId;
@@ -702,6 +704,7 @@ int putPoc() {
   document["heap_free"] = ESP.getFreeHeap();
   document["rssi"] = fry_wifi::isConnected() ? fry_wifi::rssi() : 0;
   String body;
+  body.reserve(measureJson(doc));
   serializeJson(doc, body);
 
   String url = fry_config::getApiBase() + FRY_TEXT("/PoC/") + minerKey + FRY_TEXT("/hardware");
