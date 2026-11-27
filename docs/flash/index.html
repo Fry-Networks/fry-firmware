@@ -198,6 +198,37 @@
   <p class="note">Updating a board that already has a key? Leave <strong>Erase</strong> unchecked —
   your key stays, and an older <code>IOT-</code> key converts to <code>FEM-</code> on first boot.</p>
 
+  <section id="otherBoards">
+    <h2>Other boards</h2>
+    <p>These boards are not flashed from the button above. The browser flasher only lists chips it
+    can install straight from this page; the boards below use their own tools. Firmware files for
+    them are published on the
+    <a href="https://github.com/Fry-Networks/fry-firmware/releases" target="_blank" rel="noopener noreferrer">releases page</a>
+    once they ship &mdash; this page holds no binaries for them yet.</p>
+
+    <h3 id="board-pico">Raspberry Pi Pico W / Pico 2 W (UF2 drag-and-drop)</h3>
+    <ol>
+      <li>Download the <code>.uf2</code> file that matches your board: Pico W is an RP2040,
+      Pico 2 W is an RP2350. They are not interchangeable.</li>
+      <li>Unplug the board. Hold the <strong>BOOTSEL</strong> button, plug in the USB cable, then
+      release the button.</li>
+      <li>A USB drive appears (<code>RPI-RP2</code> on Pico W, <code>RP2350</code> on Pico 2 W).</li>
+      <li>Drag the <code>.uf2</code> file onto that drive. It reboots by itself when the copy
+      finishes; the drive disappears. No driver or tool is needed.</li>
+    </ol>
+
+    <h3 id="board-bk7231n">BK7231N (ltchiptool)</h3>
+    <ol>
+      <li>Install the flasher: <code>pip install ltchiptool</code> (Python 3.9 or newer).</li>
+      <li>Connect a USB-serial adapter (3.3 V logic) to the module&rsquo;s <code>TX1</code> and
+      <code>RX1</code> pins and to ground.</li>
+      <li>Run <code>ltchiptool flash write -d &lt;serial port&gt; &lt;firmware file&gt;</code>
+      (for example <code>/dev/ttyUSB0</code> or <code>COM3</code>), then power-cycle or reset the
+      module when the tool asks you to.</li>
+      <li>Wait for the tool to report that the write and verify finished before unplugging.</li>
+    </ol>
+  </section>
+
   <section id="nextSteps">
     <h2>Next: get it earning</h2>
     <p>Flashing is only the first step &mdash; the board still needs your Wi-Fi and a claim on the
