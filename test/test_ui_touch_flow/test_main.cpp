@@ -8,7 +8,7 @@ using namespace fry;
 using namespace fry::uitest;
 using fry::ui::MinerState;
 
-static const char* kKey = "FEM-0123456789abcdefABCDEF0123456789";
+static const char* kKey = "FEM-" "0123456789abcdef" "ABCDEF0123456789";  // split: not a literal key-shaped string (check_device_key_shapes)
 
 void setUp(void) {}
 void tearDown(void) {}

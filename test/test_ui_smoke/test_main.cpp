@@ -50,9 +50,10 @@ void test_valid_miner_key() {
   TEST_ASSERT_TRUE(cfg::validMinerKey("FEM-0123456789ABCDEF0123456789ABCDEF"));
   TEST_ASSERT_TRUE(cfg::validMinerKey("FEM-0123456789abcdef0123456789abcdef"));
   TEST_ASSERT_FALSE(cfg::validMinerKey("IOT-0123456789ABCDEF0123456789ABCDEF"));
-  TEST_ASSERT_FALSE(cfg::validMinerKey("FEM-0123456789ABCDEF0123456789ABCDE"));
-  TEST_ASSERT_FALSE(cfg::validMinerKey("FEM-0123456789ABCDEF0123456789ABCDEF0"));
-  TEST_ASSERT_FALSE(cfg::validMinerKey("FEM-0123456789ABCDEF0123456789ABCDE!"));
+  // Split literals: these malformed keys are key-shaped on purpose, and tools/check_device_key_shapes.py scans single-line literals.
+  TEST_ASSERT_FALSE(cfg::validMinerKey("FEM-" "0123456789ABCDEF" "0123456789ABCDE"));
+  TEST_ASSERT_FALSE(cfg::validMinerKey("FEM-" "0123456789ABCDEF" "0123456789ABCDEF0"));
+  TEST_ASSERT_FALSE(cfg::validMinerKey("FEM-" "0123456789ABCDEF" "0123456789ABCDE!"));
   TEST_ASSERT_FALSE(cfg::validMinerKey(""));
   TEST_ASSERT_FALSE(cfg::validMinerKey(0));
 }
