@@ -26,6 +26,8 @@ struct ProbeRaw {
   uint16_t xpt[6];             // XPT2046: temp0, temp0 again, vbat, aux, z1, z2 (12-bit)
   uint8_t nXpt;                // 0 = not read, 6 = channel read, 3 = legacy x/y/z sample
   int8_t xptVerdict;           // -1 not judged, 0 rejected, 1 accepted
+  uint8_t st[4];               // RDDST (0x09) first 4 bytes, read only for the LovyanGFX-style ILI9341 fallback
+  uint8_t nSt;                 // 0 = not read, 4 = read
 };
 
 struct Info {

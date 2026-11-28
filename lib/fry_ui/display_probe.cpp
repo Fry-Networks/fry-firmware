@@ -187,6 +187,19 @@ bool stableFirst3(const uint8_t* up, const uint8_t* dn) {
   return !allSame(up, 3, 0x00) && !allSame(up, 3, 0xFF);
 }
 
+// LovyanGFX-style ILI9341 acceptance for clones that do not return 00 93 41: RDDID (0x04) byte 0 is 0x00 under BOTH pulls (a floating
+// line follows the pull-up, so it cannot be 0x00 there) and RDDST (0x09) is a driven, non-zero, non-0xFF 4-byte status (identical under
+// both pulls). A line stuck low reads 0x00 for RDDST and a line stuck high 0xFF, so neither passes.
+bool ili9341StatusFallback(Ctx& c, ProbeRaw& rw) {
+  if (rw.id04Up[0] != 0x00 || rw.id04Dn[0] != 0x00 || !c.ok()) return false;
+  uint8_t up[kIdRead], dn[kIdRead];
+  if (!readIdPulled(c, 0x09, up, dn)) return false;
+  memcpy(rw.st, up, 4);
+  rw.nSt = 4;
+  if (memcmp(up, dn, 4) != 0) return false;
+  return !allSame(up, 4, 0x00) && !allSame(up, 4, 0xFF);
+}
+
 // XPT2046 aux channels: the die temperature (TEMP0, ~590 mV at 25 C = mid-range) is read twice; a driven converter gives a
 // non-saturated value that repeats, a floating MISO gives 0 / 4095 / noise. All six channels equal is a stuck or floating line.
 bool xptChannelsPlausible(const uint16_t ch[6]) {
@@ -308,6 +321,12 @@ Info probe(const BoardPins& pins, BusOps& bus, uint32_t budgetMs) {
           r.width = 240;
           r.height = 320;
           r.panelId = 0x009341u;
+        } else if (ili9341StatusFallback(c, rw)) {
+          // LovyanGFX's own CYD detector: RDDID first byte 0x00 and RDDST nonzero. Accepted only when driven (identical under both pulls).
+          r.panel = Panel::ILI9341_240x320;
+          r.width = 240;
+          r.height = 320;
+          r.panelId = ((uint32_t)rw.st[0] << 16) | ((uint32_t)rw.st[1] << 8) | rw.st[2];
         } else if (stableFirst3(rw.id04Up, rw.id04Dn)) {
           r.panelId = ((uint32_t)rw.id04Up[0] << 16) | ((uint32_t)rw.id04Up[1] << 8) | rw.id04Up[2];  // unknown, kept for the log
         }
@@ -315,7 +334,21 @@ Info probe(const BoardPins& pins, BusOps& bus, uint32_t budgetMs) {
     }
   }
 
-  // 3. Touch, only when a display answered (nothing is driven for a board with no screen).
+  // 3a. XPT2046 on SPI: read whenever the pin set declares it (touchCs >= 0 only in preset / explicit-mode scopes; the I2C-only default
+  // scope clears it, so no-preset boards drive nothing). Done even when the TFT id read failed so the touch bus is diagnosable and the
+  // controller is confirmed on its own; the mode still needs a panel.
+  if (pins.touchCs >= 0 && pins.spiSck >= 0 && pins.spiMiso >= 0 && !(pins.touchSda >= 0 && pins.touchScl >= 0)) {
+    const int xp[4] = {pins.spiSck, pins.spiMosi, pins.spiMiso, pins.touchCs};
+    if (allPinsAllowed(pins, xp, 4)) {
+      r.raw.xptVerdict = 0;
+      if (xptPlausible(c, r.raw)) {
+        r.touch = Touch::XPT2046;
+        r.raw.xptVerdict = 1;
+      }
+    }
+  }
+
+  // 3b. I2C touch, only when a display answered (nothing is driven for a board with no screen).
   if (r.panel != Panel::None) {
     const bool sepI2c = pins.touchSda >= 0 && pins.touchScl >= 0;
     const int tsda = sepI2c ? pins.touchSda : pins.sda;
@@ -330,19 +363,7 @@ Info probe(const BoardPins& pins, BusOps& bus, uint32_t budgetMs) {
         r.touchAddr = a;
       }
     }
-    if (r.touch == Touch::None && pins.touchCs >= 0 && pins.spiSck >= 0 && pins.spiMiso >= 0) {
-      const int xp[4] = {pins.spiSck, pins.spiMosi, pins.spiMiso, pins.touchCs};
-      if (allPinsAllowed(pins, xp, 4)) {
-        r.raw.xptVerdict = 0;
-        if (xptPlausible(c, r.raw)) {
-          r.touch = Touch::XPT2046;
-          r.raw.xptVerdict = 1;
-        }
-      }
-    }
     r.mode = r.touch != Touch::None ? FRY_DISP_TOUCHSCREEN : FRY_DISP_SCREEN_ONLY;
-  } else {
-    r.touch = Touch::None;
   }
   return r;
 }

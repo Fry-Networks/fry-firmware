@@ -183,7 +183,7 @@ void test_probe_raw_line_shows_bytes() {
   size_t n = formatProbeRaw(line, sizeof(line), i);
   TEST_ASSERT_TRUE(n > 0 && n < sizeof(line));
   TEST_ASSERT_EQUAL_STRING(
-      "[ui] probe raw d3u=FF0093410000 d3d=000093410000 d3bit=8 04u=- 04d=- 04bit=-1 xpt=3D9,3DA,C1C,5DC,C,FAA xn=6 xv=1", line);
+      "[ui] probe raw d3u=FF0093410000 d3d=000093410000 d3bit=8 04u=- 04d=- 04bit=-1 xpt=3D9,3DA,C1C,5DC,C,FAA xn=6 xv=1 st=-", line);
   // failed read: the same line still carries the bytes the lead needs
   CydBus f;
   f.panelKind = CydBus::STUCK_LOW;
@@ -191,7 +191,7 @@ void test_probe_raw_line_shows_bytes() {
   formatProbeRaw(line, sizeof(line), j);
   TEST_ASSERT_NOT_NULL(strstr(line, "d3u=000000000000"));
   TEST_ASSERT_NOT_NULL(strstr(line, "04u=000000000000"));
-  TEST_ASSERT_NOT_NULL(strstr(line, "xpt=-"));
+  TEST_ASSERT_NOT_NULL(strstr(line, "xn=6 xv=0"));  // touch bus is read (and rejected: floating) even though the TFT read failed
   char small[20];
   size_t m = formatProbeRaw(small, sizeof(small), j);
   TEST_ASSERT_TRUE(m < sizeof(small));

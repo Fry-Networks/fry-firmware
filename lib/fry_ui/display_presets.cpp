@@ -284,8 +284,10 @@ size_t formatProbeRaw(char* out, size_t cap, const Info& i) {
     for (size_t k = 0; k < r.nXpt && k < 6 && w + 6 < sizeof(x); k++)
       w += (size_t)snprintf(x + w, sizeof(x) - w, k ? ",%X" : "%X", (unsigned)r.xpt[k]);
   }
-  int n = snprintf(out, cap, "[ui] probe raw d3u=%s d3d=%s d3bit=%d 04u=%s 04d=%s 04bit=%d xpt=%s xn=%u xv=%d", a, b, (int)r.d3Bit, c, d,
-                   (int)r.id04Bit, x, (unsigned)r.nXpt, (int)r.xptVerdict);
+  char st[12];
+  hexBytes(st, sizeof(st), r.st, r.nSt > 4 ? 4 : r.nSt);
+  int n = snprintf(out, cap, "[ui] probe raw d3u=%s d3d=%s d3bit=%d 04u=%s 04d=%s 04bit=%d xpt=%s xn=%u xv=%d st=%s", a, b, (int)r.d3Bit,
+                   c, d, (int)r.id04Bit, x, (unsigned)r.nXpt, (int)r.xptVerdict, st);
   if (n < 0) {
     out[0] = 0;
     return 0;
