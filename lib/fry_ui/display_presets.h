@@ -43,6 +43,11 @@ bool pinsAllowed(const BoardPins& p);
 
 bool presetPins(uint8_t preset, BoardPins& out);  // false for 0 / unknown
 bool presetInfo(uint8_t preset, Info& out);       // the hardware the preset declares
+// A preset whose XPT2046 sits on its OWN bus (CYD: CLK25 MOSI32 MISO39, GPIO39/36 input-only with no internal pull) instead of the
+// TFT bus. false = the touch controller shares the TFT SPI pins (or the preset has none).
+bool presetTouchBus(uint8_t preset, int* clk, int* mosi, int* miso);
+// `p` with touchCs cleared (so the touch controller is never driven) when a separate touch bus uses a forbidden pin.
+BoardPins gateTouchBus(uint8_t preset, const BoardPins& p);
 const char* presetName(uint8_t preset);
 const char* modeName(Mode m);
 const char* panelName(Panel p);
@@ -56,6 +61,9 @@ uint32_t loopIntervalMs(Mode m);  // minimum ms between UI loop calls; 0 for NON
 // "[ui] mode=TOUCHSCREEN panel=ILI9341_240x320 touch=XPT2046 drv=LovyanGFX sck=14 mosi=13 miso=12 cs=15 ..."
 // Returns the length written (always NUL terminated, truncated to cap).
 size_t formatBootLine(char* out, size_t cap, const Info& i, const char* driver, const BoardPins& p);
+
+// "[ui] probe raw d3u=.. d3d=.. d3bit=N 04u=.. 04d=.. 04bit=N xpt=t,t,vb,ax,z1,z2 xv=N" (raw bytes in hex; '-' = not read).
+size_t formatProbeRaw(char* out, size_t cap, const Info& i);
 
 // Try the candidate presets in order, each with the remaining budget; the first whose probe finds
 // something wins and the rest are never touched. Returns the chosen preset (0 = nothing found).

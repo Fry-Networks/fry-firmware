@@ -156,6 +156,25 @@ bool presetInfo(uint8_t preset, Info& out) {
   return true;
 }
 
+bool presetTouchBus(uint8_t preset, int* clk, int* mosi, int* miso) {
+  if (preset != PRESET_ESP32_CYD) return false;  // ESP32-2432S028R: XPT2046 CLK25 MOSI32 MISO39 (CS33 / IRQ36 in BoardPins)
+  if (clk) *clk = 25;
+  if (mosi) *mosi = 32;
+  if (miso) *miso = 39;
+  return true;
+}
+
+BoardPins gateTouchBus(uint8_t preset, const BoardPins& p) {
+  BoardPins g = p;
+  int clk = -1, mosi = -1, miso = -1;
+  if (presetTouchBus(preset, &clk, &mosi, &miso) &&
+      (pinForbidden(p, clk) || pinForbidden(p, mosi) || pinForbidden(p, miso))) {
+    g.touchCs = -1;
+    g.touchIrq = -1;
+  }
+  return g;
+}
+
 const char* presetName(uint8_t p) {
   switch (p) {
     case PRESET_ESP32_OLED: return "esp32-oled";
@@ -238,12 +257,53 @@ size_t formatBootLine(char* out, size_t cap, const Info& i, const char* driver, 
   return (size_t)n;
 }
 
+static size_t hexBytes(char* o, size_t cap, const uint8_t* b, size_t n) {
+  if (n == 0) {
+    snprintf(o, cap, "-");
+    return 1;
+  }
+  size_t w = 0;
+  for (size_t k = 0; k < n && w + 2 < cap; k++) w += (size_t)snprintf(o + w, cap - w, "%02X", (unsigned)b[k]);
+  return w;
+}
+
+size_t formatProbeRaw(char* out, size_t cap, const Info& i) {
+  if (!out || cap == 0) return 0;
+  const ProbeRaw& r = i.raw;
+  char a[16], b[16], c[16], d[16];
+  hexBytes(a, sizeof(a), r.d3Up, r.nD3 > 6 ? 6 : r.nD3);
+  hexBytes(b, sizeof(b), r.d3Dn, r.nD3 > 6 ? 6 : r.nD3);
+  hexBytes(c, sizeof(c), r.id04Up, r.n04 > 6 ? 6 : r.n04);
+  hexBytes(d, sizeof(d), r.id04Dn, r.n04 > 6 ? 6 : r.n04);
+  char x[40];
+  x[0] = 0;
+  if (r.nXpt == 0) {
+    snprintf(x, sizeof(x), "-");
+  } else {
+    size_t w = 0;
+    for (size_t k = 0; k < r.nXpt && k < 6 && w + 6 < sizeof(x); k++)
+      w += (size_t)snprintf(x + w, sizeof(x) - w, k ? ",%X" : "%X", (unsigned)r.xpt[k]);
+  }
+  int n = snprintf(out, cap, "[ui] probe raw d3u=%s d3d=%s d3bit=%d 04u=%s 04d=%s 04bit=%d xpt=%s xn=%u xv=%d", a, b, (int)r.d3Bit, c, d,
+                   (int)r.id04Bit, x, (unsigned)r.nXpt, (int)r.xptVerdict);
+  if (n < 0) {
+    out[0] = 0;
+    return 0;
+  }
+  if ((size_t)n >= cap) {
+    out[cap - 1] = 0;
+    return cap - 1;
+  }
+  return (size_t)n;
+}
+
 uint8_t autodetect(const uint8_t* presets, size_t n, BusOps& bus, uint32_t totalBudgetMs, Info& best) {
   best = blankInfo();
   const uint32_t each = n ? totalBudgetMs / (uint32_t)n : 0;
   for (size_t k = 0; k < n; k++) {
     BoardPins p;
     if (!presetPins(presets[k], p)) continue;
+    p = gateTouchBus(presets[k], p);
     Info i = probe(p, bus, each);
     if (i.mode != FRY_DISP_NONE) {
       best = i;
@@ -277,6 +337,7 @@ uint8_t bootProbe(uint8_t preset, uint8_t displayMode, uint8_t defaultI2cPreset,
   if (scope == ProbeScope::Preset) {
     BoardPins pp;
     if (!presetPins(preset, pp)) return preset;
+    pp = gateTouchBus(preset, pp);
     pinsOut = pp;
     havePins = true;
     if (hook) hook->select(preset, pp);
@@ -298,6 +359,7 @@ uint8_t bootProbe(uint8_t preset, uint8_t displayMode, uint8_t defaultI2cPreset,
   for (size_t i = 0; i < nCands; i++) {
     BoardPins cp;
     if (!presetPins(cands[i], cp)) continue;
+    cp = gateTouchBus(cands[i], cp);
     if (hook) hook->select(cands[i], cp);
     const Info got = probe(cp, bus, each);
     if (hook) hook->release(cp);

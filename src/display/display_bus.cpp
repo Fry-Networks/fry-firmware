@@ -10,10 +10,11 @@ namespace fry_dispdev {
 
 DevPins devPinsFor(uint8_t preset) {
   DevPins d = {-1, -1, -1};
-  if (preset == fry::disp::PRESET_ESP32_CYD) {  // ESP32-2432S028R: XPT2046 on its own bus
-    d.xptClk = 25;
-    d.xptMosi = 32;
-    d.xptMiso = 39;
+  int clk = -1, mosi = -1, miso = -1;  // ESP32-2432S028R: XPT2046 on its own bus (CLK25 MOSI32 MISO39)
+  if (fry::disp::presetTouchBus(preset, &clk, &mosi, &miso)) {
+    d.xptClk = clk;
+    d.xptMosi = mosi;
+    d.xptMiso = miso;
   }
   return d;
 }
@@ -243,48 +244,80 @@ bool Bus::spiReadId(int cs, int dc, uint8_t cmd, uint8_t* buf, size_t n, bool du
   return true;
 }
 
-bool Bus::xpt2046Sample(int cs, uint16_t* x, uint16_t* y, uint16_t* z) {
-  const int clk = xpt_.xptClk >= 0 ? xpt_.xptClk : sck_;
-  const int mosi = xpt_.xptMosi >= 0 ? xpt_.xptMosi : mosi_;
-  const int miso = xpt_.xptMiso >= 0 ? xpt_.xptMiso : miso_;
-  if (clk < 0 || mosi < 0 || miso < 0 || cs < 0) return false;
-  pinMode(clk, OUTPUT);
-  pinMode(mosi, OUTPUT);
-  pinMode(miso, INPUT);
-  pinMode(cs, OUTPUT);
+namespace {
+// One XPT2046 conversion, 12-bit, bit-banged (mode 0, ~250 kHz): 8 control bits, one busy clock, 12 data bits, 3 tail clocks.
+// `pd` bits stay in the control byte; the internal reference must be on (PD1=1) for the TEMP / VBAT / AUX channels.
+uint16_t xptConv(int clk, int mosi, int miso, int cs, uint8_t ctl) {
+  digitalWrite(cs, LOW);
+  sendBits(clk, mosi, ctl, 8);
+  digitalWrite(clk, HIGH);
+  half();
   digitalWrite(clk, LOW);
-  auto conv = [&](uint8_t ctl) -> uint16_t {
-    digitalWrite(cs, LOW);
-    sendBits(clk, mosi, ctl, 8);
-    // one busy clock, then 12 data bits MSB first
+  half();
+  uint16_t v = 0;
+  for (int i = 0; i < 12; i++) {
+    digitalWrite(clk, HIGH);
+    half();
+    v = (uint16_t)((v << 1) | (digitalRead(miso) ? 1 : 0));
+    digitalWrite(clk, LOW);
+    half();
+  }
+  for (int i = 0; i < 3; i++) {
     digitalWrite(clk, HIGH);
     half();
     digitalWrite(clk, LOW);
     half();
-    uint16_t v = 0;
-    for (int i = 0; i < 12; i++) {
-      digitalWrite(clk, HIGH);
-      half();
-      v = (uint16_t)((v << 1) | (digitalRead(miso) ? 1 : 0));
-      digitalWrite(clk, LOW);
-      half();
-    }
-    for (int i = 0; i < 3; i++) {  // flush the tail bits of the 16-clock frame
-      digitalWrite(clk, HIGH);
-      half();
-      digitalWrite(clk, LOW);
-      half();
-    }
-    digitalWrite(cs, HIGH);
-    return v;
-  };
-  *x = conv(0xD1);
-  *y = conv(0x91);
-  const uint16_t z1 = conv(0xB1), z2 = conv(0xC1);
+  }
+  digitalWrite(cs, HIGH);
+  return v;
+}
+}  // namespace
+
+bool Bus::xpt2046Pins(int cs, int* clk, int* mosi, int* miso) const {
+  *clk = xpt_.xptClk >= 0 ? xpt_.xptClk : sck_;
+  *mosi = xpt_.xptMosi >= 0 ? xpt_.xptMosi : mosi_;
+  *miso = xpt_.xptMiso >= 0 ? xpt_.xptMiso : miso_;
+  return *clk >= 0 && *mosi >= 0 && *miso >= 0 && cs >= 0;
+}
+
+bool Bus::xpt2046Sample(int cs, uint16_t* x, uint16_t* y, uint16_t* z) {
+  int clk, mosi, miso;
+  if (!xpt2046Pins(cs, &clk, &mosi, &miso)) return false;
+  pinMode(clk, OUTPUT);
+  pinMode(mosi, OUTPUT);
+  pinMode(miso, INPUT);  // GPIO36/39 are input-only with no internal pull: INPUT is all there is
+  pinMode(cs, OUTPUT);
+  digitalWrite(cs, HIGH);
+  digitalWrite(clk, LOW);
+  *x = xptConv(clk, mosi, miso, cs, 0xD1);
+  *y = xptConv(clk, mosi, miso, cs, 0x91);
+  const uint16_t z1 = xptConv(clk, mosi, miso, cs, 0xB1), z2 = xptConv(clk, mosi, miso, cs, 0xC1);
   const int32_t zz = (int32_t)z1 + 4095 - (int32_t)z2;
   *z = (uint16_t)(zz < 0 ? 0 : (zz > 4095 ? 4095 : zz));
-  conv(0x00);  // power-down command so the next PENIRQ cycle starts clean
+  xptConv(clk, mosi, miso, cs, 0x00);  // power-down command so the next PENIRQ cycle starts clean
   return true;
+}
+
+int Bus::xpt2046Channels(int cs, uint16_t out[6]) {
+  int clk, mosi, miso;
+  if (!xpt2046Pins(cs, &clk, &mosi, &miso)) return 0;
+  pinMode(clk, OUTPUT);
+  pinMode(mosi, OUTPUT);
+  pinMode(miso, INPUT);
+  pinMode(cs, OUTPUT);
+  digitalWrite(cs, HIGH);
+  digitalWrite(clk, LOW);
+  // Single-ended, 12-bit, reference + ADC on (PD=11): TEMP0 0x87, VBAT 0xA7, AUX 0xE7. The first conversion after the reference is
+  // switched on is discarded (settling), then TEMP0 is read twice.
+  xptConv(clk, mosi, miso, cs, 0x87);
+  out[0] = xptConv(clk, mosi, miso, cs, 0x87);
+  out[1] = xptConv(clk, mosi, miso, cs, 0x87);
+  out[2] = xptConv(clk, mosi, miso, cs, 0xA7);
+  out[3] = xptConv(clk, mosi, miso, cs, 0xE7);
+  out[4] = xptConv(clk, mosi, miso, cs, 0xB1);  // Z1
+  out[5] = xptConv(clk, mosi, miso, cs, 0xC1);  // Z2
+  xptConv(clk, mosi, miso, cs, 0x00);           // power down
+  return 1;
 }
 
 void Bus::release(const fry::disp::BoardPins& p) {

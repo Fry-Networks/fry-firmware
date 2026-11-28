@@ -17,6 +17,17 @@ enum class Panel : uint8_t {
 
 enum class Touch : uint8_t { None, XPT2046, CST816S, FT6236, GT911 };
 
+// Raw bytes the probe saw, kept only so the boot log can show them ("[ui] probe raw ...").
+struct ProbeRaw {
+  uint8_t d3Up[6], d3Dn[6];    // RDID4 (0xD3) under MISO pull-up / pull-down; byte 0 is the first byte after the dummy clock
+  uint8_t id04Up[6], id04Dn[6];  // RDDID (0x04), same layout
+  uint8_t nD3, n04;            // bytes captured (0 = that read was not made)
+  int8_t d3Bit, id04Bit;       // bit offset where the ID pattern matched (-1 = none)
+  uint16_t xpt[6];             // XPT2046: temp0, temp0 again, vbat, aux, z1, z2 (12-bit)
+  uint8_t nXpt;                // 0 = not read, 6 = channel read, 3 = legacy x/y/z sample
+  int8_t xptVerdict;           // -1 not judged, 0 rejected, 1 accepted
+};
+
 struct Info {
   Mode mode;
   Panel panel;
@@ -26,6 +37,7 @@ struct Info {
   uint8_t i2cAddr;
   uint8_t touchAddr;
   uint32_t panelId;
+  ProbeRaw raw;
 };
 
 struct BusOps {  // injectable; native tests mock it
@@ -36,6 +48,9 @@ struct BusOps {  // injectable; native tests mock it
   virtual bool spiReadId(int cs, int dc, uint8_t cmd, uint8_t* buf, size_t n, bool dummyBit) = 0;
   virtual void setMisoPull(int miso, int pull /* -1 down, 0 none, +1 up */) = 0;
   virtual bool xpt2046Sample(int cs, uint16_t* x, uint16_t* y, uint16_t* z) = 0;
+  // XPT2046 on a bus whose MISO has no pull (CYD GPIO39): out = temp0, temp0 again, vbat, aux, z1, z2 (12-bit each).
+  // Returns -1 = not supported (the probe falls back to xpt2046Sample), 0 = read failed, 1 = ok.
+  virtual int xpt2046Channels(int cs, uint16_t out[6]) { (void)cs; (void)out; return -1; }
   virtual ~BusOps() {}
 };
 

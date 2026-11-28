@@ -373,6 +373,11 @@ extern "C" void fry_ui_setup(void) {
   FRY_PRINTF("[ui] probe preset=%s panel=%s id=0x%06X touch=%s taddr=0x%02X ms=%u\n", disp::presetName(preset),
              disp::panelName(probed.panel), (unsigned)(probed.panelId & 0xFFFFFFu), disp::touchName(probed.touch),
              (unsigned)probed.touchAddr, (unsigned)(millis() - t0));
+  if (probed.raw.nD3 || probed.raw.n04 || probed.raw.nXpt) {  // raw probe bytes, so a failed detection can be diagnosed from serial alone
+    char rawLine[160];
+    disp::formatProbeRaw(rawLine, sizeof(rawLine), probed);
+    FRY_PRINTF("%s\n", rawLine);
+  }
 
   const disp::Info res = disp::resolve(probed, (uint8_t)prefs.mode, preset);
   if (!havePins) {

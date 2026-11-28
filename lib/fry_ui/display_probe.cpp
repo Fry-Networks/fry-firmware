@@ -7,6 +7,10 @@
 //  - A floating or stuck line never counts as a device: SPI ID reads are taken with MISO pulled up and
 //    pulled down (a driven line returns the same bytes both times) and all-0x00 / all-0xFF is rejected;
 //    I2C register values of 0x00 / 0xFF are rejected; a bus that ACKs the reserved address 0x7E is stuck.
+//  - ILI9341 RDID4 (0xD3) is 'dummy clock, [dummy byte], 0x00 0x93 0x41' and RDDID (0x04) is all zero on many modules, so the ID is
+//    searched at any bit offset of a 6-byte read and must be found under BOTH MISO pulls (a floating line follows the pull and can
+//    never contain the pattern under both). The XPT2046 (CYD GPIO39 has no internal pull) is judged by its temperature channel:
+//    mid-range, two reads agreeing, not every channel identical.
 #include <string.h>
 
 #include "display_presets.h"
@@ -126,40 +130,115 @@ bool allSame(const uint8_t* b, size_t n, uint8_t v) {
   return true;
 }
 
-// Anti-floating-MISO ID read: identical bytes under pull-up and pull-down, never all 0x00 / 0xFF.
-bool readIdGuarded(Ctx& c, uint8_t cmd, uint8_t out[3]) {
-  uint8_t up[3] = {0, 0, 0}, dn[3] = {0, 0, 0};
+const size_t kIdRead = 6;
+
+// 24 bits of `raw` starting at bit `off` (MSB first).
+uint32_t bits24(const uint8_t* raw, size_t n, int off) {
+  uint32_t v = 0;
+  for (int i = 0; i < 24; i++) {
+    const int bit = off + i;
+    const size_t by = (size_t)(bit >> 3);
+    const uint8_t b = by < n ? (uint8_t)((raw[by] >> (7 - (bit & 7))) & 1) : 0;
+    v = (v << 1) | b;
+  }
+  return v;
+}
+
+// Bit offset of the first occurrence of the 3-byte pattern (a,b,c) in raw[0..n), or -1. Offsets cover a dummy clock and a dummy byte.
+int findId(const uint8_t* raw, size_t n, uint8_t a, uint8_t b, uint8_t c) {
+  const uint32_t want = ((uint32_t)a << 16) | ((uint32_t)b << 8) | c;
+  const int last = (int)(n * 8) - 24;
+  for (int off = 0; off <= last; off++)
+    if (bits24(raw, n, off) == want) return off;
+  return -1;
+}
+
+// One ID command read twice, MISO pulled up then pulled down. Both raw reads are returned.
+bool readIdPulled(Ctx& c, uint8_t cmd, uint8_t* up, uint8_t* dn) {
+  memset(up, 0, kIdRead);
+  memset(dn, 0, kIdRead);
   bool ok1 = false, ok2 = false;
   if (c.ok()) {
     c.bus.setMisoPull(c.pins.spiMiso, +1);
     c.charge(kSpiOpUs);
-    ok1 = c.bus.spiReadId(c.pins.tftCs, c.pins.tftDc, cmd, up, 3, true);
+    ok1 = c.bus.spiReadId(c.pins.tftCs, c.pins.tftDc, cmd, up, kIdRead, true);
   }
   if (c.ok() || ok1) {
     c.bus.setMisoPull(c.pins.spiMiso, -1);
     c.charge(kSpiOpUs);
-    ok2 = c.bus.spiReadId(c.pins.tftCs, c.pins.tftDc, cmd, dn, 3, true);
+    ok2 = c.bus.spiReadId(c.pins.tftCs, c.pins.tftDc, cmd, dn, kIdRead, true);
   }
   c.bus.setMisoPull(c.pins.spiMiso, 0);
-  if (!ok1 || !ok2) return false;
-  if (memcmp(up, dn, 3) != 0) return false;  // line followed the pull: floating
-  if (allSame(up, 3, 0x00) || allSame(up, 3, 0xFF)) return false;
-  memcpy(out, up, 3);
+  return ok1 && ok2;
+}
+
+// The 3-byte ID (a,b,c) is present in both pulled reads. A line that only follows its pull never matches.
+bool idPresent(const uint8_t* up, const uint8_t* dn, uint8_t a, uint8_t b, uint8_t c, int8_t* bitOut) {
+  const int o1 = findId(up, kIdRead, a, b, c);
+  const int o2 = findId(dn, kIdRead, a, b, c);
+  if (o1 < 0 || o2 < 0) return false;
+  *bitOut = (int8_t)o1;
   return true;
 }
 
-bool xptPlausible(Ctx& c) {
+// Legacy anti-floating rule on the first three bytes (identical under both pulls, never all 0x00 / 0xFF).
+bool stableFirst3(const uint8_t* up, const uint8_t* dn) {
+  if (memcmp(up, dn, 3) != 0) return false;
+  return !allSame(up, 3, 0x00) && !allSame(up, 3, 0xFF);
+}
+
+// XPT2046 aux channels: the die temperature (TEMP0, ~590 mV at 25 C = mid-range) is read twice; a driven converter gives a
+// non-saturated value that repeats, a floating MISO gives 0 / 4095 / noise. All six channels equal is a stuck or floating line.
+bool xptChannelsPlausible(const uint16_t ch[6]) {
+  for (int i = 0; i < 6; i++)
+    if (ch[i] > 0xFFF) return false;
+  const uint16_t t1 = ch[0], t2 = ch[1];
+  if (t1 < 300 || t1 > 2400 || t2 < 300 || t2 > 2400) return false;
+  const int d = (int)t1 - (int)t2;
+  if (d > 48 || d < -48) return false;
+  bool allEq = true;
+  for (int i = 1; i < 6; i++)
+    if (ch[i] != ch[0]) allEq = false;
+  return !allEq;
+}
+
+bool xptLegacyPlausible(Ctx& c, ProbeRaw& raw) {
   uint16_t x = 0, y = 0, z = 0;
   bool anyNonZero = false, anyNotFull = false;
   for (int k = 0; k < 3; k++) {
     if (!c.ok()) return false;
     c.charge(kSpiOpUs);
     if (!c.bus.xpt2046Sample(c.pins.touchCs, &x, &y, &z)) return false;
+    raw.nXpt = 3;
+    raw.xpt[0] = x;
+    raw.xpt[1] = y;
+    raw.xpt[2] = z;
     if (x > 0xFFF || y > 0xFFF || z > 0xFFF) return false;  // not a 12-bit converter result
     if (x || y || z) anyNonZero = true;
     if (x != 0xFFF || y != 0xFFF || z != 0xFFF) anyNotFull = true;
   }
   return anyNonZero && anyNotFull;
+}
+
+bool xptPlausible(Ctx& c, ProbeRaw& raw) {
+  if (!c.ok()) return false;
+  uint16_t ch[6] = {0, 0, 0, 0, 0, 0};
+  c.charge(kSpiOpUs);
+  const int r = c.bus.xpt2046Channels(c.pins.touchCs, ch);
+  if (r < 0) return xptLegacyPlausible(c, raw);  // bus has no channel read: x/y/z sample rule
+  raw.nXpt = 6;
+  for (int i = 0; i < 6; i++) raw.xpt[i] = ch[i];
+  if (r == 0) return false;
+  if (!xptChannelsPlausible(ch)) return false;
+  // Two full reads must both be plausible and agree on the die temperature: noise on a floating MISO cannot do that.
+  const uint16_t t = ch[0];
+  if (!c.ok()) return false;
+  c.charge(kSpiOpUs);
+  if (c.bus.xpt2046Channels(c.pins.touchCs, ch) != 1) return false;
+  for (int i = 0; i < 6; i++) raw.xpt[i] = ch[i];
+  if (!xptChannelsPlausible(ch)) return false;
+  const int d = (int)ch[0] - (int)t;
+  return d <= 48 && d >= -48;
 }
 
 Info blank() {
@@ -168,6 +247,8 @@ Info blank() {
   i.mode = FRY_DISP_NONE;
   i.panel = Panel::None;
   i.touch = Touch::None;
+  i.raw.d3Bit = i.raw.id04Bit = -1;
+  i.raw.xptVerdict = -1;
   return i;
 }
 
@@ -197,25 +278,38 @@ Info probe(const BoardPins& pins, BusOps& bus, uint32_t budgetMs) {
   if (r.panel == Panel::None && pins.spiSck >= 0 && pins.spiMiso >= 0 && pins.tftCs >= 0 && pins.tftDc >= 0) {
     const int bp[7] = {pins.spiSck, pins.spiMosi, pins.spiMiso, pins.tftCs, pins.tftDc, pins.tftRst, pins.tftBl};
     if (allPinsAllowed(pins, bp, 7) && c.ok()) {
-      uint8_t id[3];
-      if (readIdGuarded(c, 0xD3, id) && id[1] == 0x93 && id[2] == 0x41) {
-        r.panel = Panel::ILI9341_240x320;
-        r.width = 240;
-        r.height = 320;
-        r.panelId = ((uint32_t)id[0] << 16) | ((uint32_t)id[1] << 8) | id[2];
-      } else if (readIdGuarded(c, 0x04, id)) {
-        r.panelId = ((uint32_t)id[0] << 16) | ((uint32_t)id[1] << 8) | id[2];
-        if (id[0] == 0x85 && id[1] == 0x85 && id[2] == 0x52) {
-          r.panel = Panel::ST7789_240x240;
-          r.width = r.height = 240;
-        } else if (id[0] == 0x7C && id[1] == 0x89 && id[2] == 0xF0) {
-          r.panel = Panel::ST7735_128x160;
-          r.width = 128;
-          r.height = 160;
-        } else if (id[0] == 0x00 && id[1] == 0x93 && id[2] == 0x41) {
+      ProbeRaw& rw = r.raw;
+      uint8_t* up = rw.d3Up;
+      uint8_t* dn = rw.d3Dn;
+      bool matched = false;
+      if (readIdPulled(c, 0xD3, up, dn)) {
+        rw.nD3 = (uint8_t)kIdRead;
+        if (idPresent(up, dn, 0x00, 0x93, 0x41, &rw.d3Bit)) {
           r.panel = Panel::ILI9341_240x320;
           r.width = 240;
           r.height = 320;
+          r.panelId = 0x009341u;
+          matched = true;
+        }
+      }
+      if (!matched && c.ok() && readIdPulled(c, 0x04, rw.id04Up, rw.id04Dn)) {
+        rw.n04 = (uint8_t)kIdRead;
+        if (idPresent(rw.id04Up, rw.id04Dn, 0x85, 0x85, 0x52, &rw.id04Bit)) {
+          r.panel = Panel::ST7789_240x240;
+          r.width = r.height = 240;
+          r.panelId = 0x858552u;
+        } else if (idPresent(rw.id04Up, rw.id04Dn, 0x7C, 0x89, 0xF0, &rw.id04Bit)) {
+          r.panel = Panel::ST7735_128x160;
+          r.width = 128;
+          r.height = 160;
+          r.panelId = 0x7C89F0u;
+        } else if (idPresent(rw.id04Up, rw.id04Dn, 0x00, 0x93, 0x41, &rw.id04Bit)) {
+          r.panel = Panel::ILI9341_240x320;
+          r.width = 240;
+          r.height = 320;
+          r.panelId = 0x009341u;
+        } else if (stableFirst3(rw.id04Up, rw.id04Dn)) {
+          r.panelId = ((uint32_t)rw.id04Up[0] << 16) | ((uint32_t)rw.id04Up[1] << 8) | rw.id04Up[2];  // unknown, kept for the log
         }
       }
     }
@@ -238,7 +332,13 @@ Info probe(const BoardPins& pins, BusOps& bus, uint32_t budgetMs) {
     }
     if (r.touch == Touch::None && pins.touchCs >= 0 && pins.spiSck >= 0 && pins.spiMiso >= 0) {
       const int xp[4] = {pins.spiSck, pins.spiMosi, pins.spiMiso, pins.touchCs};
-      if (allPinsAllowed(pins, xp, 4) && xptPlausible(c)) r.touch = Touch::XPT2046;
+      if (allPinsAllowed(pins, xp, 4)) {
+        r.raw.xptVerdict = 0;
+        if (xptPlausible(c, r.raw)) {
+          r.touch = Touch::XPT2046;
+          r.raw.xptVerdict = 1;
+        }
+      }
     }
     r.mode = r.touch != Touch::None ? FRY_DISP_TOUCHSCREEN : FRY_DISP_SCREEN_ONLY;
   } else {

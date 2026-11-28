@@ -30,11 +30,13 @@ class Bus : public fry::disp::BusOps {
   bool spiReadId(int cs, int dc, uint8_t cmd, uint8_t* buf, size_t n, bool dummyBit) override;
   void setMisoPull(int miso, int pull) override;
   bool xpt2046Sample(int cs, uint16_t* x, uint16_t* y, uint16_t* z) override;
+  int xpt2046Channels(int cs, uint16_t out[6]) override;
   // Return every probed pin to a high-impedance input so the real driver can claim it.
   void release(const fry::disp::BoardPins& p);
 
  private:
   int sda_ = -1, scl_ = -1, sck_ = -1, mosi_ = -1, miso_ = -1;
+  bool xpt2046Pins(int cs, int* clk, int* mosi, int* miso) const;
   uint32_t hz_ = 100000;
   DevPins xpt_ = {-1, -1, -1};
 };
