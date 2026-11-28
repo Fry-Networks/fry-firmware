@@ -24,7 +24,8 @@ bool pinForbidden(const BoardPins& p, int pin) {
 
 bool pinsAllowed(const BoardPins& p) {
   const int all[] = {p.sda,   p.scl,      p.spiSck,  p.spiMosi,  p.spiMiso,  p.tftCs,    p.tftDc,
-                     p.tftRst, p.tftBl,   p.touchCs, p.touchIrq, p.touchSda, p.touchScl, p.touchRst};
+                     p.tftRst, p.tftBl,   p.touchCs, p.touchIrq, p.touchSda, p.touchScl, p.touchRst,
+                     p.touchSck, p.touchMosi, p.touchMiso};
   for (size_t i = 0; i < sizeof(all) / sizeof(all[0]); i++)
     if (pinForbidden(p, all[i])) return false;
   return true;
@@ -32,10 +33,14 @@ bool pinsAllowed(const BoardPins& p) {
 
 namespace {
 
+const int* gForbidOverride = nullptr;
+size_t gForbidOverrideN = 0;
+
 BoardPins blank() {
   BoardPins p;
   p.sda = p.scl = p.spiSck = p.spiMosi = p.spiMiso = p.tftCs = p.tftDc = p.tftRst = p.tftBl = -1;
   p.touchCs = p.touchIrq = p.touchSda = p.touchScl = p.touchRst = -1;
+  p.touchSck = p.touchMosi = p.touchMiso = -1;
   p.forbidden = nullptr;
   p.nForbidden = 0;
   return p;
@@ -51,6 +56,11 @@ Info blankInfo() {
 }
 
 }  // namespace
+
+void setForbiddenOverrideForTest(const int* list, size_t n) {
+  gForbidOverride = list;
+  gForbidOverrideN = list ? n : 0;
+}
 
 bool presetPins(uint8_t preset, BoardPins& out) {
   BoardPins p = blank();
@@ -94,6 +104,9 @@ bool presetPins(uint8_t preset, BoardPins& out) {
       p.tftBl = 21;
       p.touchCs = 33;
       p.touchIrq = 36;
+      p.touchSck = 25;
+      p.touchMosi = 32;
+      p.touchMiso = 39;
       p.forbidden = kEsp32Forbidden;
       p.nForbidden = kEsp32ForbiddenCount;
       break;
@@ -111,6 +124,10 @@ bool presetPins(uint8_t preset, BoardPins& out) {
       break;
     default:
       return false;
+  }
+  if (gForbidOverride) {
+    p.forbidden = gForbidOverride;
+    p.nForbidden = gForbidOverrideN;
   }
   out = p;
   return true;
@@ -165,12 +182,16 @@ bool presetTouchBus(uint8_t preset, int* clk, int* mosi, int* miso) {
 }
 
 BoardPins gateTouchBus(uint8_t preset, const BoardPins& p) {
+  (void)preset;
   BoardPins g = p;
-  int clk = -1, mosi = -1, miso = -1;
-  if (presetTouchBus(preset, &clk, &mosi, &miso) &&
-      (pinForbidden(p, clk) || pinForbidden(p, mosi) || pinForbidden(p, miso))) {
-    g.touchCs = -1;
-    g.touchIrq = -1;
+  // Every pin of the touch controller (its own bus CLK / MOSI / MISO, CS and IRQ) must be allowed, or none of it is ever driven.
+  const int tp[5] = {p.touchSck, p.touchMosi, p.touchMiso, p.touchCs, p.touchIrq};
+  for (size_t i = 0; i < 5; i++) {
+    if (pinForbidden(p, tp[i])) {
+      g.touchCs = g.touchIrq = -1;
+      g.touchSck = g.touchMosi = g.touchMiso = -1;
+      break;
+    }
   }
   return g;
 }

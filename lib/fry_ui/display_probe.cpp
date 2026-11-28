@@ -338,8 +338,9 @@ Info probe(const BoardPins& pins, BusOps& bus, uint32_t budgetMs) {
   // scope clears it, so no-preset boards drive nothing). Done even when the TFT id read failed so the touch bus is diagnosable and the
   // controller is confirmed on its own; the mode still needs a panel.
   if (pins.touchCs >= 0 && pins.spiSck >= 0 && pins.spiMiso >= 0 && !(pins.touchSda >= 0 && pins.touchScl >= 0)) {
-    const int xp[4] = {pins.spiSck, pins.spiMosi, pins.spiMiso, pins.touchCs};
-    if (allPinsAllowed(pins, xp, 4)) {
+    // Every pin of the SPI bus AND of the touch controller (own CLK / MOSI / MISO, CS, IRQ) must be allowed before any touch SPI op.
+    const int xp[8] = {pins.spiSck, pins.spiMosi, pins.spiMiso, pins.touchCs, pins.touchIrq, pins.touchSck, pins.touchMosi, pins.touchMiso};
+    if (allPinsAllowed(pins, xp, 8)) {
       r.raw.xptVerdict = 0;
       if (xptPlausible(c, r.raw)) {
         r.touch = Touch::XPT2046;

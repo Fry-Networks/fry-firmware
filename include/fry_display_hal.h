@@ -58,6 +58,8 @@ struct BusOps {  // injectable; native tests mock it
 
 struct BoardPins {
   int sda, scl, spiSck, spiMosi, spiMiso, tftCs, tftDc, tftRst, tftBl, touchCs, touchIrq, touchSda, touchScl, touchRst;
+  // Separate XPT2046 bus (CYD: CLK25 MOSI32 MISO39); -1 = the touch controller shares the TFT SPI bus or is absent.
+  int touchSck = -1, touchMosi = -1, touchMiso = -1;
   const int* forbidden;  // probe must never drive a forbidden pin
   size_t nForbidden;
 };

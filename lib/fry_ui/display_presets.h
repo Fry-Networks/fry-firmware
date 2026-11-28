@@ -48,6 +48,9 @@ bool presetInfo(uint8_t preset, Info& out);       // the hardware the preset dec
 bool presetTouchBus(uint8_t preset, int* clk, int* mosi, int* miso);
 // `p` with touchCs cleared (so the touch controller is never driven) when a separate touch bus uses a forbidden pin.
 BoardPins gateTouchBus(uint8_t preset, const BoardPins& p);
+// Test seam only (never called by firmware): presetPins() uses this forbidden list instead of the preset's own (nullptr = off), so
+// native tests can run a preset's real wiring against another chip's forbidden pins.
+void setForbiddenOverrideForTest(const int* list, size_t n);
 const char* presetName(uint8_t preset);
 const char* modeName(Mode m);
 const char* panelName(Panel p);
