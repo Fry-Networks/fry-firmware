@@ -63,22 +63,23 @@ jobs:
           python-version: '3.11'
       - name: Install PlatformIO
         run: python3 -m pip install "platformio==${PLATFORMIO_VERSION}"
-      - name: Is the env defined on this branch?
-        id: guard
+      - name: pio test
         env:
           PIO_ENV: ${{ matrix.env }}
         run: |
-          if pio project config | grep -Fxq "[env:${PIO_ENV}]"; then
-            echo "present=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "present=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::env ${PIO_ENV} is not defined on this branch yet; skipping"
-          fi
-      - name: pio test
-        if: steps.guard.outputs.present == 'true'
+          set -eo pipefail
+          pio test -e "${PIO_ENV}" 2>&1 | tee "${RUNNER_TEMP}/pio-test.log"
+      - name: Assert tests really ran
         env:
           PIO_ENV: ${{ matrix.env }}
-        run: pio test -e "${PIO_ENV}"
+        run: |
+          set -eu
+          log="${RUNNER_TEMP}/pio-test.log"
+          if grep -qi 'skipping' "$log"; then echo "::error::pio test output mentions skipping"; exit 1; fi
+          if ! grep -Eq '[1-9][0-9]* test cases:.* [1-9][0-9]* succeeded' "$log"; then
+            echo "::error::no non-zero passed test count for ${PIO_ENV}"; exit 1
+          fi
+          if grep -Eq '[1-9][0-9]* failed' "$log"; then echo "::error::failures present"; exit 1; fi
 
   build:
     runs-on: ubuntu-latest
@@ -102,19 +103,16 @@ jobs:
           python-version: '3.11'
       - name: Install PlatformIO
         run: python3 -m pip install "platformio==${PLATFORMIO_VERSION}"
-      - name: Is the env defined on this branch?
-        id: guard
-        env:
-          PIO_ENV: ${{ matrix.env }}
-        run: |
-          if pio project config | grep -Fxq "[env:${PIO_ENV}]"; then
-            echo "present=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "present=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::env ${PIO_ENV} is not defined on this branch yet; skipping"
-          fi
       - name: Build
-        if: steps.guard.outputs.present == 'true'
         env:
           PIO_ENV: ${{ matrix.env }}
         run: pio run -e "${PIO_ENV}"
+      - name: Assert firmware was produced
+        env:
+          PIO_ENV: ${{ matrix.env }}
+        run: |
+          set -eu
+          if ! ls ".pio/build/${PIO_ENV}"/firmware.* >/dev/null 2>&1; then
+            echo "::error::no .pio/build/${PIO_ENV}/firmware.* after build"; exit 1
+          fi
+          ls -l ".pio/build/${PIO_ENV}"/firmware.*
