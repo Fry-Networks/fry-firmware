@@ -19,6 +19,7 @@
 #include "core/serial_commands.h"
 #include "core/trigger_hooks.h"
 #include "core/vpn_relay.h"
+#include "fry_touch_ui.h"
 #include "core/wifi_station.h"
 #if !defined(ARDUINO_ARCH_ESP8266)
 #include "wifi_retry.h"
@@ -255,11 +256,14 @@ void setup() {
   }
   setPhase(fry::initialBootPhase(hasCredentials && keyOk));
 
+  fry_ui_setup();
+
   FRY_PRINTLN("[boot] ready");
 }
 
 void loop() {
   fry_ota::loopGuard();  // every phase: a pending image that never reaches hardwareapi rolls back
+  fry_ui_loop();
 
 #ifdef FRY_SERIAL_PROVISION
   fry_serial_poll();

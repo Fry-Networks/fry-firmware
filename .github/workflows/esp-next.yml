@@ -1,0 +1,118 @@
+name: esp-next
+
+on:
+  pull_request:
+  push:
+    branches: ['feat/**']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  PLATFORMIO_VERSION: '6.1.16'
+
+# Action pins (full commit SHAs):
+#   actions/checkout@v4.2.2        11bd71901bbe5b1630ceea73d27597364c9af683
+#   actions/setup-python@v5.6.0    a26af69be951a213d495a4c3e4e4022e16d87065
+#   actions/upload-artifact@v4.6.2 ea165f8d65b6e75b540449e92b4886f43607fa02
+
+jobs:
+  flash-node-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Flasher node tests
+        run: node --test test/flash/*.test.mjs
+
+  tools-python-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.11'
+      - name: tools self-tests
+        run: |
+          set -e
+          for t in \
+            test_make_manifest_exclude.py \
+            test_make_manifest_envs.py \
+            test_manifest_esp8266_compat.py \
+            test_make_manifest_include_env.py \
+            test_release_fw_esp32s3.py \
+            test_check_no_token.py \
+            test_check_prod_channel.py \
+            test_check_no_token_unreadable_members.py \
+            test_check_no_token_tar_members.py; do
+            echo "::group::$t"
+            python3 "tools/$t"
+            echo "::endgroup::"
+          done
+
+  pio-native-tests:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        env: [native_boards, native_ui]
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.11'
+      - name: Install PlatformIO
+        run: python3 -m pip install "platformio==${PLATFORMIO_VERSION}"
+      - name: pio test
+        env:
+          PIO_ENV: ${{ matrix.env }}
+        run: |
+          set -eo pipefail
+          pio test -e "${PIO_ENV}" 2>&1 | tee "${RUNNER_TEMP}/pio-test.log"
+      - name: Assert tests really ran
+        env:
+          PIO_ENV: ${{ matrix.env }}
+        run: |
+          set -eu
+          log="${RUNNER_TEMP}/pio-test.log"
+          if grep -qi 'skipping' "$log"; then echo "::error::pio test output mentions skipping"; exit 1; fi
+          if ! grep -Eq '[1-9][0-9]* test cases:.* [1-9][0-9]* succeeded' "$log"; then
+            echo "::error::no non-zero passed test count for ${PIO_ENV}"; exit 1
+          fi
+          if grep -Eq '[1-9][0-9]* failed' "$log"; then echo "::error::failures present"; exit 1; fi
+
+  build:
+    runs-on: ubuntu-latest
+    continue-on-error: false
+    strategy:
+      fail-fast: false
+      matrix:
+        env:
+          - rpipicow
+          - rpipico2w
+          - bk7231n
+          - esp32-oled
+          - esp32s3-tft
+          - rpipicow-oled
+          - esp32-cyd-touch
+          - esp32s3-cap-touch
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.11'
+      - name: Install PlatformIO
+        run: python3 -m pip install "platformio==${PLATFORMIO_VERSION}"
+      - name: Build
+        env:
+          PIO_ENV: ${{ matrix.env }}
+        run: pio run -e "${PIO_ENV}"
+      - name: Assert firmware was produced
+        env:
+          PIO_ENV: ${{ matrix.env }}
+        run: |
+          set -eu
+          if ! ls ".pio/build/${PIO_ENV}"/firmware.* >/dev/null 2>&1; then
+            echo "::error::no .pio/build/${PIO_ENV}/firmware.* after build"; exit 1
+          fi
+          ls -l ".pio/build/${PIO_ENV}"/firmware.*

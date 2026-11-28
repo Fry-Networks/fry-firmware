@@ -65,12 +65,60 @@ for (const [description, expected] of TABLE) {
   });
 }
 
-test("every board label is an option the real Board menu offers", () => {
-  const html = readFileSync(path.resolve(here, "../../docs/flash/index.html"), "utf8");
-  const optionLabels = [...html.matchAll(/<option value="([^"]+)"[^>]*>([^<]+)<\/option>/g)].map((m) => [m[1], m[2]]);
-  for (const [key, label] of Object.entries(BOARD_LABELS)) {
-    assert.ok(optionLabels.some(([v, l]) => v === key && l === label), `menu lacks ${key}=${label}`);
+// Autodetect design (a453380): index.html has no hand-picked Board menu any more. ESP Web Tools
+// reads the manifest and picks the build from the chip it detects, so these checks pin that
+// design instead of a menu.
+import { createHash } from "node:crypto";
+const flashDir = path.resolve(here, "../../docs/flash");
+const indexHtml = readFileSync(path.join(flashDir, "index.html"), "utf8");
+const manifest = JSON.parse(readFileSync(path.join(flashDir, "manifest.json"), "utf8"));
+const hold = JSON.parse(readFileSync(path.join(flashDir, "manifest-hold.json"), "utf8"));
+const sha256 = (rel) => createHash("sha256").update(readFileSync(path.join(flashDir, rel))).digest("hex");
+
+test("the page has no hand-picked Board menu (autodetect only)", () => {
+  assert.ok(!/<select[\s>]/i.test(indexHtml), "a <select> menu is back");
+  assert.ok(!/<option[\s>]/i.test(indexHtml), "an <option> menu entry is back");
+});
+
+test("the page installs from manifest.json and from manifest-hold.json, self-hosted", () => {
+  const manifests = [...indexHtml.matchAll(/<esp-web-install-button[^>]*manifest="([^"]+)"/g)].map((m) => m[1]);
+  assert.ok(manifests.includes("manifest.json"), manifests.join());
+  assert.ok(manifests.includes("manifest-hold.json"), manifests.join());
+  assert.ok(/<script type="module" src="vendor\/esp-web-tools-[0-9.]+\/install-button\.js">/.test(indexHtml));
+  assert.ok(!/<script[^>]+src="https?:/i.test(indexHtml), "flashing code must not come from a CDN");
+});
+
+test("every board label is a chipFamily the manifest builds, and vice versa", () => {
+  const families = manifest.builds.map((b) => b.chipFamily).sort();
+  assert.deepEqual(families, Object.values(BOARD_LABELS).sort());
+});
+
+test("every manifest build chipFamily is reached by the autodetect mapping", () => {
+  const reached = new Set(TABLE.map(([d]) => boardForChipDescription(d)).filter(Boolean));
+  for (const build of manifest.builds) {
+    const key = Object.entries(BOARD_LABELS).find(([, label]) => label === build.chipFamily)?.[0];
+    assert.ok(key, `no board key for chipFamily ${build.chipFamily}`);
+    assert.ok(reached.has(key), `autodetect never yields ${key} for ${build.chipFamily}`);
   }
+  for (const key of Object.keys(BOARD_LABELS)) {
+    assert.ok(reached.has(key), `${key} unreachable from any chip description`);
+  }
+});
+
+test("ESP8266 is served by manifest-hold.json with intact, checksummed parts", () => {
+  assert.equal(hold.builds.length, 1);
+  const [build] = hold.builds;
+  assert.equal(build.chipFamily, BOARD_LABELS.esp8266);
+  assert.ok(build.parts.length >= 1);
+  for (const part of build.parts) {
+    assert.match(part.path, /^fw\/hold\/[^/]+\.bin$/);
+    assert.ok(Number.isInteger(part.offset) && part.offset >= 0);
+    assert.equal(sha256(part.path), part.sha256, `sha256 mismatch for ${part.path}`);
+  }
+  const main = manifest.builds.find((b) => b.chipFamily === "ESP8266");
+  assert.deepEqual(main.parts.map((p) => [p.path, p.offset, p.sha256]),
+    build.parts.map((p) => [p.path, p.offset, p.sha256]),
+    "manifest.json must list the same ESP8266 parts as the hold manifest");
 });
 
 test("the mismatch message tells the user to pick a label that exists in the menu", () => {

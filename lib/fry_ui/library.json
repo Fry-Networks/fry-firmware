@@ -1,0 +1,5 @@
+{
+  "name": "fry_ui",
+  "version": "0.1.0",
+  "description": "Pure C++ display / touch UI for FRY miners (screen animator, touch setup UI, display probe). Needs ricmoo/QRCode@0.0.1 from the env's lib_deps."
+}
